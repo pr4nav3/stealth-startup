@@ -1,0 +1,12 @@
+runs/
+reference/
+.venv/
+model_cache/
+onnx_models/
+__pycache__/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.opus

@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "description": "Supervisor V1 fixed phrase bank for the CPU voice bakeoff.",
+  "phrases": [
+    {
+      "id": "gentle_deep_breath",
+      "tone": "gentle",
+      "text": "Deep breath. Back to the thing."
+    },
+    {
+      "id": "gentle_drifted_a_little",
+      "tone": "gentle",
+      "text": "You drifted a little. Come back."
+    },
+    {
+      "id": "gentle_one_next_action",
+      "tone": "gentle",
+      "text": "One next action. That is all."
+    },
+    {
+      "id": "gentle_soft_reset",
+      "tone": "gentle",
+      "text": "Soft reset. Look at the task again."
+    },
+    {
+      "id": "gentle_back_to_plan",
+      "tone": "gentle",
+      "text": "No hurry. Just back to the plan."
+    },
+    {
+      "id": "mom_beta_focus",
+      "tone": "mom",
+      "text": "Beta, focus. You opened this for what?"
+    },
+    {
+      "id": "mom_enough_scrolling",
+      "tone": "mom",
+      "text": "Enough scrolling. Finish the thing first."
+    },
+    {
+      "id": "mom_wander_later",
+      "tone": "mom",
+      "text": "You can wander later. Work now."
+    },
+    {
+      "id": "mom_arre_come_back",
+      "tone": "mom",
+      "text": "Arre, come back. One tab, one task."
+    },
+    {
+      "id": "mom_what_was_the_goal",
+      "tone": "mom",
+      "text": "What was the goal? Say it, then do it."
+    },
+    {
+      "id": "stern_not_the_task",
+      "tone": "stern",
+      "text": "This is not the task."
+    },
+    {
+      "id": "stern_close_it",
+      "tone": "stern",
+      "text": "Close it and return."
+    },
+    {
+      "id": "stern_you_said_it_mattered",
+      "tone": "stern",
+      "text": "You said this mattered. Act like it."
+    },
+    {
+      "id": "stern_decide_now",
+      "tone": "stern",
+      "text": "Decide now. Work or stop pretending."
+    },
+    {
+      "id": "stern_back_to_work",
+      "tone": "stern",
+      "text": "Back to work. No more bargaining."
+    },
+    {
+      "id": "kind_reset_pause_inhale",
+      "tone": "kind-reset",
+      "text": "Pause. Inhale. Now back to the file."
+    },
+    {
+      "id": "kind_reset_no_drama",
+      "tone": "kind-reset",
+      "text": "No drama. Just return."
+    },
+    {
+      "id": "kind_reset_not_failing",
+      "tone": "kind-reset",
+      "text": "You are not failing. You are drifting. Come back."
+    },
+    {
+      "id": "kind_reset_small_next_step",
+      "tone": "kind-reset",
+      "text": "Small next step. That is enough."
+    },
+    {
+      "id": "kind_reset_begin_again",
+      "tone": "kind-reset",
+      "text": "Begin again. The work is still here."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:ui": "vite build",
+    "check": "tsc --noEmit && vite build",
+    "dev:ui": "vite --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5",
+    "vite": "^7"
+  }
+}
+

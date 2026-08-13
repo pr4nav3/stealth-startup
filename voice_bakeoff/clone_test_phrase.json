@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "description": "Single Supervisor voice clone test phrase.",
+  "phrases": [
+    {
+      "id": "focus_tab_switching_lock_in",
+      "tone": "mom-stern-reset",
+      "text": "Focus! I see you tab-switching.\n\nLeave everything else aside for a while, and take a few deep breaths. Center yourself.\n\nI need you to lock in.\n\nHow dare you get distracted! Focus, you got this."
+    }
+  ]
+}

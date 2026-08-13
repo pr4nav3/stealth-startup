@@ -1,0 +1,498 @@
+mod activity;
+mod focus;
+mod session;
+
+use activity::ActivitySample;
+use focus::{FocusEngine, FocusSnapshot};
+use session::{
+    SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
+    StartSessionInput, SupervisorIdentity,
+};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
+};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+const MAIN_WINDOW_LABEL: &str = "main";
+const OVERLAY_WINDOW_LABEL: &str = "overlay";
+const OVERLAY_WIDTH: f64 = 312.0;
+const OVERLAY_HEIGHT: f64 = 286.0;
+const OVERLAY_MARGIN: i32 = 18;
+
+struct AppState {
+    focus_engine: Mutex<FocusEngine>,
+    sessions: Mutex<SessionManager>,
+    started_at: Instant,
+    identity: SupervisorIdentity,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            focus_engine: Mutex::new(FocusEngine::default()),
+            sessions: Mutex::new(SessionManager::default()),
+            started_at: Instant::now(),
+            identity: supervisor_identity(),
+        }
+    }
+}
+
+#[tauri::command]
+fn get_activity_sample() -> Result<ActivitySample, String> {
+    activity::current_activity_sample()
+}
+
+#[tauri::command]
+fn get_focus_snapshot(state: State<'_, AppState>) -> Result<FocusSnapshot, String> {
+    let sample = activity::current_activity_sample()?;
+    let mut engine = state
+        .focus_engine
+        .lock()
+        .map_err(|_| "focus engine unavailable".to_string())?;
+
+    Ok(engine.record_sample(&sample, state.started_at.elapsed()))
+}
+
+#[tauri::command]
+fn start_session(
+    input: StartSessionInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+
+    sessions.start(input, now, utc_now()?);
+    let should_show_status = sessions.status_window_enabled();
+    let snapshot = sessions.snapshot(now);
+    drop(sessions);
+
+    if should_show_status {
+        show_status_window_internal(&app)?;
+    } else {
+        hide_status_window(&app);
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    Ok(lock_sessions(&state)?.snapshot(now))
+}
+
+#[tauri::command]
+fn pause_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+
+    Ok(sessions.pause(now))
+}
+
+#[tauri::command]
+fn resume_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+
+    Ok(sessions.resume(now))
+}
+
+#[tauri::command]
+fn snooze_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+
+    Ok(sessions.snooze(now, 5 * 60))
+}
+
+#[tauri::command]
+fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+    let snapshot = sessions.stop(now);
+    drop(sessions);
+
+    hide_status_window(&app);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn mark_current_relevant(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+
+    Ok(sessions.mark_current(focus::RuleClassification::Focused, now))
+}
+
+#[tauri::command]
+fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+
+    Ok(sessions.mark_current(focus::RuleClassification::Distracting, now))
+}
+
+#[tauri::command]
+fn get_history(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
+    Ok(lock_sessions(&state)?.history())
+}
+
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Result<SessionSettings, String> {
+    Ok(lock_sessions(&state)?.settings())
+}
+
+#[tauri::command]
+fn update_settings(
+    update: SettingsUpdate,
+    state: State<'_, AppState>,
+) -> Result<SessionSettings, String> {
+    Ok(lock_sessions(&state)?.update_settings(update))
+}
+
+#[tauri::command]
+fn show_status_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+    let snapshot = sessions.set_status_window_enabled(true, now);
+    drop(sessions);
+
+    show_status_window_internal(&app)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_status_window_enabled(
+    enabled: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+    let snapshot = sessions.set_status_window_enabled(enabled, now);
+    let should_show_status = enabled && snapshot.current.is_some();
+    drop(sessions);
+
+    if should_show_status {
+        show_status_window_internal(&app)?;
+    } else {
+        hide_status_window(&app);
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_status_window_on_top(
+    enabled: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+    let snapshot = sessions.set_status_window_on_top(enabled, now);
+    drop(sessions);
+
+    set_status_window_on_top_internal(&app, enabled)?;
+    if enabled {
+        show_status_window_internal(&app)?;
+    }
+    Ok(snapshot)
+}
+
+fn lock_sessions<'a>(
+    state: &'a State<'_, AppState>,
+) -> Result<std::sync::MutexGuard<'a, SessionManager>, String> {
+    state
+        .sessions
+        .lock()
+        .map_err(|_| "session manager unavailable".to_string())
+}
+
+fn utc_now() -> Result<String, String> {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| error.to_string())
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .manage(AppState::default())
+        .setup(|app| {
+            setup_status_window(app)?;
+            setup_tray(app)?;
+            start_session_ticker(app.handle().clone());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_activity_sample,
+            get_focus_snapshot,
+            start_session,
+            get_session_snapshot,
+            pause_session,
+            resume_session,
+            snooze_session,
+            stop_session,
+            mark_current_relevant,
+            mark_current_distracting,
+            get_history,
+            get_settings,
+            update_settings,
+            show_status_window,
+            set_status_window_enabled,
+            set_status_window_on_top
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run Supervisor");
+}
+
+fn setup_status_window(app: &mut tauri::App) -> tauri::Result<()> {
+    WebviewWindowBuilder::new(
+        app,
+        OVERLAY_WINDOW_LABEL,
+        WebviewUrl::App("index.html?view=overlay".into()),
+    )
+    .title("Supervisor Status")
+    .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(true)
+    .closable(false)
+    .decorations(true)
+    .always_on_top(true)
+    .skip_taskbar(false)
+    .focused(false)
+    .visible(false)
+    .build()?;
+
+    Ok(())
+}
+
+fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show Supervisor", true, None::<&str>)?;
+    let show_status =
+        MenuItem::with_id(app, "show_status", "Show Status Window", true, None::<&str>)?;
+    let pin_status = MenuItem::with_id(app, "pin_status", "Pin Status Window", true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause_resume", "Pause/Resume", true, None::<&str>)?;
+    let snooze = MenuItem::with_id(app, "snooze", "Snooze 5 min", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "Stop Session", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show,
+            &show_status,
+            &pin_status,
+            &pause,
+            &snooze,
+            &stop,
+            &quit,
+        ],
+    )?;
+
+    let mut builder = TrayIconBuilder::new()
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main_window(app),
+            "show_status" => {
+                with_sessions(app, |sessions, now| {
+                    sessions.set_status_window_enabled(true, now);
+                });
+                let _ = show_status_window_internal(app);
+            }
+            "pin_status" => {
+                with_sessions(app, |sessions, _now| {
+                    sessions.set_status_window_enabled(true, _now);
+                    sessions.set_status_window_on_top(true, _now);
+                });
+                let _ = set_status_window_on_top_internal(app, true);
+                let _ = show_status_window_internal(app);
+            }
+            "pause_resume" => with_sessions(app, |sessions, now| sessions.toggle_pause(now)),
+            "snooze" => with_sessions(app, |sessions, now| {
+                sessions.snooze(now, 5 * 60);
+            }),
+            "stop" => with_sessions(app, |sessions, now| {
+                sessions.stop(now);
+                hide_status_window(app);
+            }),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+
+    builder.build(app)?;
+    Ok(())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn show_status_window_internal(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+        let pin = app
+            .state::<AppState>()
+            .sessions
+            .lock()
+            .map(|sessions| sessions.status_window_on_top())
+            .unwrap_or(true);
+        let _ = window.unminimize();
+        let _ = window.set_always_on_bottom(false);
+        window
+            .set_always_on_top(pin)
+            .map_err(|error| error.to_string())?;
+        position_status_window(app)?;
+        window.show().map_err(|error| error.to_string())?;
+        if !pin {
+            let _ = window.set_focus();
+        }
+    }
+    Ok(())
+}
+
+fn set_status_window_on_top_internal(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+        let _ = window.set_always_on_bottom(false);
+        if enabled {
+            window
+                .set_always_on_top(true)
+                .map_err(|error| error.to_string())?;
+        } else {
+            window
+                .set_always_on_top(false)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn hide_status_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+        let _ = window.hide();
+    }
+}
+
+fn position_status_window(app: &AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
+        return Ok(());
+    };
+    let monitor = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .and_then(|main| main.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return Ok(());
+    };
+    let area = monitor.work_area();
+    let scale = window
+        .scale_factor()
+        .unwrap_or_else(|_| monitor.scale_factor());
+    let margin = (f64::from(OVERLAY_MARGIN) * scale).round() as i32;
+    let fallback_size = tauri::PhysicalSize::new(
+        (OVERLAY_WIDTH * scale).round() as u32,
+        (OVERLAY_HEIGHT * scale).round() as u32,
+    );
+    let size = window.outer_size().unwrap_or(fallback_size);
+    let min_x = area.position.x + margin;
+    let max_x = area.position.x + area.size.width as i32 - size.width as i32 - margin;
+    let x = max_x.max(min_x);
+    let y = area.position.y + margin;
+
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|error| error.to_string())
+}
+
+fn start_session_ticker(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+
+        let (ended_after_tick, should_poll) = {
+            let state = app.state::<AppState>();
+            let now = state.started_at.elapsed();
+            let Ok(mut sessions) = state.sessions.lock() else {
+                continue;
+            };
+            let had_current = sessions.has_current();
+            let snapshot = sessions.tick(now);
+            (
+                had_current && matches!(snapshot.status, session::SessionStatus::Idle),
+                sessions.should_poll_activity(),
+            )
+        };
+        if ended_after_tick {
+            hide_status_window(&app);
+        }
+        if !should_poll {
+            continue;
+        }
+
+        let Ok(sample) = activity::current_activity_sample() else {
+            continue;
+        };
+
+        let ended = {
+            let state = app.state::<AppState>();
+            let now = state.started_at.elapsed();
+            let identity = state.identity.clone();
+            let Ok(mut sessions) = state.sessions.lock() else {
+                continue;
+            };
+            let was_polling = sessions.should_poll_activity();
+            let snapshot = sessions.record_sample(sample, now, &identity);
+            was_polling && matches!(snapshot.status, session::SessionStatus::Idle)
+        };
+
+        if ended {
+            hide_status_window(&app);
+        }
+    });
+}
+
+fn supervisor_identity() -> SupervisorIdentity {
+    SupervisorIdentity {
+        process_id: u64::from(std::process::id()),
+        process_path: std::env::current_exe()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        app_name: "Supervisor".to_string(),
+    }
+}
+
+fn with_sessions(
+    app: &tauri::AppHandle,
+    action: impl FnOnce(&mut SessionManager, std::time::Duration),
+) {
+    let state = app.state::<AppState>();
+    let now = state.started_at.elapsed();
+    if let Ok(mut sessions) = state.sessions.lock() {
+        action(&mut sessions, now);
+    };
+}
