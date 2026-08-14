@@ -49,11 +49,13 @@ impl SessionManager {
         let strictness = input.strictness.unwrap_or(self.settings.default_strictness);
         let duration_seconds = input.duration_minutes.clamp(5, 180) * 60;
         let goal = clean_goal(input.goal);
+        let rules = clean_rules(input.rules.unwrap_or_else(starter_rules));
         let session = Session::new(
             self.next_id,
             goal,
             duration_seconds,
             strictness,
+            rules,
             now,
             started_at,
         );
@@ -172,6 +174,12 @@ impl SessionManager {
         if let Some(enabled) = update.status_window_on_top {
             self.settings.status_window_on_top = enabled;
         }
+        if let Some(voice_profile) = update.voice_profile {
+            let voice_profile = voice_profile.trim();
+            if !voice_profile.is_empty() {
+                self.settings.voice_profile = voice_profile.chars().take(120).collect();
+            }
+        }
         self.settings.clone()
     }
 
@@ -255,10 +263,10 @@ impl Session {
         goal: String,
         duration_seconds: u64,
         strictness: Strictness,
+        rules: Vec<AppRule>,
         now: Duration,
         started_at: String,
     ) -> Self {
-        let rules = starter_rules();
         Self {
             id,
             goal,
@@ -287,7 +295,6 @@ impl Session {
                 .snoozed_until_seconds
                 .is_some_and(|until| now.as_secs() >= until)
         {
-            self.finish_timer_hold(now);
             self.status = SessionStatus::Active;
             self.snoozed_until_seconds = None;
             self.last_accounted_at = now;
@@ -366,19 +373,27 @@ impl Session {
             self.engine = FocusEngine::new(self.strictness.focus_config(), self.rules.clone());
             self.observing_supervisor = false;
             self.push_event(now, "Session resumed", "LIVE");
+        } else if self.status == SessionStatus::Snoozed {
+            self.status = SessionStatus::Active;
+            self.snoozed_until_seconds = None;
+            self.last_accounted_at = now;
+            self.engine = FocusEngine::new(self.strictness.focus_config(), self.rules.clone());
+            self.observing_supervisor = false;
+            self.push_event(now, "Snooze cleared", "LIVE");
         }
     }
 
     fn snooze(&mut self, now: Duration, seconds: u64) {
         if matches!(self.status, SessionStatus::Active | SessionStatus::Paused) {
-            if self.status == SessionStatus::Active && !self.observing_supervisor {
+            if self.status == SessionStatus::Paused {
+                self.finish_timer_hold(now);
+            } else if !self.observing_supervisor {
                 self.account_latest(now);
             } else {
                 self.last_accounted_at = now;
             }
             self.status = SessionStatus::Snoozed;
             self.snoozed_until_seconds = Some(now.as_secs() + seconds);
-            self.start_timer_hold(now);
             self.last_accounted_at = now;
             self.observing_supervisor = false;
             self.push_event(now, "Snoozed nudges", &format!("{} MIN", seconds / 60));
@@ -557,12 +572,14 @@ pub struct StartSessionInput {
     pub goal: String,
     pub duration_minutes: u64,
     pub strictness: Option<Strictness>,
+    pub rules: Option<Vec<AppRule>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SettingsUpdate {
     pub default_strictness: Option<Strictness>,
     pub status_window_on_top: Option<bool>,
+    pub voice_profile: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -683,6 +700,21 @@ fn clean_goal(goal: String) -> String {
     } else {
         goal.chars().take(120).collect()
     }
+}
+
+fn clean_rules(rules: Vec<AppRule>) -> Vec<AppRule> {
+    rules
+        .into_iter()
+        .filter_map(|mut rule| {
+            let value = rule.value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            rule.value = value.chars().take(160).collect();
+            Some(rule)
+        })
+        .take(100)
+        .collect()
 }
 
 fn sample_hint(sample: &ActivitySample) -> String {
@@ -861,6 +893,34 @@ mod tests {
     }
 
     #[test]
+    fn session_start_uses_provided_rules() {
+        let mut manager = SessionManager::default();
+        manager.start(
+            StartSessionInput {
+                goal: "Read docs".to_string(),
+                duration_minutes: 25,
+                strictness: Some(Strictness::Strict),
+                rules: Some(vec![AppRule::title_contains(
+                    "developer.chrome.com",
+                    RuleClassification::Focused,
+                )]),
+            },
+            seconds(0),
+            "start".to_string(),
+        );
+
+        let snapshot = record(
+            &mut manager,
+            sample("Google Chrome", "developer.chrome.com / Tabs API", 0.0),
+            seconds(10),
+        );
+        let focus = snapshot.current.unwrap().focus.unwrap();
+
+        assert_eq!(focus.state, FocusState::Focused);
+        assert_eq!(focus.matched_rule.unwrap().value, "developer.chrome.com");
+    }
+
+    #[test]
     fn snooze_prevents_nudges_until_expiry() {
         let mut manager = SessionManager::default();
         manager.start(
@@ -972,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn timer_holds_while_paused_and_snoozed() {
+    fn timer_holds_while_paused_but_not_snoozed() {
         let mut manager = SessionManager::default();
         manager.start(
             input("Focus", Strictness::Strict),
@@ -996,7 +1056,7 @@ mod tests {
         manager.snooze(seconds(80), 300);
         assert_eq!(
             manager.tick(seconds(200)).current.unwrap().elapsed_seconds,
-            20
+            140
         );
     }
 
@@ -1038,7 +1098,7 @@ mod tests {
         let snapshot = manager.stop(seconds(80));
 
         assert_eq!(snapshot.history[0].distracted_seconds, 10);
-        assert_eq!(snapshot.history[0].duration_seconds, 10);
+        assert_eq!(snapshot.history[0].duration_seconds, 20);
     }
 
     #[test]
@@ -1227,6 +1287,7 @@ mod tests {
             goal: goal.to_string(),
             duration_minutes,
             strictness: Some(strictness),
+            rules: None,
         }
     }
 

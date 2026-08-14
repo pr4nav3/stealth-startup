@@ -15,15 +15,22 @@
         "title": "Supervisor",
         "width": 920,
         "height": 640,
-        "resizable": true
+        "resizable": true,
+        "acceptFirstMouse": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self'; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/voice/**"]
+      }
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
   }
 }
-

@@ -1,4 +1,9 @@
 .DS_Store
+.venv*/
+*.py[cod]
+__pycache__/
+build/
+.pnpm-store/
 node_modules/
 dist/
 src-tauri/target/

@@ -1,6 +1,9 @@
 mod activity;
+mod browser_bridge;
 mod focus;
 mod session;
+mod voice;
+mod voice_runtime;
 
 use activity::ActivitySample;
 use focus::{FocusEngine, FocusSnapshot};
@@ -8,7 +11,7 @@ use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -26,6 +29,9 @@ const OVERLAY_MARGIN: i32 = 18;
 struct AppState {
     focus_engine: Mutex<FocusEngine>,
     sessions: Mutex<SessionManager>,
+    browser_bridge: browser_bridge::BrowserBridge,
+    voice_download: Arc<Mutex<voice::VoiceDownloadState>>,
+    voice_recording: Mutex<voice::VoiceRecordingState>,
     started_at: Instant,
     identity: SupervisorIdentity,
 }
@@ -35,6 +41,9 @@ impl Default for AppState {
         Self {
             focus_engine: Mutex::new(FocusEngine::default()),
             sessions: Mutex::new(SessionManager::default()),
+            browser_bridge: browser_bridge::BrowserBridge::default(),
+            voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
+            voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
             started_at: Instant::now(),
             identity: supervisor_identity(),
         }
@@ -42,13 +51,13 @@ impl Default for AppState {
 }
 
 #[tauri::command]
-fn get_activity_sample() -> Result<ActivitySample, String> {
-    activity::current_activity_sample()
+fn get_activity_sample(state: State<'_, AppState>) -> Result<ActivitySample, String> {
+    current_activity_sample(&state)
 }
 
 #[tauri::command]
 fn get_focus_snapshot(state: State<'_, AppState>) -> Result<FocusSnapshot, String> {
-    let sample = activity::current_activity_sample()?;
+    let sample = current_activity_sample(&state)?;
     let mut engine = state
         .focus_engine
         .lock()
@@ -73,6 +82,7 @@ fn start_session(
 
     if should_show_status {
         show_status_window_internal(&app)?;
+        show_main_window(&app);
     } else {
         hide_status_window(&app);
     }
@@ -206,6 +216,126 @@ fn set_status_window_on_top(
     Ok(snapshot)
 }
 
+#[tauri::command]
+fn get_voice_backend_status(app: AppHandle) -> Result<voice::VoiceBackendStatus, String> {
+    voice::get_status(&app)
+}
+
+#[tauri::command]
+async fn download_voice_cloning_model(app: AppHandle) -> Result<voice::VoiceModelStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || voice::download_model(app))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn start_voice_model_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceDownloadSnapshot, String> {
+    voice::start_model_download(app, Arc::clone(&state.voice_download))
+}
+
+#[tauri::command]
+fn get_voice_model_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceDownloadSnapshot, String> {
+    voice::model_download_snapshot(&app, &state.voice_download)
+}
+
+#[tauri::command]
+fn cancel_voice_model_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceDownloadSnapshot, String> {
+    voice::cancel_model_download(&app, &state.voice_download)
+}
+
+#[tauri::command]
+fn delete_voice_cloning_model(app: AppHandle) -> Result<voice::VoiceModelStatus, String> {
+    voice::delete_model(&app)
+}
+
+#[tauri::command]
+fn save_voice_reference(
+    app: AppHandle,
+    input: voice::SaveVoiceReferenceInput,
+) -> Result<voice::VoiceProfileSummary, String> {
+    voice::save_reference(&app, input)
+}
+
+#[tauri::command]
+fn save_voice_reference_from_path(
+    app: AppHandle,
+    input: voice::SaveVoiceReferenceFromPathInput,
+) -> Result<voice::VoiceProfileSummary, String> {
+    voice::save_reference_from_path(&app, input)
+}
+
+#[tauri::command]
+fn start_voice_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceRecordingSnapshot, String> {
+    voice::start_recording(&app, &state.voice_recording)
+}
+
+#[tauri::command]
+fn stop_voice_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceRecordingSnapshot, String> {
+    voice::stop_recording(&app, &state.voice_recording)
+}
+
+#[tauri::command]
+fn clear_voice_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceRecordingSnapshot, String> {
+    voice::clear_recording(&app, &state.voice_recording)
+}
+
+#[tauri::command]
+async fn generate_voice_clips(
+    app: AppHandle,
+    input: voice::GenerateVoiceClipsInput,
+) -> Result<voice::VoiceProfileSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || voice::generate_clips(app, input))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn list_voice_profiles(app: AppHandle) -> Result<Vec<voice::VoiceProfileSummary>, String> {
+    voice::list_profiles(&app)
+}
+
+#[tauri::command]
+fn delete_voice_profile(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<Vec<voice::VoiceProfileSummary>, String> {
+    voice::delete_profile(&app, profile_id)
+}
+
+#[tauri::command]
+fn delete_voice_profile_clips(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<voice::VoiceProfileSummary, String> {
+    voice::delete_profile_clips(&app, profile_id)
+}
+
+#[tauri::command]
+fn delete_voice_clip(
+    app: AppHandle,
+    input: voice::DeleteVoiceClipInput,
+) -> Result<voice::VoiceProfileSummary, String> {
+    voice::delete_clip(&app, input)
+}
+
 fn lock_sessions<'a>(
     state: &'a State<'_, AppState>,
 ) -> Result<std::sync::MutexGuard<'a, SessionManager>, String> {
@@ -227,6 +357,7 @@ pub fn run() {
         .setup(|app| {
             setup_status_window(app)?;
             setup_tray(app)?;
+            start_browser_bridge(app);
             start_session_ticker(app.handle().clone());
             Ok(())
         })
@@ -246,7 +377,23 @@ pub fn run() {
             update_settings,
             show_status_window,
             set_status_window_enabled,
-            set_status_window_on_top
+            set_status_window_on_top,
+            get_voice_backend_status,
+            download_voice_cloning_model,
+            start_voice_model_download,
+            get_voice_model_download,
+            cancel_voice_model_download,
+            delete_voice_cloning_model,
+            save_voice_reference,
+            save_voice_reference_from_path,
+            start_voice_recording,
+            stop_voice_recording,
+            clear_voice_recording,
+            generate_voice_clips,
+            list_voice_profiles,
+            delete_voice_profile,
+            delete_voice_profile_clips,
+            delete_voice_clip
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Supervisor");
@@ -267,6 +414,7 @@ fn setup_status_window(app: &mut tauri::App) -> tauri::Result<()> {
     .decorations(true)
     .always_on_top(true)
     .skip_taskbar(false)
+    .accept_first_mouse(true)
     .focused(false)
     .visible(false)
     .build()?;
@@ -370,9 +518,6 @@ fn show_status_window_internal(app: &AppHandle) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         position_status_window(app)?;
         window.show().map_err(|error| error.to_string())?;
-        if !pin {
-            let _ = window.set_focus();
-        }
     }
     Ok(())
 }
@@ -454,7 +599,10 @@ fn start_session_ticker(app: AppHandle) {
             continue;
         }
 
-        let Ok(sample) = activity::current_activity_sample() else {
+        let Ok(sample) = ({
+            let state = app.state::<AppState>();
+            current_activity_sample(&state)
+        }) else {
             continue;
         };
 
@@ -474,6 +622,19 @@ fn start_session_ticker(app: AppHandle) {
             hide_status_window(&app);
         }
     });
+}
+
+fn current_activity_sample(state: &State<'_, AppState>) -> Result<ActivitySample, String> {
+    activity::current_activity_sample()
+        .map(|sample| state.browser_bridge.enrich_activity_sample(sample))
+}
+
+fn start_browser_bridge(app: &tauri::App) {
+    let state = app.state::<AppState>();
+    match state.browser_bridge.start() {
+        Ok(port) => eprintln!("Supervisor browser bridge listening on 127.0.0.1:{port}"),
+        Err(error) => eprintln!("Supervisor browser bridge unavailable: {error}"),
+    }
 }
 
 fn supervisor_identity() -> SupervisorIdentity {
