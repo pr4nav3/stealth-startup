@@ -5,7 +5,7 @@
     {
       "target": "macos-arm64",
       "url": "https://github.com/pr4nav3/stealth-startup/releases/download/voice-runtime-2026.08.13-macos-arm64.1/supervisor-voice-runtime-macos-arm64.zip",
-      "sha256": "ffb5afffeda2ccd7cc4cf75a4270d205f428dcf3febda5f5f37e3475b4b04cb2",
+      "sha256": "fcfd9bc86932f16b53449b7b6e29ab108b9ba9f23aec8d1af5333fe4b1f79ae5",
       "bytes": 308909575,
       "executable": "supervisor-voice-worker"
     }
