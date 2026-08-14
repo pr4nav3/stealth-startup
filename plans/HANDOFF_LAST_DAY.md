@@ -132,6 +132,28 @@ need to preserve this exact local install; otherwise redownload it from the app.
   `voice_worker/release_manifest.macos-arm64.example.json`.
 - Runtime zips are installed under app data, not bundled into the main process.
 
+The final tested macOS ARM64 runtime artifact is:
+
+- File: `dist/supervisor-voice-runtime-macos-arm64.zip`
+- Size: `308909575` bytes
+- SHA-256:
+  `fcfd9bc86932f16b53449b7b6e29ab108b9ba9f23aec8d1af5333fe4b1f79ae5`
+
+This zip is intentionally ignored by Git because it is about 295 MiB and
+GitHub rejects normal repository blobs over 100 MiB. Preserve it separately.
+The chosen handoff path is to upload the zip to Google Drive, download it on
+the Windows laptop, and later upload that unchanged file as a GitHub Release
+asset. The zip is macOS ARM64-only and cannot run on Windows; the Windows
+laptop is only storing/transferring it.
+
+After downloading it from Google Drive, verify it in PowerShell:
+
+```powershell
+Get-FileHash .\supervisor-voice-runtime-macos-arm64.zip -Algorithm SHA256
+```
+
+The result must exactly match the SHA-256 above before publishing it.
+
 ### Mac Voice E2E Result
 
 The full Chatterbox Nano path was tested on this Mac with:
@@ -146,6 +168,31 @@ The full Chatterbox Nano path was tested on this Mac with:
 
 The temp output folder from that smoke test is not a durable artifact. Re-run
 the worker or the app flow if you need fresh clips.
+
+The release zip was rebuilt and independently re-tested on 2026-08-14 by
+unpacking it under `/private/tmp`, outside the repository, and launching its
+frozen `supervisor-voice-worker` executable directly. It successfully loaded
+the real app-data model and generated one 12-second clip from the Derek sample.
+The worker reported `status=completed`, `worker_api=1`,
+`model_load_seconds=91.804`, `generation_total_seconds=26.235`, and
+`workarounds.noop_watermarker=true`. macOS CoreAudio identified the result as
+mono 24 kHz, 16-bit PCM. Signal checks found a -6.76 dBFS peak, no clipped
+samples, and non-silent content.
+
+This proves that the frozen runtime can load the pinned model and write a
+technically valid audio file. It is not a substitute for a human listening
+test; voice likeness, pronunciation, pacing, and subjective audio quality must
+still be judged by listening on a Mac or after transferring the generated WAV.
+
+### Mac Model Integrity
+
+The runtime build does not package, rewrite, or quantize the Chatterbox model.
+The model remains a separate read-only input under app data. After the final
+frozen-runtime test, all nine model files matched the exact byte sizes and
+SHA-256 values pinned in `src-tauri/src/voice.rs`, including
+`t3_nano_v1.safetensors` and `s3gen_meanflow.safetensors`. Their modification
+times remained the original download times from 2026-08-13. The build and test
+therefore did not alter the model weights.
 
 ### Perth Watermarker Workaround
 
@@ -273,6 +320,8 @@ Commit/push or otherwise copy:
 
 - The Git repo at `/Users/pranav.karthik/Supervisor`.
 - Any remote release assets/manifest URLs used for voice runtime downloads.
+- The tested macOS runtime zip through Google Drive:
+  `dist/supervisor-voice-runtime-macos-arm64.zip`.
 
 Optionally copy from this Mac:
 
@@ -283,7 +332,8 @@ Optionally copy from this Mac:
 Do not bother copying:
 
 - `.venv-voice-runtime-macos` to Windows.
-- `dist/`, `build/`, `src-tauri/target/`, `node_modules/`, or Python caches.
+- Other files in `dist/`, plus `build/`, `src-tauri/target/`, `node_modules/`,
+  or Python caches. The macOS runtime zip listed above is the one exception.
 
 ## Verification Commands
 
