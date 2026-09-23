@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supervisor — a local focus app for Windows and macOS</title>
+    <meta
+      name="description"
+      content="A focus timer that speaks up when you're distracted, in a voice you cloned yourself. Runs entirely on your own machine. V1 arrives October 2026."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="assets/eye.svg" type="image/svg+xml" />
+    <link
+      rel="preload"
+      href="assets/fonts/archivo-variable.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script>
+      // Set the theme before first paint, and hide the scroll-reveal elements.
+      // The timer makes sure a failed site.js can never leave the page blank.
+      (function () {
+        var root = document.documentElement;
+        root.classList.add("js");
+        try {
+          var saved = localStorage.getItem("supervisor-theme");
+          if (saved === "dark" || saved === "light") {
+            root.setAttribute("data-theme", saved);
+          } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            root.setAttribute("data-theme", "dark");
+          }
+        } catch (error) {
+          /* private mode, storage blocked: fall through to the light theme */
+        }
+        setTimeout(function () {
+          if (!root.classList.contains("site-ready")) root.classList.remove("js");
+        }, 1500);
+      })();
+    </script>
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="#top">
+          <img src="assets/eye.svg" alt="" width="30" height="30" />
+          <b>Supervisor</b>
+        </a>
+
+        <nav class="site-nav" aria-label="Sections">
+          <ul>
+            <li><a href="#features">Features</a></li>
+            <li><a href="#voice">Voice</a></li>
+            <li><a href="#camera">Camera</a></li>
+            <li><a href="#privacy">Privacy</a></li>
+            <li><a href="#download">Download</a></li>
+          </ul>
+        </nav>
+
+        <div class="header-tools">
+          <button class="btn theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">
+            <svg class="sun" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4.4" />
+              <path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M19.1 4.9l-1.7 1.7M6.6 17.4l-1.7 1.7" />
+            </svg>
+            <svg class="moon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 14.2A8.2 8.2 0 0 1 9.8 4a8.2 8.2 0 1 0 10.2 10.2z" />
+            </svg>
+          </button>
+          <a class="btn btn-acid" href="#download">October 2026</a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ---------------------------------------------------------------- -->
+      <section class="hero" id="top">
+        <div class="shell hero-grid">
+          <div class="reveal">
+            <span class="chip chip-warning">V1 · October 2026</span>
+            <h1 class="display">A focus timer that speaks up when you're distracted.</h1>
+            <p class="lead">
+              Supervisor watches the window you're in while a session runs. Drift for too long
+              and it says something out loud, in a voice you cloned yourself. Your mom, your
+              manager, maybe even you. Whoever you'd least like to be caught by. It all runs on
+              your own machine.
+            </p>
+
+            <div class="hero-actions">
+              <a class="btn btn-lg btn-acid" href="#features">See what it does</a>
+              <a class="btn btn-lg" href="#privacy">What it reads</a>
+            </div>
+
+            <p class="hero-note">Windows 10 and 11 · macOS on Apple Silicon</p>
+
+            <ul class="hero-chips">
+              <li class="chip">Local only</li>
+              <li class="chip">No account</li>
+              <li class="chip">No telemetry</li>
+              <li class="chip">Runs on CPU</li>
+            </ul>
+          </div>
+
+          <div class="reveal">
+            <figure class="mock" aria-label="The Supervisor session screen">
+              <div class="mock-top"><strong>Supervisor</strong></div>
+
+              <div class="mock-tabs" aria-hidden="true">
+                <span class="on">Session</span>
+                <span>Settings</span>
+                <span>History</span>
+              </div>
+
+              <div class="mock-slab" id="mock-slab">
+                <div class="slab-head">
+                  <span class="chip" id="mock-status">Drift watch</span>
+                  <span class="chip" id="mock-strict">Normal</span>
+                </div>
+                <h3 id="mock-title">Drift watch</h3>
+                <p id="mock-copy">Two minutes on YouTube.</p>
+                <div class="mock-progress"><i id="mock-bar" style="width: 61%"></i></div>
+                <div class="slab-meta">
+                  <span id="mock-elapsed">Elapsed 36:40</span>
+                  <span id="mock-nudges">Nudges 0</span>
+                </div>
+              </div>
+            </figure>
+
+            <div class="state-picker" id="state-picker">
+              <span>Preview a state</span>
+              <button type="button" data-state="focused" aria-pressed="false">Locked in</button>
+              <button type="button" data-state="watch" aria-pressed="true">Drift watch</button>
+              <button type="button" data-state="drifting" aria-pressed="false">Drifting</button>
+              <button type="button" data-state="away" aria-pressed="false">Away</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="section" id="features">
+        <div class="shell">
+          <div class="section-head reveal">
+            <span class="eyebrow">Features</span>
+            <h2 class="display">A short list, on purpose.</h2>
+            <p class="lead">
+              Supervisor only runs while a session is on. Start one and it stays with you until
+              you stop it.
+            </p>
+          </div>
+
+          <div class="feature-grid">
+            <article class="panel feature-card reveal">
+              <span class="feature-num">01</span>
+              <h3>Focus sessions</h3>
+              <p>Set a goal, a length, and how strict it should be.</p>
+            </article>
+            <article class="panel feature-card reveal">
+              <span class="feature-num">02</span>
+              <h3>Spoken nudges</h3>
+              <p>Drift for long enough and it speaks up in the voice you picked.</p>
+            </article>
+            <article class="panel feature-card reveal">
+              <span class="feature-num">03</span>
+              <h3>Your own rules</h3>
+              <p>Mark an app as work or as a distraction. It won't flag that one again.</p>
+            </article>
+            <article class="panel feature-card reveal">
+              <span class="feature-num">04</span>
+              <h3>Local history</h3>
+              <p>Finished sessions are saved on your machine. Read them or delete them.</p>
+            </article>
+          </div>
+
+          <div class="feature split">
+            <div class="feature-copy reveal">
+              <h3 class="display">Pause it, snooze it, or correct it mid session</h3>
+              <p class="lead">
+                Supervisor sits in the tray with a small window you can pin over everything else.
+                Snooze the nudges for a few minutes, or tell it that what it just flagged is
+                actually the work.
+              </p>
+            </div>
+
+            <div class="reveal">
+              <div class="mock" style="max-width: 340px; margin-left: auto">
+                <div class="mock-slab is-drifting">
+                  <div class="slab-head">
+                    <span class="chip">Drifting</span>
+                    <span class="chip">Strict</span>
+                  </div>
+                  <h3>Drifting</h3>
+                  <p>Off task for six minutes.</p>
+                  <div class="mock-progress"><i style="width: 66%"></i></div>
+                  <div class="slab-meta">
+                    <span>Elapsed 39:05</span>
+                    <span>Nudges 1</span>
+                  </div>
+                </div>
+                <div class="mock-tabs" style="margin: 9px 0 0" aria-hidden="true">
+                  <span>Pause</span>
+                  <span>Snooze</span>
+                  <span>Stop</span>
+                </div>
+                <div
+                  class="mock-tabs"
+                  style="grid-template-columns: 1fr 1fr; margin: 6px 0 0"
+                  aria-hidden="true"
+                >
+                  <span class="on">Relevant</span>
+                  <span>Distracting</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="section" id="voice">
+        <div class="shell feature">
+          <div class="feature-copy reveal">
+            <span class="eyebrow">Voice</span>
+            <h2 class="display">A reminder is easier to ignore when it's a notification</h2>
+            <p class="lead">
+              Record about twenty five seconds of someone talking and Supervisor builds a voice
+              from it. Keep as many as you like and switch between them per session.
+            </p>
+            <p class="lead">
+              Every line it says is text you can rewrite. Clips are made in advance, so a nudge
+              plays the second you need it. Nothing is uploaded.
+            </p>
+          </div>
+
+          <div class="reveal">
+            <div class="panel voice-card">
+              <h4 class="eyebrow">Voice profiles</h4>
+
+              <div class="voice-row on">
+                <div>
+                  <b>Mum</b>
+                  <span>12 clips · ready</span>
+                </div>
+                <em>In use</em>
+              </div>
+              <div class="voice-row">
+                <div>
+                  <b>My manager</b>
+                  <span>12 clips · ready</span>
+                </div>
+                <em>Select</em>
+              </div>
+              <div class="voice-row">
+                <div>
+                  <b>Me</b>
+                  <span>Recorded · no clips yet</span>
+                </div>
+                <em>Generate</em>
+              </div>
+
+              <div class="waveform" aria-hidden="true">
+                <i style="height: 18%"></i><i style="height: 30%"></i><i style="height: 52%"></i
+                ><i style="height: 74%"></i><i style="height: 46%"></i><i style="height: 88%"></i
+                ><i style="height: 62%"></i><i style="height: 34%"></i><i style="height: 70%"></i
+                ><i style="height: 96%"></i><i style="height: 58%"></i><i style="height: 40%"></i
+                ><i style="height: 26%"></i><i style="height: 64%"></i><i style="height: 84%"></i
+                ><i style="height: 50%"></i><i style="height: 72%"></i><i style="height: 38%"></i
+                ><i style="height: 90%"></i><i style="height: 56%"></i><i style="height: 30%"></i
+                ><i style="height: 66%"></i><i style="height: 44%"></i><i style="height: 78%"></i
+                ><i style="height: 52%"></i><i style="height: 24%"></i><i style="height: 60%"></i
+                ><i style="height: 86%"></i><i style="height: 42%"></i><i style="height: 68%"></i
+                ><i style="height: 32%"></i><i style="height: 54%"></i><i style="height: 76%"></i
+                ><i style="height: 48%"></i><i style="height: 22%"></i><i style="height: 58%"></i
+                ><i style="height: 80%"></i><i style="height: 36%"></i><i style="height: 64%"></i
+                ><i style="height: 28%"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="section" id="camera">
+        <div class="shell feature flip">
+          <div class="feature-copy reveal">
+            <span class="eyebrow">Camera · optional</span>
+            <h2 class="display">Closing the tab doesn't help if the phone is in your hand</h2>
+            <p class="lead">
+              Switch the camera on and Supervisor can tell whether you're at your desk, away from
+              it, or looking at your phone. It only counts phone use when it can actually see the
+              phone, so glancing down at your desk won't be held against you.
+            </p>
+            <p class="lead">
+              The camera stays off until you turn it on, and the app works fine if you never do.
+              Frames are read and thrown away.
+            </p>
+          </div>
+
+          <div class="reveal">
+            <div class="panel cam">
+              <h4 class="eyebrow">Camera check</h4>
+              <div class="cam-frame">
+                <p>Local preview</p>
+                <span class="box face" data-label="Face · looking down"></span>
+                <span class="box phone" data-label="Phone"></span>
+              </div>
+              <div class="cam-verdict">
+                <span>Verdict · at phone</span>
+                <span>Held 2.4s</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="section" id="privacy">
+        <div class="shell">
+          <div class="section-head reveal">
+            <span class="eyebrow">Privacy</span>
+            <h2 class="display">There's no server behind this.</h2>
+            <p class="lead">No account, no sign in, nothing phoning home.</p>
+          </div>
+
+          <div class="privacy-grid">
+            <div class="panel privacy-col reveal">
+              <h3>What it reads</h3>
+              <ul>
+                <li><b>The app in front</b><span>Which program you're looking at.</span></li>
+                <li>
+                  <b>The window title</b>
+                  <span>What tells a work tab from a distraction.</span>
+                </li>
+                <li><b>Idle time</b><span>So it stays quiet when you've walked away.</span></li>
+                <li>
+                  <b>Camera labels, if you turn the camera on</b>
+                  <span>Never the picture.</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="panel privacy-col no reveal">
+              <h3>What it never touches</h3>
+              <ul>
+                <li><b>What you type</b></li>
+                <li><b>Your screen</b><span>No screenshots, no scanning.</span></li>
+                <li><b>Page contents or browsing history</b></li>
+                <li>
+                  <b>Anything outside your machine</b>
+                  <span>Recordings, clips and camera frames stay put.</span>
+                </li>
+                <li><b>Accounts, telemetry, analytics, ads</b></li>
+              </ul>
+            </div>
+          </div>
+
+          <p class="privacy-note reveal">
+            All of it lives in one folder on your computer. Delete a voice, a session, or the
+            whole history whenever you want.
+          </p>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------------- -->
+      <section class="section" id="download">
+        <div class="shell">
+          <div class="dl-slab reveal">
+            <div>
+              <span class="eyebrow">Release</span>
+              <h2 class="display">V1 arrives in October 2026.</h2>
+              <p>
+                Nothing to download yet. The Windows and macOS installers land here when it
+                ships.
+              </p>
+            </div>
+
+            <div class="dl-cards">
+              <div class="dl-card">
+                <div>
+                  <b>Windows</b>
+                  <span>Windows 10 or 11 · 64-bit</span>
+                </div>
+                <span class="btn" aria-disabled="true">October 2026</span>
+              </div>
+              <div class="dl-card">
+                <div>
+                  <b>macOS</b>
+                  <span>Apple Silicon</span>
+                </div>
+                <span class="btn" aria-disabled="true">October 2026</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="dl-notes">
+            <div class="panel reveal">
+              <b>The voice pack is separate</b>
+              <p>
+                The app installs small. The voice runtime is a one time download of about 300 MB.
+              </p>
+            </div>
+            <div class="panel reveal">
+              <b>Early builds are unsigned</b>
+              <p>
+                Code signing isn't in place yet, so Windows will warn you about the first builds.
+              </p>
+            </div>
+            <div class="panel reveal">
+              <b>Read the source</b>
+              <p>Built with Tauri and Rust. Check it yourself, or build it from scratch.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-inner">
+        <div class="footer-brand">
+          <img src="assets/eye.svg" alt="" width="26" height="26" />
+          <p>Supervisor · a local focus app for Windows and macOS</p>
+        </div>
+        <nav class="footer-links" aria-label="Footer">
+          <a href="#features">Features</a>
+          <a href="#privacy">Privacy</a>
+          <a href="#download">Download</a>
+          <a href="https://github.com/pr4nav3/stealth-startup">GitHub</a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="site.js"></script>
+  </body>
+</html>
