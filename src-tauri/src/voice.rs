@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -20,7 +20,11 @@ const MODEL_ID: &str = "chatterbox-nano-minimal";
 const MODEL_DISPLAY_NAME: &str = "Chatterbox-Nano voice cloning model";
 const MODEL_REPO: &str = "ResembleAI/chatterbox-nano";
 const MODEL_REVISION: &str = "71ccd1d0081b430592cea481f4307e764e07bc64";
-const MIN_REQUIRED_RAM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const GIBIBYTE: u64 = 1024 * 1024 * 1024;
+const MIN_REQUIRED_RAM_BYTES: u64 = 8 * GIBIBYTE;
+const DEFAULT_MIN_FREE_RAM_BYTES: u64 = 6 * GIBIBYTE;
+const MIN_FREE_RAM_AFTER_MEASURE_BYTES: u64 = 4 * GIBIBYTE;
+const GENERATION_PEAK_HEADROOM_BYTES: u64 = GIBIBYTE;
 const EXTRA_DOWNLOAD_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REFERENCE_AUDIO_BYTES: usize = 60 * 1024 * 1024;
 const DOWNLOAD_CANCELLED: &str = "download cancelled";
@@ -170,11 +174,21 @@ pub struct VoiceSystemInfo {
     pub arch: String,
     pub cpu_threads: usize,
     pub total_ram_bytes: Option<u64>,
+    pub available_ram_bytes: Option<u64>,
     pub min_required_ram_bytes: u64,
+    pub min_free_ram_bytes: u64,
+    pub last_peak_ram_bytes: Option<u64>,
     pub has_enough_ram: Option<bool>,
     pub available_disk_bytes: Option<u64>,
     pub recommended_free_disk_bytes: u64,
     pub has_enough_disk: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+struct GenerationRamBudget {
+    last_peak_ram_bytes: Option<u64>,
+    last_recorded_at_unix: Option<u64>,
+    generation_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -714,6 +728,7 @@ pub fn generate_clips(
     if !model_status(&root).installed || !voice_runtime::status(&root).installed {
         return Err("download the voice cloning model pack before generating clips".to_string());
     }
+    ensure_generation_ram(&root)?;
 
     let phrases = input.phrases.unwrap_or_else(default_phrases);
     validate_phrases(&phrases)?;
@@ -748,11 +763,11 @@ pub fn generate_clips(
         .arg("--device")
         .arg("cpu");
 
-    let output = match command.output() {
+    let output = match run_worker_and_record_peak(&root, command) {
         Ok(output) => output,
         Err(error) => {
             let _ = fs::remove_dir_all(&staging);
-            return Err(error.to_string());
+            return Err(error);
         }
     };
     if !output.status.success() {
@@ -1573,6 +1588,9 @@ fn clean_id(value: &str) -> Result<String, String> {
 
 fn system_info(root: &Path, recommended_free_disk_bytes: u64) -> VoiceSystemInfo {
     let total_ram_bytes = total_ram_bytes();
+    let available_ram_bytes = available_ram_bytes();
+    let last_peak_ram_bytes = load_generation_budget(root).last_peak_ram_bytes;
+    let min_free_ram_bytes = required_free_ram_bytes(last_peak_ram_bytes);
     let available_disk_bytes = available_disk_bytes(root);
     VoiceSystemInfo {
         os: std::env::consts::OS.to_string(),
@@ -1581,12 +1599,248 @@ fn system_info(root: &Path, recommended_free_disk_bytes: u64) -> VoiceSystemInfo
             .map(|value| value.get())
             .unwrap_or(1),
         total_ram_bytes,
+        available_ram_bytes,
         min_required_ram_bytes: MIN_REQUIRED_RAM_BYTES,
-        has_enough_ram: total_ram_bytes.map(|bytes| bytes >= MIN_REQUIRED_RAM_BYTES),
+        min_free_ram_bytes,
+        last_peak_ram_bytes,
+        has_enough_ram: ram_allows_generation(
+            available_ram_bytes,
+            total_ram_bytes,
+            last_peak_ram_bytes,
+        ),
         available_disk_bytes,
         recommended_free_disk_bytes,
         has_enough_disk: available_disk_bytes.map(|bytes| bytes >= recommended_free_disk_bytes),
     }
+}
+
+fn required_free_ram_bytes(last_peak_ram_bytes: Option<u64>) -> u64 {
+    match last_peak_ram_bytes {
+        Some(peak) if peak > 0 => peak
+            .saturating_add(GENERATION_PEAK_HEADROOM_BYTES)
+            .max(MIN_FREE_RAM_AFTER_MEASURE_BYTES),
+        _ => DEFAULT_MIN_FREE_RAM_BYTES,
+    }
+}
+
+fn ram_allows_generation(
+    available_ram_bytes: Option<u64>,
+    total_ram_bytes: Option<u64>,
+    last_peak_ram_bytes: Option<u64>,
+) -> Option<bool> {
+    let need = required_free_ram_bytes(last_peak_ram_bytes);
+    let free_ok = available_ram_bytes.map(|bytes| bytes >= need)?;
+    let machine_ok = total_ram_bytes
+        .map(|bytes| bytes >= MIN_REQUIRED_RAM_BYTES)
+        .unwrap_or(true);
+    Some(free_ok && machine_ok)
+}
+
+fn ensure_generation_ram(root: &Path) -> Result<(), String> {
+    let available = available_ram_bytes();
+    let total = total_ram_bytes();
+    let last_peak = load_generation_budget(root).last_peak_ram_bytes;
+    let need = required_free_ram_bytes(last_peak);
+    match ram_allows_generation(available, total, last_peak) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "Not enough free RAM to clone a voice. Need about {}, this PC has {} free. Close other apps and try again.",
+            format_bytes(need),
+            available
+                .map(format_bytes)
+                .unwrap_or_else(|| "unknown".to_string())
+        )),
+        None if cfg!(target_os = "windows") => Err(
+            "Could not measure free RAM. Refusing to start voice generation on Windows.".to_string(),
+        ),
+        None => Ok(()),
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= GIBIBYTE {
+        format!("{:.1} GB", bytes as f64 / GIBIBYTE as f64)
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn generation_budget_path(root: &Path) -> PathBuf {
+    root.join("generation_ram.json")
+}
+
+fn load_generation_budget(root: &Path) -> GenerationRamBudget {
+    let Ok(bytes) = fs::read(generation_budget_path(root)) else {
+        return GenerationRamBudget::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn persist_generation_peak(root: &Path, peak_ram_bytes: u64) {
+    const MIN_USEFUL_PEAK: u64 = 2 * GIBIBYTE;
+    if peak_ram_bytes < MIN_USEFUL_PEAK {
+        return;
+    }
+    let mut budget = load_generation_budget(root);
+    if budget
+        .last_peak_ram_bytes
+        .map(|old| peak_ram_bytes > old)
+        .unwrap_or(true)
+    {
+        budget.last_peak_ram_bytes = Some(peak_ram_bytes);
+        budget.last_recorded_at_unix = Some(unix_millis() as u64);
+        let _ = write_json(&generation_budget_path(root), &budget);
+    }
+}
+
+fn finish_generation_peak(root: &Path, peak_ram_bytes: u64) {
+    persist_generation_peak(root, peak_ram_bytes);
+    let mut budget = load_generation_budget(root);
+    budget.generation_count = budget.generation_count.saturating_add(1);
+    let _ = write_json(&generation_budget_path(root), &budget);
+}
+
+struct WorkerRun {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_worker_and_record_peak(root: &Path, mut command: Command) -> Result<WorkerRun, String> {
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.stdin(Stdio::null());
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let pid = child.id();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_thread = stdout.map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let stderr_thread = stderr.map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+
+    let mut peak = process_ram_bytes(pid).unwrap_or(0);
+    persist_generation_peak(root, peak);
+    let status = loop {
+        if let Some(used) = process_ram_bytes(pid) {
+            if used > peak {
+                peak = used;
+                persist_generation_peak(root, peak);
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(250)),
+            Err(error) => {
+                let _ = child.kill();
+                finish_generation_peak(root, peak);
+                return Err(error.to_string());
+            }
+        }
+    };
+    finish_generation_peak(root, peak);
+
+    let stdout = stdout_thread
+        .map(|thread| thread.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_thread
+        .map(|thread| thread.join().unwrap_or_default())
+        .unwrap_or_default();
+    Ok(WorkerRun {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn process_ram_bytes(pid: u32) -> Option<u64> {
+    process_ram_bytes_impl(pid)
+}
+
+#[cfg(target_os = "windows")]
+fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return None;
+    }
+    let mut counters = ProcessMemoryCountersEx {
+        cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        quota_peak_paged_pool_usage: 0,
+        quota_paged_pool_usage: 0,
+        quota_peak_non_paged_pool_usage: 0,
+        quota_non_paged_pool_usage: 0,
+        pagefile_usage: 0,
+        peak_pagefile_usage: 0,
+        private_usage: 0,
+    };
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(
+            handle,
+            &mut counters as *mut ProcessMemoryCountersEx,
+            counters.cb,
+        )
+    };
+    unsafe {
+        CloseHandle(handle);
+    }
+    (ok != 0).then_some(counters.private_usage as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
+    let text = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kb = text
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    Some(kb * 1024)
+}
+
+#[cfg(target_os = "macos")]
+fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let kb = String::from_utf8(output.stdout)
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    Some(kb * 1024)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn process_ram_bytes_impl(_pid: u32) -> Option<u64> {
+    None
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1631,20 +1885,40 @@ unsafe extern "system" {
 
 #[cfg(target_os = "linux")]
 fn total_ram_bytes() -> Option<u64> {
+    linux_meminfo_kb("MemTotal:").map(|kb| kb * 1024)
+}
+
+#[cfg(target_os = "linux")]
+fn available_ram_bytes() -> Option<u64> {
+    linux_meminfo_kb("MemAvailable:").map(|kb| kb * 1024)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_meminfo_kb(prefix: &str) -> Option<u64> {
     let text = fs::read_to_string("/proc/meminfo").ok()?;
-    let kb = text
-        .lines()
-        .find_map(|line| line.strip_prefix("MemTotal:"))?
+    text.lines()
+        .find_map(|line| line.strip_prefix(prefix))?
         .split_whitespace()
         .next()?
         .parse::<u64>()
-        .ok()?;
-    Some(kb * 1024)
+        .ok()
 }
 
 #[cfg(target_os = "macos")]
 fn total_ram_bytes() -> Option<u64> {
-    let name = CString::new("hw.memsize").ok()?;
+    macos_sysctl_u64("hw.memsize")
+}
+
+#[cfg(target_os = "macos")]
+fn available_ram_bytes() -> Option<u64> {
+    let pages = macos_sysctl_u64("vm.page_free_count")?;
+    let page_size = macos_sysctl_u64("hw.pagesize")?;
+    Some(pages.saturating_mul(page_size))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sysctl_u64(name: &str) -> Option<u64> {
+    let name = CString::new(name).ok()?;
     let mut value = 0u64;
     let mut len = std::mem::size_of::<u64>();
     let ok = unsafe {
@@ -1673,6 +1947,16 @@ unsafe extern "C" {
 
 #[cfg(target_os = "windows")]
 fn total_ram_bytes() -> Option<u64> {
+    windows_memory_status().map(|status| status.ull_total_phys)
+}
+
+#[cfg(target_os = "windows")]
+fn available_ram_bytes() -> Option<u64> {
+    windows_memory_status().map(|status| status.ull_avail_phys)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_memory_status() -> Option<MemoryStatusEx> {
     let mut status = MemoryStatusEx {
         dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
         dw_memory_load: 0,
@@ -1685,7 +1969,7 @@ fn total_ram_bytes() -> Option<u64> {
         ull_avail_extended_virtual: 0,
     };
     let ok = unsafe { GlobalMemoryStatusEx(&mut status as *mut MemoryStatusEx) };
-    (ok != 0).then_some(status.ull_total_phys)
+    (ok != 0).then_some(status)
 }
 
 #[cfg(target_os = "windows")]
@@ -1703,13 +1987,41 @@ struct MemoryStatusEx {
 }
 
 #[cfg(target_os = "windows")]
+#[repr(C)]
+struct ProcessMemoryCountersEx {
+    cb: u32,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+    private_usage: usize,
+}
+
+#[cfg(target_os = "windows")]
 #[link(name = "Kernel32")]
 unsafe extern "system" {
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+    fn K32GetProcessMemoryInfo(
+        process: *mut std::ffi::c_void,
+        counters: *mut ProcessMemoryCountersEx,
+        size: u32,
+    ) -> i32;
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn total_ram_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn available_ram_bytes() -> Option<u64> {
     None
 }
 
@@ -1822,6 +2134,33 @@ mod tests {
         assert!(clean_id("../derek").is_err());
         assert!(clean_id("derek/profile").is_err());
         assert!(clean_id("").is_err());
+    }
+
+    #[test]
+    fn generation_ram_gate_uses_free_ram_and_measured_peak() {
+        assert_eq!(required_free_ram_bytes(None), DEFAULT_MIN_FREE_RAM_BYTES);
+        assert_eq!(
+            required_free_ram_bytes(Some(5 * GIBIBYTE)),
+            6 * GIBIBYTE
+        );
+        assert_eq!(
+            required_free_ram_bytes(Some(2 * GIBIBYTE)),
+            MIN_FREE_RAM_AFTER_MEASURE_BYTES
+        );
+
+        assert_eq!(
+            ram_allows_generation(Some(7 * GIBIBYTE), Some(16 * GIBIBYTE), None),
+            Some(true)
+        );
+        assert_eq!(
+            ram_allows_generation(Some(3 * GIBIBYTE), Some(16 * GIBIBYTE), None),
+            Some(false)
+        );
+        assert_eq!(
+            ram_allows_generation(Some(7 * GIBIBYTE), Some(4 * GIBIBYTE), None),
+            Some(false)
+        );
+        assert_eq!(ram_allows_generation(None, Some(16 * GIBIBYTE), None), None);
     }
 
     #[test]
