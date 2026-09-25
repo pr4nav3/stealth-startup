@@ -3,6 +3,7 @@ mod focus;
 mod session;
 mod voice;
 mod voice_runtime;
+mod webcam;
 
 use activity::ActivitySample;
 use focus::{FocusEngine, FocusSnapshot};
@@ -30,6 +31,7 @@ struct AppState {
     sessions: Mutex<SessionManager>,
     voice_download: Arc<Mutex<voice::VoiceDownloadState>>,
     voice_recording: Mutex<voice::VoiceRecordingState>,
+    webcam: webcam::WebcamPreview,
     started_at: Instant,
     identity: SupervisorIdentity,
 }
@@ -41,6 +43,7 @@ impl Default for AppState {
             sessions: Mutex::new(SessionManager::default()),
             voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
             voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
+            webcam: webcam::WebcamPreview::default(),
             started_at: Instant::now(),
             identity: supervisor_identity(),
         }
@@ -333,6 +336,17 @@ fn delete_voice_clip(
     voice::delete_clip(&app, input)
 }
 
+#[tauri::command]
+fn start_webcam_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    webcam::start_preview(app, &state.webcam)
+}
+
+#[tauri::command]
+fn stop_webcam_preview(state: State<'_, AppState>) -> Result<(), String> {
+    webcam::stop_preview(&state.webcam);
+    Ok(())
+}
+
 fn lock_sessions<'a>(
     state: &'a State<'_, AppState>,
 ) -> Result<std::sync::MutexGuard<'a, SessionManager>, String> {
@@ -389,7 +403,9 @@ pub fn run() {
             list_voice_profiles,
             delete_voice_profile,
             delete_voice_profile_clips,
-            delete_voice_clip
+            delete_voice_clip,
+            start_webcam_preview,
+            stop_webcam_preview
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Supervisor");

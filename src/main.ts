@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type PermissionState = "granted" | "missing" | "not_required";
@@ -10,7 +11,9 @@ type SessionStatus = "idle" | "active" | "paused" | "snoozed" | "complete";
 type FocusState = "focused" | "neutral" | "suspicious" | "distracted" | "idle";
 type Tab = "session" | "settings" | "history";
 type AppView = "main" | "overlay";
-type SettingsView = "home" | "voice";
+type SettingsView = "home" | "voice" | "webcam";
+type WebcamGaze = "at_pc" | "away_from_pc" | "at_phone";
+type WebcamReaction = "alarm" | "voice";
 type VoiceTone = "gentle" | "mom" | "stern" | "kind-reset";
 type VoiceSource = "starter" | "custom";
 type VoiceBusy = "download-model" | "delete-model" | "generate-clips" | "delete-voice" | null;
@@ -159,7 +162,10 @@ interface VoiceSystemInfo {
   arch: string;
   cpu_threads: number;
   total_ram_bytes: number | null;
+  available_ram_bytes: number | null;
   min_required_ram_bytes: number;
+  min_free_ram_bytes: number;
+  last_peak_ram_bytes: number | null;
   has_enough_ram: boolean | null;
   available_disk_bytes: number | null;
   recommended_free_disk_bytes: number;
@@ -231,6 +237,16 @@ interface RecordedVoice {
   bytes: number;
   seconds: number;
   name: string;
+}
+
+interface WebcamFrame {
+  face_in_frame: boolean;
+  gaze: WebcamGaze | null;
+  phone_in_frame: boolean;
+  looking_at_phone: boolean;
+  phone_count: number;
+  jpeg?: string;
+  error?: string | null;
 }
 
 interface VoiceRecordingSnapshot {
@@ -342,9 +358,20 @@ let feedbackMessage = "";
 let feedbackTimer: number | null = null;
 let pollId: number | null = null;
 let downloadPollId: number | null = null;
+let voiceRamPollId: number | null = null;
 let nudgeAudio: HTMLAudioElement | null = null;
 const playedNudgesBySession = new Map<number, number>();
 const pendingNudgesBySession = new Map<number, number>();
+const webcamSettings = {
+  phoneUse: false,
+  strict: false,
+  reaction: "alarm" as WebcamReaction,
+};
+let webcamFrame: WebcamFrame | null = null;
+let webcamError = "";
+let webcamHitStreak = 0;
+let webcamAlarmAtMs = 0;
+let webcamPreviewStarted = false;
 
 void init();
 
@@ -375,6 +402,9 @@ async function init(): Promise<void> {
   if (appView === "main") {
     await refreshVoiceStatus(false);
     await refreshVoiceDownload(false);
+    await listen<WebcamFrame>("webcam-frame", (event) => {
+      applyWebcamFrame(event.payload);
+    });
   }
   await refreshSnapshot();
 }
@@ -425,7 +455,10 @@ async function refreshSnapshot(): Promise<void> {
     lastError = errorText(error);
   }
 
-  render();
+  const webcamOpen = appView === "main" && activeTab === "settings" && settingsView === "webcam";
+  if (!webcamOpen) {
+    render();
+  }
   reconcilePolling();
 }
 
@@ -470,6 +503,9 @@ function render(): void {
   `;
 
   bindEvents();
+  if (activeTab === "settings" && settingsView === "webcam") {
+    paintWebcamDom();
+  }
 }
 
 function renderSession(current: CurrentSession | null): string {
@@ -740,6 +776,9 @@ function renderSettings(): string {
   if (settingsView === "voice") {
     return renderVoiceSettings();
   }
+  if (settingsView === "webcam") {
+    return renderWebcamSettings();
+  }
 
   return `
     <section class="settings-grid">
@@ -773,6 +812,15 @@ function renderSettings(): string {
         </div>
       </section>
 
+      <section class="panel settings-top-panel">
+        <h2>Webcam</h2>
+        <div class="voice-summary">
+          <strong>Live camera check</strong>
+          <span>Face, gaze, phone. Local only.</span>
+          <button type="button" data-action="open-webcam-settings">Open</button>
+        </div>
+      </section>
+
       <section class="panel settings-rules-panel">
         ${renderRuleManager(permanentRules, "settings", "Permanent rules")}
       </section>
@@ -782,6 +830,76 @@ function renderSettings(): string {
         <p class="quiet">Foreground app, PID, title, bounds, and idle time use documented Win32 desktop APIs. Titles can still be empty during app switches, custom-title windows, UWP hosting, or protected-process cases.</p>
       </section>
     </section>
+  `;
+}
+
+function renderWebcamSettings(): string {
+  const frame = webcamFrame;
+  const alerting = webcamWouldAlert(frame);
+  return `
+    <section class="webcam-page">
+      <div class="subpage-head">
+        <button type="button" data-action="back-settings">Back</button>
+        <div>
+          <p class="eyebrow">WEBCAM MONITORING</p>
+          <h2>Live camera check</h2>
+        </div>
+      </div>
+
+      <section class="webcam-home">
+        <section class="state-slab webcam-stage ${webcamStateClass(frame, alerting)}" aria-live="polite">
+          <div class="state-head">
+            <span id="webcam-chip">${webcamStatusChip(frame, alerting)}</span>
+            <span id="webcam-mode">${webcamModeLabel()}</span>
+          </div>
+          <h2 id="webcam-title">${escapeHtml(webcamTitle(frame, alerting))}</h2>
+          <p id="webcam-copy">${escapeHtml(webcamCopy(frame, alerting))}</p>
+          <div class="webcam-frame-wrap${frame?.jpeg ? " is-live" : ""}" id="webcam-frame-wrap">
+            <img id="webcam-preview" alt="Live webcam preview" />
+            <p id="webcam-waiting" class="webcam-waiting">Waiting for the first frame</p>
+          </div>
+          <p id="webcam-live-error" class="webcam-live-error"${webcamError ? "" : " hidden"}>${escapeHtml(webcamError)}</p>
+        </section>
+
+        <section class="panel signal-panel">
+          <h2>Phone checks</h2>
+          <label class="setting-row toggle-row">
+            <span>Watch phone use</span>
+            <span class="toggle-field">
+              <input id="webcam-phone-use" class="toggle-input" type="checkbox" ${webcamSettings.phoneUse ? "checked" : ""} aria-label="Watch phone use" />
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+            </span>
+          </label>
+          <div class="setting-row">
+            <span>Strictness</span>
+            <select id="webcam-strictness" ${webcamSettings.phoneUse ? "" : "disabled"}>
+              <option value="off" ${webcamSettings.strict ? "" : "selected"}>Not strict</option>
+              <option value="on" ${webcamSettings.strict ? "selected" : ""}>Strict</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <span>When it fires</span>
+            <select id="webcam-reaction" ${webcamSettings.phoneUse ? "" : "disabled"}>
+              <option value="alarm" ${webcamSettings.reaction === "alarm" ? "selected" : ""}>Alarm</option>
+              <option value="voice" ${webcamSettings.reaction === "voice" ? "selected" : ""}>Voice clip</option>
+            </select>
+          </div>
+          ${renderWebcamMetrics(frame)}
+          <p class="quiet">Frames stay on this PC. Nothing is stored. At-phone only if a phone is in the camera.</p>
+        </section>
+      </section>
+    </section>
+  `;
+}
+
+function renderWebcamMetrics(frame: WebcamFrame | null): string {
+  return `
+    <div class="metric-grid webcam-metrics">
+      ${metric("Face", frame?.face_in_frame ? "IN" : "OUT")}
+      ${metric("Gaze", webcamGazeLabel(frame))}
+      ${metric("Phone", frame?.phone_in_frame ? "IN FRAME" : "NO")}
+      ${metric("Alert", webcamWouldAlert(frame) ? "YES" : "NO")}
+    </div>
   `;
 }
 
@@ -896,7 +1014,7 @@ function renderVoiceCard(voice: VoiceOption): string {
   const selected = draft.voiceId === voice.id;
   const profile = voice.profile;
   const needsGeneration = Boolean(profile?.reference_retained && profile.clip_count === 0);
-  const canGenerate = needsGeneration && modelInstalled() && voiceBusy === null;
+  const canGenerate = needsGeneration && modelInstalled() && voiceBusy === null && ramAllowsGeneration();
   const canUse = voice.selectable && voiceBusy === null;
   const action = needsGeneration ? "generate-audio" : "select-voice";
   const actionLabel = needsGeneration ? "Generate audio" : selected ? "Selected" : "Use";
@@ -911,7 +1029,7 @@ function renderVoiceCard(voice: VoiceOption): string {
         ${profile && profile.clip_count > 0 ? renderClipPreview(profile) : ""}
       </div>
       <div class="voice-actions">
-        <button class="${needsGeneration ? "compact-action" : ""}" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" data-profile-id="${escapeHtml(profile?.profile_id ?? "")}" ${disabled ? "disabled" : ""}>${actionLabel}</button>
+        <button class="${needsGeneration ? "compact-action" : ""}" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" data-profile-id="${escapeHtml(profile?.profile_id ?? "")}" ${disabled ? "disabled" : ""} title="${needsGeneration && ramGenerationLocked() ? attr(ramLockMessage()) : ""}">${needsGeneration && ramGenerationLocked() ? "Clone locked" : actionLabel}</button>
         ${
           profile
             ? `<button class="danger" type="button" data-action="confirm-delete-voice" data-profile-id="${escapeHtml(profile.profile_id)}">Delete</button>`
@@ -939,19 +1057,50 @@ function renderClonePanel(): string {
   return `
     <div class="clone-status">
       <strong>${installed ? "Voice pack ready" : "Voice pack not downloaded"}</strong>
-      <p>Local cloning needs ${status ? formatBytes(status.recommended_free_bytes) : "around 2-4 GB"} disk and ${system ? formatBytes(system.min_required_ram_bytes) : "4 GB"} temporary RAM. Clone only your own voice or a voice you have permission to use.</p>
+      <p>Cloning is a short-lived local job. Focus sessions only play saved clips. Clone only your own voice or a voice you have permission to use.</p>
       <div class="model-facts">
         <span>${voiceBackend ? `${voiceBackend.profiles.length} custom voices` : "Checking voices"}</span>
-        <span>${system?.has_enough_ram === false ? "RAM tight" : "CPU local"}</span>
         <span>${runtime?.installed ? "Runtime ready" : "Runtime missing"}</span>
         <span>${status ? `${formatBytes(status.installed_bytes)} model` : "No model status"}</span>
+        <span>${status ? `${formatBytes(status.recommended_free_bytes)} disk` : "Disk ?"}</span>
       </div>
     </div>
+    ${renderRamLock()}
     <div class="clone-actions">
       <button class="primary" type="button" data-action="download-model-pack" ${installed || busy ? "disabled" : ""}>${downloadLabel}</button>
       <button type="button" data-action="record-voice" ${!installed || busy ? "disabled" : ""}>Record voice</button>
       <button type="button" data-action="delete-model-files" ${!installed || busy ? "disabled" : ""}>Delete model files, keep voices</button>
     </div>
+  `;
+}
+
+function renderRamLock(): string {
+  const system = voiceBackend?.system;
+  const locked = ramGenerationLocked();
+  const free = system?.available_ram_bytes ?? null;
+  const need = system?.min_free_ram_bytes ?? 0;
+  const peak = system?.last_peak_ram_bytes ?? null;
+  const fill = need > 0 && free !== null ? Math.max(4, Math.min(100, Math.round((free / need) * 100))) : 0;
+  const copy = locked
+    ? `This PC does not have enough free RAM for a clone job. Need about ${formatBytes(need)} free. Close browsers and other heavy apps, then come back. Recording a voice is cheap; generating clips is the heavy step.`
+    : peak
+      ? `Clone is allowed. Last job peaked at ${formatBytes(peak)}. Supervisor will refuse again if free RAM drops below ${formatBytes(need)}.`
+      : `Clone is allowed, using a conservative ${formatBytes(need)} free-RAM floor until a real peak is measured on this PC.`;
+
+  return `
+    <aside class="ram-lock ${locked ? "is-locked" : "is-clear"}" role="status" aria-live="polite">
+      <div class="ram-lock-stamp">${locked ? "CLONE LOCKED" : "CLONE CLEAR"}</div>
+      <p>${escapeHtml(copy)}</p>
+      <div class="ram-tank" aria-label="Free RAM versus clone budget">
+        <span class="ram-tank-fill" style="width: ${fill}%"></span>
+      </div>
+      <div class="ram-lock-meta">
+        <span>Free ${free === null ? "?" : formatBytes(free)}</span>
+        <span>Need ${need ? formatBytes(need) : "?"}</span>
+        <span>Peak ${peak === null ? "unmeasured" : formatBytes(peak)}</span>
+        <span>Machine ${system?.total_ram_bytes ? formatBytes(system.total_ram_bytes) : "?"}</span>
+      </div>
+    </aside>
   `;
 }
 
@@ -1028,7 +1177,8 @@ function renderVoiceDialogs(): string {
 
 function renderRecordingModal(): string {
   const isRecording = recordingState === "recording";
-  const canSave = Boolean(recordedVoice?.bytes && recordedVoice.name.trim() && voiceBusy === null);
+  const ramLocked = ramGenerationLocked();
+  const canSave = Boolean(recordedVoice?.bytes && recordedVoice.name.trim() && voiceBusy === null && !ramLocked);
 
   return `
     <div class="modal-backdrop" role="presentation">
@@ -1062,8 +1212,9 @@ function renderRecordingModal(): string {
                   <audio controls preload="metadata" src="${attr(recordedVoice.url)}"></audio>
                   <div class="modal-actions">
                     <button type="button" data-action="rerecord-voice">Re-record</button>
-                    <button class="primary" type="button" data-action="save-recorded-voice" ${canSave ? "" : "disabled"}>Save voice and generate audio clips</button>
+                    <button class="primary" type="button" data-action="save-recorded-voice" ${canSave ? "" : "disabled"}>${ramLocked ? "Clone locked" : "Save voice and generate audio clips"}</button>
                   </div>
+                  ${ramLocked ? `<p class="recording-error">Generation is locked until more RAM is free. The recording can wait.</p>` : ""}
                 `
                 : `<p class="empty">The clip will appear here after recording so you can play it back before generation.</p>`
             }
@@ -1213,10 +1364,14 @@ function renderHistory(): string {
 function bindEvents(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
+      const leavingWebcam = settingsView === "webcam";
       activeTab = button.dataset.tab as Tab;
       settingsView = "home";
       ruleEditor = null;
       render();
+      if (leavingWebcam) {
+        void stopWebcamPreview();
+      }
     });
   });
 
@@ -1266,6 +1421,22 @@ function bindEvents(): void {
 
   document.getElementById("status-window-enabled")?.addEventListener("change", (event) => {
     void updateStatusWindowEnabled((event.target as HTMLInputElement).checked);
+  });
+
+  document.getElementById("webcam-phone-use")?.addEventListener("change", (event) => {
+    webcamSettings.phoneUse = (event.target as HTMLInputElement).checked;
+    webcamHitStreak = 0;
+    render();
+  });
+
+  document.getElementById("webcam-strictness")?.addEventListener("change", (event) => {
+    webcamSettings.strict = (event.target as HTMLSelectElement).value === "on";
+    webcamHitStreak = 0;
+    paintWebcamDom();
+  });
+
+  document.getElementById("webcam-reaction")?.addEventListener("change", (event) => {
+    webcamSettings.reaction = (event.target as HTMLSelectElement).value as WebcamReaction;
   });
 
   document.getElementById("voice-name")?.addEventListener("input", (event) => {
@@ -1328,10 +1499,22 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "open-webcam-settings") {
+    settingsView = "webcam";
+    webcamError = "";
+    render();
+    await startWebcamPreview();
+    return;
+  }
+
   if (action === "back-settings") {
+    const leavingWebcam = settingsView === "webcam";
     settingsView = "home";
     phraseEditor = null;
     render();
+    if (leavingWebcam) {
+      await stopWebcamPreview();
+    }
     return;
   }
 
@@ -1822,6 +2005,10 @@ async function saveRecordedVoice(): Promise<void> {
   if (!recording?.path || !modelInstalled()) {
     return;
   }
+  if (ramGenerationLocked()) {
+    showFeedback(ramLockMessage());
+    return;
+  }
 
   const name = recording.name.trim();
   if (!name) {
@@ -1869,6 +2056,10 @@ async function generateProfileAudio(profileId: string, feedback = "Audio generat
   const profile = profileById(profileId);
   if (!profile?.reference_path || !modelInstalled()) {
     showFeedback(modelInstalled() ? "Reference missing" : "Download voice pack first");
+    return false;
+  }
+  if (ramGenerationLocked()) {
+    showFeedback(ramLockMessage());
     return false;
   }
 
@@ -1977,6 +2168,16 @@ function reconcilePolling(): void {
     window.clearInterval(pollId);
     pollId = null;
   }
+
+  const shouldPollRam = appView === "main" && activeTab === "settings" && settingsView === "voice";
+  if (shouldPollRam && voiceRamPollId === null) {
+    voiceRamPollId = window.setInterval(() => {
+      void refreshVoiceStatus(true);
+    }, 3000);
+  } else if (!shouldPollRam && voiceRamPollId !== null) {
+    window.clearInterval(voiceRamPollId);
+    voiceRamPollId = null;
+  }
 }
 
 function tabButton(tab: Tab, text: string): string {
@@ -2009,6 +2210,239 @@ function showFeedback(message: string): void {
     feedbackTimer = null;
     render();
   }, 1400);
+}
+
+async function startWebcamPreview(): Promise<void> {
+  if (webcamPreviewStarted) {
+    return;
+  }
+  try {
+    await invoke("start_webcam_preview");
+    if (settingsView !== "webcam" || activeTab !== "settings") {
+      await invoke("stop_webcam_preview");
+      return;
+    }
+    webcamPreviewStarted = true;
+    webcamError = "";
+  } catch (error) {
+    webcamPreviewStarted = false;
+    webcamError = errorText(error);
+    render();
+  }
+}
+
+async function stopWebcamPreview(): Promise<void> {
+  webcamPreviewStarted = false;
+  webcamHitStreak = 0;
+  try {
+    await invoke("stop_webcam_preview");
+  } catch {
+    // Worker may already be gone.
+  }
+}
+
+function applyWebcamFrame(frame: WebcamFrame): void {
+  if (frame.error) {
+    webcamError = frame.error;
+    if (!frame.jpeg) {
+      webcamHitStreak = 0;
+      if (settingsView === "webcam" && activeTab === "settings") {
+        paintWebcamDom();
+      }
+      return;
+    }
+  } else {
+    webcamError = "";
+  }
+  webcamFrame = frame;
+  const alerting = webcamWouldAlert(frame);
+  if (alerting) {
+    webcamHitStreak += 1;
+  } else {
+    webcamHitStreak = 0;
+  }
+  if (webcamHitStreak >= 8) {
+    void fireWebcamAlert();
+  }
+  if (settingsView === "webcam" && activeTab === "settings") {
+    paintWebcamDom();
+  }
+}
+
+function paintWebcamDom(): void {
+  const frame = webcamFrame;
+  const alerting = webcamWouldAlert(frame);
+  const img = document.getElementById("webcam-preview") as HTMLImageElement | null;
+  const wrap = document.getElementById("webcam-frame-wrap");
+  if (img && frame?.jpeg) {
+    img.src = `data:image/jpeg;base64,${frame.jpeg}`;
+    wrap?.classList.add("is-live");
+  }
+  const chip = document.getElementById("webcam-chip");
+  if (chip) {
+    chip.textContent = webcamStatusChip(frame, alerting);
+  }
+  const mode = document.getElementById("webcam-mode");
+  if (mode) {
+    mode.textContent = webcamModeLabel();
+  }
+  const title = document.getElementById("webcam-title");
+  if (title) {
+    title.textContent = webcamTitle(frame, alerting);
+  }
+  const copy = document.getElementById("webcam-copy");
+  if (copy) {
+    copy.textContent = webcamCopy(frame, alerting);
+  }
+  const slab = document.querySelector(".webcam-stage");
+  if (slab) {
+    slab.className = `state-slab webcam-stage ${webcamStateClass(frame, alerting)}`;
+  }
+  const liveError = document.getElementById("webcam-live-error");
+  if (liveError) {
+    liveError.textContent = webcamError;
+    liveError.hidden = !webcamError;
+  }
+  const metrics = document.querySelector(".webcam-metrics");
+  if (metrics) {
+    metrics.outerHTML = renderWebcamMetrics(frame);
+  }
+}
+
+function webcamModeLabel(): string {
+  if (!webcamSettings.phoneUse) {
+    return "PREVIEW";
+  }
+  return webcamSettings.strict ? "STRICT" : "WATCH";
+}
+
+function webcamWouldAlert(frame: WebcamFrame | null): boolean {
+  if (!frame || !webcamSettings.phoneUse) {
+    return false;
+  }
+  if (webcamSettings.strict) {
+    return frame.phone_in_frame;
+  }
+  return frame.looking_at_phone;
+}
+
+function webcamStateClass(frame: WebcamFrame | null, alerting: boolean): string {
+  if (alerting) {
+    return "state-distracted";
+  }
+  if (!frame?.face_in_frame) {
+    return "";
+  }
+  if (frame.gaze === "at_pc") {
+    return "state-focused";
+  }
+  if (frame.gaze === "away_from_pc") {
+    return "state-muted";
+  }
+  return "state-distracted";
+}
+
+function webcamStatusChip(frame: WebcamFrame | null, alerting: boolean): string {
+  if (alerting) {
+    return "PHONE";
+  }
+  if (!frame) {
+    return "STARTING";
+  }
+  return frame.face_in_frame ? "LIVE" : "NO FACE";
+}
+
+function webcamTitle(frame: WebcamFrame | null, alerting: boolean): string {
+  if (alerting) {
+    return "On the phone";
+  }
+  if (!frame) {
+    return "Opening camera";
+  }
+  if (!frame.face_in_frame) {
+    return "Out of frame";
+  }
+  if (frame.gaze === "at_pc") {
+    return "At the PC";
+  }
+  if (frame.gaze === "away_from_pc") {
+    return "Looking away";
+  }
+  if (frame.gaze === "at_phone") {
+    return "On the phone";
+  }
+  return "Watching";
+}
+
+function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
+  if (!webcamSettings.phoneUse) {
+    return "Preview only. Turn on phone checks to fire an alarm or clip.";
+  }
+  if (alerting) {
+    return webcamSettings.strict ? "Phone is in frame." : "Looking at a phone in the camera.";
+  }
+  if (!frame?.face_in_frame) {
+    return "Sit in view of the webcam.";
+  }
+  if (frame.gaze === "at_pc") {
+    return "Head toward the screen.";
+  }
+  if (frame.phone_in_frame) {
+    return "Phone is visible. Looking at the PC, so this is not a phone hit yet.";
+  }
+  return "Looking away. No phone in the camera.";
+}
+
+function webcamGazeLabel(frame: WebcamFrame | null): string {
+  if (!frame?.face_in_frame) {
+    return "-";
+  }
+  if (frame.gaze === "at_pc") {
+    return "PC";
+  }
+  if (frame.gaze === "at_phone") {
+    return "PHONE";
+  }
+  if (frame.gaze === "away_from_pc") {
+    return "AWAY";
+  }
+  return "-";
+}
+
+async function fireWebcamAlert(): Promise<void> {
+  const now = Date.now();
+  if (now - webcamAlarmAtMs < 8000) {
+    return;
+  }
+  webcamAlarmAtMs = now;
+  if (webcamSettings.reaction === "voice") {
+    const clip = selectedNudgeClip(1);
+    if (clip) {
+      try {
+        nudgeAudio?.pause();
+        nudgeAudio = new Audio(clipAssetUrl(clip.path));
+        await nudgeAudio.play();
+        return;
+      } catch {
+        // Fall through to the alarm.
+      }
+    }
+  }
+  playWebcamAlarm();
+}
+
+function playWebcamAlarm(): void {
+  const context = new AudioContext();
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.type = "square";
+  oscillator.frequency.value = 880;
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  gain.gain.setValueAtTime(0.08, context.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.28);
+  oscillator.start();
+  oscillator.stop(context.currentTime + 0.28);
 }
 
 function permissionNotice(current: CurrentSession | null): string {
@@ -2276,6 +2710,21 @@ function modelInstalled(): boolean {
   return Boolean(voiceBackend?.model.installed && voiceBackend.runtime.installed);
 }
 
+function ramGenerationLocked(): boolean {
+  return voiceBackend?.system.has_enough_ram === false;
+}
+
+function ramAllowsGeneration(): boolean {
+  return voiceBackend?.system.has_enough_ram !== false;
+}
+
+function ramLockMessage(): string {
+  const system = voiceBackend?.system;
+  const need = system?.min_free_ram_bytes ? formatBytes(system.min_free_ram_bytes) : "enough";
+  const free = system?.available_ram_bytes != null ? formatBytes(system.available_ram_bytes) : "unknown";
+  return `Clone locked. Need about ${need} free RAM, this PC has ${free} free.`;
+}
+
 function canEditPhrases(): boolean {
   return modelInstalled() && voiceBusy === null;
 }
@@ -2434,7 +2883,7 @@ function voiceBusyTitle(): string {
 
 function voiceBusyCopy(): string {
   if (voiceBusy === "generate-clips") {
-    return "The local worker is cloning the voice and writing WAV files for every phrase.";
+    return "The local worker is cloning the voice, sampling peak RAM, and will quit when the clips are written.";
   }
   if (voiceBusy === "download-model") {
     return "The model pack is large. Supervisor will return to small mode after generation.";

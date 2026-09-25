@@ -231,12 +231,75 @@ h1 {
   gap: 14px;
 }
 
+.webcam-home {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  grid-template-areas: "state signal";
+  align-items: start;
+  gap: 14px;
+}
+
 .settings-grid,
 .voice-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
   gap: 14px;
+}
+
+.webcam-stage {
+  min-height: 258px;
+}
+
+.webcam-stage h2 {
+  margin-top: 18px;
+  font-size: 2.2rem;
+}
+
+.webcam-frame-wrap {
+  position: relative;
+  overflow: hidden;
+  margin-top: 16px;
+  border: var(--border);
+  border-radius: var(--radius-card);
+  background: var(--ink);
+}
+
+.webcam-frame-wrap img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  max-height: min(420px, 46vh);
+  object-fit: contain;
+  background: var(--ink);
+}
+
+.webcam-waiting {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.webcam-frame-wrap.is-live .webcam-waiting {
+  display: none;
+}
+
+.webcam-live-error {
+  margin-top: 10px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.webcam-metrics {
+  margin-top: 12px;
 }
 
 .state-slab,
@@ -887,6 +950,89 @@ audio {
   background: var(--white-soft);
 }
 
+.ram-lock {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: var(--border);
+  border-radius: var(--radius-card);
+  padding: 12px;
+  box-shadow: var(--shadow);
+}
+
+.ram-lock.is-locked {
+  background:
+    repeating-linear-gradient(
+      -18deg,
+      rgba(255, 104, 79, 0.16) 0 8px,
+      rgba(255, 247, 223, 0.92) 8px 16px
+    );
+}
+
+.ram-lock.is-clear {
+  background: var(--acid);
+}
+
+.ram-lock-stamp {
+  width: fit-content;
+  border: var(--border);
+  padding: 3px 8px;
+  background: var(--ink);
+  color: var(--acid);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.ram-lock.is-locked .ram-lock-stamp {
+  background: var(--danger);
+  color: var(--ink);
+}
+
+.ram-lock p {
+  margin: 0;
+  max-width: 42ch;
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+.ram-tank {
+  position: relative;
+  height: 18px;
+  overflow: hidden;
+  border: var(--border);
+  background: var(--paper);
+}
+
+.ram-tank-fill {
+  display: block;
+  height: 100%;
+  background: var(--cobalt);
+}
+
+.ram-lock.is-locked .ram-tank-fill {
+  background: var(--danger);
+}
+
+.ram-lock-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ram-lock-meta span {
+  border: 1px solid rgba(16, 16, 16, 0.4);
+  padding: 2px 6px;
+  background: var(--white-soft);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .clone-actions {
   grid-template-columns: 1fr;
 }
@@ -1230,10 +1376,17 @@ audio {
   .session-home,
   .settings-grid,
   .voice-grid,
+  .webcam-home,
   .preflight-grid,
   .recording-grid,
   .history-item {
     grid-template-columns: 1fr;
+  }
+
+  .webcam-home {
+    grid-template-areas:
+      "state"
+      "signal";
   }
 
   .session-home {
