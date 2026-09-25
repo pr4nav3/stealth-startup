@@ -1,5 +1,4 @@
 mod activity;
-mod browser_bridge;
 mod focus;
 mod session;
 mod voice;
@@ -29,7 +28,6 @@ const OVERLAY_MARGIN: i32 = 18;
 struct AppState {
     focus_engine: Mutex<FocusEngine>,
     sessions: Mutex<SessionManager>,
-    browser_bridge: browser_bridge::BrowserBridge,
     voice_download: Arc<Mutex<voice::VoiceDownloadState>>,
     voice_recording: Mutex<voice::VoiceRecordingState>,
     started_at: Instant,
@@ -41,7 +39,6 @@ impl Default for AppState {
         Self {
             focus_engine: Mutex::new(FocusEngine::default()),
             sessions: Mutex::new(SessionManager::default()),
-            browser_bridge: browser_bridge::BrowserBridge::default(),
             voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
             voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
             started_at: Instant::now(),
@@ -357,7 +354,6 @@ pub fn run() {
         .setup(|app| {
             setup_status_window(app)?;
             setup_tray(app)?;
-            start_browser_bridge(app);
             start_session_ticker(app.handle().clone());
             Ok(())
         })
@@ -624,17 +620,8 @@ fn start_session_ticker(app: AppHandle) {
     });
 }
 
-fn current_activity_sample(state: &State<'_, AppState>) -> Result<ActivitySample, String> {
+fn current_activity_sample(_state: &State<'_, AppState>) -> Result<ActivitySample, String> {
     activity::current_activity_sample()
-        .map(|sample| state.browser_bridge.enrich_activity_sample(sample))
-}
-
-fn start_browser_bridge(app: &tauri::App) {
-    let state = app.state::<AppState>();
-    match state.browser_bridge.start() {
-        Ok(port) => eprintln!("Supervisor browser bridge listening on 127.0.0.1:{port}"),
-        Err(error) => eprintln!("Supervisor browser bridge unavailable: {error}"),
-    }
 }
 
 fn supervisor_identity() -> SupervisorIdentity {
