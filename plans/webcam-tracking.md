@@ -1,113 +1,104 @@
-# Webcam Tracking (Post-V1)
+# Webcam Tracking
 
-Last updated: 2026-08-15
+Last updated: 2026-09-06
 
-Work this as a **bakeoff first**, same shape as the voice bakeoff. Do not put a
-camera into the Tauri app until a tiny local detector is reliable on a real
-desk. Tracker item: `plans/STATUS.md` §8.
+Ship this as a small, optional session feature. Bake off the detector in a
+script first, then wire it. Tracker item: `plans/STATUS.md` §7.
 
-## What already exists
+Do not add extra product states (walked away, reaching, emotion, identity,
+gaze-to-pixel). The signals below are enough.
 
-Nothing in code. Camera is a V1 non-goal:
+## Signals
 
-- Privacy promise: no camera in V1, local metadata only.
-- Capture table: camera frames are V2 only.
-- Acceptance: app must work without a webcam.
+Local only. **8 fps.** Tiny models. Frames are never stored or uploaded.
 
-The UI mocks already pretend this exists (`phone reaches` / `phone hits` in
-the style guides). That is copy, not a pipeline.
+1. **Face in frame / not in frame**
+2. **When a face is in frame, exactly one gaze label:**
+   - **at PC** — head toward the screen
+   - **at phone** — looking away from the PC **and** a phone is in the camera
+   - **away from PC** — looking away, but no phone is visible
+3. **Phone in frame** (object detector, `cell phone` class)
 
-Voice is the wrong analogy for *when* the model runs. Voice is generated
-ahead of time and only played during a session. Camera has to run **live**
-during a session, so the model must stay small.
+Looking down at a hand does **not** count as phone use unless the phone
+itself is in frame. Head-down with no phone is `away from PC`.
 
-## Goal
+History can count hits. The UI gets these states, not pixels.
 
-Simple real-life drift, local only:
+## User controls
 
-1. **In seat** — a face is in the webcam.
-2. **Looking away** — a face is present but turned off-screen for a few seconds.
-3. **Phone visible** — a phone is in the frame.
+Camera is off until the user turns a check on. The app must keep working with
+no webcam, or with the camera denied.
 
-Compose the product events from those:
+During a session, the user can toggle:
 
-- Walked away: no face, and input idle already agrees.
-- On the phone: face still there, phone visible, maybe looking down.
-- Reaching: phone enters the frame near a hand, or a hand leaves the keyboard
-  area toward the lap. Do not train a custom “reach” network for this.
+| Control | What it does |
+| --- | --- |
+| Phone use | Off: ignore phone signals. On: react when the check fires. |
+| Phone strictness | Only when phone use is on. **Not strict:** wait a couple of seconds; fire on `at phone`. **Strict:** fire sooner; also fire on `phone in frame` while still looking at the PC. |
+| Phone reaction | Alarm, or a cached voice clip (same playback path as other nudges). |
 
-That is enough. Skip emotion, identity, gaze-to-pixel, screenshots of the
-monitor, and anything that needs a GPU.
+Face in/out of frame is always tracked while the camera is on, so later
+toggles can use it. Do not invent a “you walked away” nudge unless we add
+an explicit toggle later.
+
+One noisy frame must not fire. A second or two of persistence is the only
+debounce this needs; reuse the existing snooze / cooldown so camera alerts
+do not stack on top of app-drift nudges.
 
 ## How to build it
 
-### Bakeoff (now, side by side)
+### Bakeoff (script, not the app)
 
-A short-lived Python script, not the app:
+`webcam_bakeoff/`, same shape as the voice bakeoff:
 
-- Grab webcam at **1–2 fps**, not a video stream.
-- Run off-the-shelf tiny models (MediaPipe face/pose/hands, plus a nano
-  object detector with a `cell phone` class).
-- Print timestamps and labels. Optional developer overlay. No saved video
-  unless you explicitly dump a local debug clip.
-- Measure CPU, RAM, false positives at a normal desk (phone on the table,
-  phone in hand, empty chair, looking at a second monitor).
+- Grab the webcam at **8 fps**.
+- YuNet face + 5 landmarks. Yaw/pitch from image-space ratios (not solvePnP
+  Euler angles — those wrap to ~-170° on a normal screen-facing face).
+  Mild downward pitch is still at-PC; a deeper nod is not.
+- YOLOX-s @ 640, COCO `cell phone` only. Full frame plus a lower-center
+  square so lap / half-in-frame phones have enough pixels.
+- Print timestamps and labels. Optional overlay. No saved video unless an
+  explicit dump flag is set.
 
-Gate before app work:
+This matches the simple local stacks in Focus-Guardian / facetrak (head pose
++ phone box) without MediaPipe wheels, Ultralytics, or PnP Euler wrap bugs.
+
+Gate:
 
 | Signal | Pass if |
 | --- | --- |
-| In seat | Almost never says “gone” while you are clearly in frame |
-| Phone visible | Catches phone-in-hand; does not fire on a phone sitting unused on the desk for long (or we treat desk-phone as a weak signal) |
-| Looking away | Second monitor should not look like a phone session |
-| Budget | Fits in a sidecar; kill it when the session ends. Prefer well under 500 MB extra RAM |
+| Face in / out | Almost never says “gone” while a face is clearly in frame |
+| At PC vs away | Looking at the laptop reads as PC; looking down with no phone reads as away |
+| At phone | Looking down with a phone in hand reads as phone; the same head pose with no phone in frame stays away |
+| Phone in frame | Catches a phone held up, in the lap, or half in the lower frame |
+| Budget | Sidecar, kill on session end. Well under 500 MB extra RAM |
 
-### App wiring (later)
+ONNX Runtime + OpenCV DNN. Apache-licensed models only. Do not ship official
+MediaPipe PyPI wheels (they send usage metrics). Do not use Ultralytics YOLO
+(AGPL).
 
-Copy the voice-sidecar rule: **no vision model in the main process**.
+### App wiring
+
+No vision model in the main process.
 
 ```
-webcam worker  --1-2 fps-->  JSON events  -->  focus engine
-     |                         |
-  frames die here         never stored
+webcam worker  --4 fps-->  JSON states  -->  session checks
+     |                          |
+  frames die here          never stored
 ```
 
-The UI gets states (`in_seat`, `looking_away`, `phone_visible`), not pixels.
-No preview in the main session screen unless we add a one-time calibration
-view. Off by default. Session-only. Kill the worker on stop.
+Session-only. Kill the worker on stop. macOS needs `NSCameraUsageDescription`
+when this is bundled; Windows uses OS camera privacy. Capture in the sidecar,
+not the Tauri WebView.
 
-Feed events into the existing focus state machine with the same hysteresis
-and snooze rules. One frame of a phone must not nudge.
+## Out of scope
 
-### Privacy
-
-- Local inference only. No upload, no telemetry, no frame cache by default.
-- Camera permission copy on both OS-es (Mac will need `NSCameraUsageDescription`
-  later; Windows uses OS camera privacy).
-- Easy off. App must keep working with the camera denied or missing.
-- Do not log bounding boxes or images into session history. A count like
-  “2 phone hits” is enough.
-
-## What to improve vs a naive build
-
-1. **Do not start with action recognition.** “Reaching for phone” is a
-   composition of face + phone + hand. A custom visual model is extra work
-   for a worse, creepier product.
-2. **Keep it optional.** Window rules remain the default supervisor. Camera
-   is a second signal for people who want it.
-3. **Low FPS is the feature.** It saves CPU, RAM, and makes the privacy
-   story honest.
-4. **Desk phones will false-positive.** Need a stable-phone-on-desk rule
-   (bbox barely moves, or it has been visible since session start) or the
-   metric becomes noise.
-5. **Second monitors look like “looking away.”** Require looking-away *and*
-   (phone visible or hands gone) before a nudge, or people with a side
-   screen will hate it.
-6. **Same cooldowns as app drift.** Camera should not become a second,
-   nagging personality.
+Walked-away events, reaching, hands models, dual-monitor special cases,
+custom action networks, GPU, always-on camera, frame preview on the session
+screen (a one-time “can you see me?” check is fine).
 
 ## Order
 
-Bakeoff can start on Windows whenever a webcam is handy. Do not block items
-1–4 on it. Wire into Supervisor only after the bakeoff gate passes and the
-Windows voice loop is usable.
+Bakeoff can run on Windows whenever a webcam is handy. Do not block items
+1–4 on it. Wire into the app after the bakeoff gate passes and the Windows
+voice loop can play a clip.

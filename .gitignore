@@ -10,3 +10,4 @@ src-tauri/target/
 vendor/ponytail/
 voice_bakeoff/model_cache/
 voice_bakeoff/runs/
+webcam_bakeoff/models/
