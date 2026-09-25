@@ -3,7 +3,7 @@
 Living log of what is done and what is left. Update this file when a item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-08-15 (webcam tracking added)
+Last updated: 2026-09-22 (session storage design settled; extension popup dropped)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
 ship target. There is no Mac on hand anymore, so Windows is the development and
@@ -22,7 +22,6 @@ These are in the repo and were verified on the last Mac, except where noted.
 - [x] Focus engine with cooldowns, idle skip, no instant nudge on app switch
 - [x] Session start / pause / snooze / stop / mark relevant / mark distracting
 - [x] Session, Settings, History screens plus compact overlay and tray
-- [x] Chrome MV3 localhost tab bridge (background relay only; no popup UI yet)
 - [x] Custom voice path: model download, mic record in Rust, out-of-process
       generation, cached WAV playback
 - [x] Frozen **macOS ARM64** voice runtime zip, SHA-256 verified
@@ -39,14 +38,17 @@ Status key: `not started` · `blocked` · `in progress` · `done`
 
 ### 1. Windows app + Windows voice runtime
 
-Status: **not started** · owner machine: Windows
+Status: **in progress** · owner machine: Windows
 
-- [ ] Run the app on Windows: session, overlay pin/unpin, snooze, first-click
-      behavior, Chrome enrichment
+- [x] Run the app on Windows: session, overlay pin/unpin, snooze, first-click
+      (Chrome extension deferred; native window titles are enough for V1)
 - [ ] Prove Win32 capture edge cases (empty titles, UWP host, idle, protected
       processes, fullscreen / UAC)
-- [ ] Build `supervisor-voice-runtime-windows-x64.zip` on Windows with
+- [x] Build `supervisor-voice-runtime-windows-x64.zip` on Windows with
       `scripts/build_voice_runtime.py --target windows-x64`
+      (local zip: `dist/supervisor-voice-runtime-windows-x64.zip`,
+      SHA-256 `69bace321f9f5f8f6c6fbec3c4dc20a50f109ffa60ed9fdd5c19f76f26ec9b0a`,
+      310736158 bytes; not in Git)
 - [ ] Dev voice path: `.venv-voice-runtime-windows` launches the Python worker
 - [ ] Prod voice path: app downloads the frozen zip, launches
       `supervisor-voice-worker.exe`, record → generate → play → delete →
@@ -79,17 +81,23 @@ should not hide a broken runtime.
 - [ ] Ship them with the app, or hide starter playback until they exist
 - [ ] Confirm a first-run session can nudge with a starter voice and no clone
 
-### 4. Local SQLite persistence
+### 4. Local SQLite persistence, session reports, trends
 
 Status: **not started** (nothing in the repo yet; voice files already persist
-on disk)
+on disk) · design: `plans/session-storage.md`
 
-Keep it local. No cloud.
+Keep it local. No cloud. Session-only tracking; no always-on mode.
 
-- [ ] Persist rules, settings, selected voice, and session history
-- [ ] Survive app restart
-- [ ] Deletion paths: delete a voice, delete clips, delete history
-- [ ] One runnable check around load/save
+- [ ] `rusqlite` bundled, migrations, `setting` + `rule` persistence
+- [ ] Span writer (merge on change, flush on close) + `session` / `span` /
+      `event` tables
+- [ ] Orphan recovery on launch: `ended_at IS NULL` closes as `abandoned`
+- [ ] Rollups + `recompute_session_metrics`, history and report commands
+- [ ] Session report screen: headline, timeline bar, category bars, top drifts
+- [ ] Trends above History: attention-span sparkline, focus % per day
+- [ ] Deletion paths: delete a voice, delete clips, delete one session, delete
+      all history, scrub window titles
+- [ ] One runnable check around rollup + reload + orphan recovery
 
 ### 5. UI overhaul
 
@@ -100,37 +108,47 @@ notes already live in `plans/supervisor-style-guide-braindock-ish.md` and
 `plans/supervisor-style-guide-mashup.md`. Do not start this until the Windows
 loop in item 1 is usable.
 
-### 6. Web extension popup
+The report and trend screens in item 4 are the overhaul for the History tab
+and the post-session view. Settle the styling before building them so they are
+not built twice.
 
-Status: **not started**
-
-Today the Chrome extension only relays the active tab in the background.
-
-- [ ] Small popup when the toolbar icon is clicked
-- [ ] Show 1–2 simple facts (for example current window / tab)
-- [ ] State that all data stays local
-- [ ] Direct people to the Supervisor app for everything else
-
-### 7. GitHub Releases website
+### 6. GitHub Releases website
 
 Status: **not started**
 
 - [ ] A public page that lists GitHub Releases (voice packs, later app builds)
 - [ ] No telemetry, no account system, no cloud processing pitch
 
-### 8. Webcam presence / phone tracking
+### 7. Webcam presence / phone tracking
 
-Status: **not started** · can bake off in parallel · do not wire into the app
-until the detector is boringly reliable
+Status: **in progress** · Settings live preview wired on Windows
 
-V1 explicitly deferred camera. Style mocks already show `phone reaches` /
-`phone hits` as a metric. Approach: `plans/webcam-tracking.md`.
+Signals and toggles: `plans/webcam-tracking.md`. `at phone` only if a phone
+is in frame; otherwise looking down is `away from PC`.
 
-- [ ] Offline bakeoff: local tiny models, 1–2 fps, discrete events only
-- [ ] Prove three simple signals: in-seat, looking away, phone visible
-- [ ] Compose “on phone / reaching” from those, not a custom action model
-- [ ] App integration later: optional, session-only, off by default
-- [ ] Same focus-engine cooldowns; never store or upload frames
+- [x] Offline bakeoff: YuNet + YOLOX-s, 4 fps, JSON labels
+- [x] Prove: face in/out; when in frame, at PC / away from PC / at phone;
+      phone in frame (script smoke on this Windows PC)
+- [x] Settings: live frames, phone use on/off, strict vs not strict,
+      alarm vs voice clip
+- [ ] Session-time camera nudges (optional, off until a check is on)
+- [ ] Wire webcam states into `session.rs` — today `webcam.rs` only feeds the
+      Settings preview and `session.rs` has no webcam reference at all
+- [ ] Package the detector as a frozen sidecar; it cannot ship as `.venv-webcam`
+- [x] Never store or upload frames; a second of persistence before firing
+
+Dev path uses `.venv-webcam` and `webcam_bakeoff/run_tracker.py --preview`.
+Head pose is YuNet yaw/pitch ratios (solvePnP Euler wrapped to -170 on a
+normal face and was reverted). Phone detect is YOLOX-s with a lower-center
+square at 8 fps. Not packaged as a frozen sidecar yet.
+
+### 8. Shippable Windows build
+
+Status: **not started**
+
+- [ ] Installer that a stranger can run
+- [ ] Code signing, or a written answer for the SmartScreen warning an
+      unsigned download will show
 
 ## Test gate
 
@@ -146,9 +164,14 @@ Until a Mac is available again:
 
 ## Suggested order
 
-1 → 2 → 4 can overlap slightly once the Windows app runs → 3 → 6 → 7 → 5.
+1 → 2 → 3 are the ship blockers: the Windows voice production path has never
+run end to end, and starter voices still have no audio, so a first-run user
+who has not cloned a voice gets a silent nudge.
 
-Item 8 bakeoff can run **beside** 1–4 as a separate script. App wiring waits
+4 can overlap with 1–3 — it touches no voice code. Settle item 5's styling
+before item 4's report screens. Then 6 → 8.
+
+Item 7 bakeoff can run **beside** 1–4 as a separate script. App wiring waits
 until the detector works, and until the Windows voice loop is usable.
 
-Item 5 stays last until the UI direction is confirmed.
+Item 5 can start once session and preflight direction is settled.
