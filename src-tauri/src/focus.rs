@@ -1,4 +1,4 @@
-use crate::activity::ActivitySample;
+use crate::activity::{ActivitySample, should_treat_as_neutral};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -29,6 +29,20 @@ impl FocusEngine {
     }
 
     pub fn record_sample(&mut self, sample: &ActivitySample, now: Duration) -> FocusSnapshot {
+        if should_treat_as_neutral(sample) {
+            self.window_key = None;
+            self.window_started_at = now;
+            return self.snapshot(
+                sample,
+                FocusState::Neutral,
+                RuleClassification::Neutral,
+                None,
+                false,
+                None,
+                now,
+            );
+        }
+
         let key = WindowKey::from_sample(sample);
         if self.window_key.as_ref() != Some(&key) {
             self.window_key = Some(key);
@@ -421,6 +435,39 @@ mod tests {
                 screen_recording: PermissionState::Granted,
             },
         }
+    }
+
+    #[test]
+    fn neutral_capture_kind_never_drifts() {
+        let mut engine = test_engine(vec![AppRule::title_contains(
+            "YouTube",
+            RuleClassification::Distracting,
+        )]);
+
+        let neutral = ActivitySample {
+            captured_at: "2026-08-12T00:00:00Z".to_string(),
+            platform: "windows",
+            app_name: "SearchHost".to_string(),
+            process_path: "C:\\Windows\\SystemApps\\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\\SearchHost.exe".to_string(),
+            process_id: 42,
+            window_title: Some("Search".to_string()),
+            window_id: "window-1".to_string(),
+            bounds: Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1440.0,
+                height: 900.0,
+            },
+            idle_seconds: Some(0.0),
+            permissions: CapturePermissions {
+                screen_recording: PermissionState::Granted,
+            },
+        };
+        let snapshot = engine.record_sample(&neutral, seconds(120));
+
+        assert_eq!(snapshot.state, FocusState::Neutral);
+        assert_eq!(snapshot.classification, RuleClassification::Neutral);
+        assert!(!snapshot.should_nudge);
     }
 
     fn seconds(value: u64) -> Duration {
