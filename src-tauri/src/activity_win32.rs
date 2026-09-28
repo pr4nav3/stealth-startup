@@ -11,7 +11,7 @@ type Hwnd = isize;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const DWMWA_CLOAKED: u32 = 14;
 const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
-const MAX_PATH: usize = 260;
+const PROCESS_IMAGE_PATH_CHARS: usize = 32768;
 
 #[repr(C)]
 struct Rect {
@@ -297,7 +297,7 @@ fn query_process_path(process_id: u32) -> Result<String, ()> {
 }
 
 fn read_process_image_path(handle: *mut c_void) -> Result<String, ()> {
-    let mut buffer = vec![0u16; MAX_PATH];
+    let mut buffer = vec![0u16; PROCESS_IMAGE_PATH_CHARS];
     let mut size = buffer.len() as u32;
     let ok = unsafe {
         QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size as *mut u32)
