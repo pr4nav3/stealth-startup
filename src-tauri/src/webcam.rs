@@ -14,11 +14,17 @@ const WORKER_EVENT: &str = "webcam-frame";
 pub struct WebcamFrame {
     pub face_in_frame: bool,
     pub gaze: Option<String>,
+    #[serde(default)]
+    pub person_in_frame: bool,
+    #[serde(default)]
+    pub present: bool,
     pub phone_in_frame: bool,
     #[serde(default)]
     pub looking_at_phone: bool,
     #[serde(default)]
     pub phone_count: u32,
+    #[serde(default)]
+    pub phone_confidence: f32,
     #[serde(default)]
     pub jpeg: String,
     #[serde(default)]
@@ -30,9 +36,12 @@ impl WebcamFrame {
         Self {
             face_in_frame: false,
             gaze: None,
+            person_in_frame: false,
+            present: false,
             phone_in_frame: false,
             looking_at_phone: false,
             phone_count: 0,
+            phone_confidence: 0.0,
             jpeg: String::new(),
             error: Some(message.into()),
         }
@@ -216,10 +225,11 @@ mod tests {
 
     #[test]
     fn parses_worker_json_line() {
-        let line = r#"{"face_in_frame":true,"gaze":"at_pc","phone_in_frame":false,"looking_at_phone":false,"phone_count":0,"jpeg":"","ts":1}"#;
+        let line = r#"{"face_in_frame":true,"gaze":null,"person_in_frame":true,"present":true,"phone_in_frame":false,"looking_at_phone":false,"phone_count":0,"phone_confidence":0.0,"jpeg":""}"#;
         let frame: WebcamFrame = serde_json::from_str(line).unwrap();
         assert!(frame.face_in_frame);
-        assert_eq!(frame.gaze.as_deref(), Some("at_pc"));
+        assert_eq!(frame.gaze, None);
+        assert!(frame.present);
         assert!(!frame.looking_at_phone);
         assert!(frame.jpeg.is_empty());
     }

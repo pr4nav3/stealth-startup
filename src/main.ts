@@ -242,9 +242,12 @@ interface RecordedVoice {
 interface WebcamFrame {
   face_in_frame: boolean;
   gaze: WebcamGaze | null;
+  person_in_frame?: boolean;
+  present?: boolean;
   phone_in_frame: boolean;
   looking_at_phone: boolean;
   phone_count: number;
+  phone_confidence?: number;
   jpeg?: string;
   error?: string | null;
 }
@@ -896,7 +899,7 @@ function renderWebcamMetrics(frame: WebcamFrame | null): string {
   return `
     <div class="metric-grid webcam-metrics">
       ${metric("Face", frame?.face_in_frame ? "IN" : "OUT")}
-      ${metric("Gaze", webcamGazeLabel(frame))}
+      ${metric("Present", webcamPresentLabel(frame))}
       ${metric("Phone", frame?.phone_in_frame ? "IN FRAME" : "NO")}
       ${metric("Alert", webcamWouldAlert(frame) ? "YES" : "NO")}
     </div>
@@ -2393,20 +2396,14 @@ function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
   return "Looking away. No phone in the camera.";
 }
 
-function webcamGazeLabel(frame: WebcamFrame | null): string {
-  if (!frame?.face_in_frame) {
-    return "-";
+function webcamPresentLabel(frame: WebcamFrame | null): string {
+  if (frame?.present) {
+    return "YES";
   }
-  if (frame.gaze === "at_pc") {
-    return "PC";
+  if (frame?.face_in_frame || frame?.person_in_frame) {
+    return "RAW";
   }
-  if (frame.gaze === "at_phone") {
-    return "PHONE";
-  }
-  if (frame.gaze === "away_from_pc") {
-    return "AWAY";
-  }
-  return "-";
+  return "NO";
 }
 
 async function fireWebcamAlert(): Promise<void> {

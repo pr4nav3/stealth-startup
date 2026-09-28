@@ -1,41 +1,32 @@
-# Webcam Bakeoff
+# Webcam bakeoff
 
-Tiny local models for Supervisor item 8.
+Local-only signals for Supervisor:
 
-Labels:
+1. **Phone in frame** — any visible cell phone (YOLO11n COCO class, dual-view).
+2. **User present** — YuNet face **or** YOLO person, with hysteresis.
 
-- `face_in_frame`
-- `gaze`: `at_pc` | `away_from_pc` | `at_phone` | `null` (no face)
-- `phone_in_frame`
-- `looking_at_phone` — true only when `gaze` is `at_phone`
+**Gaze / head pose is paused.** Worker always emits `gaze: null` and `looking_at_phone` = smoothed phone state.
 
-`at_phone` means looking away from the PC **and** a phone is in the camera.
-Looking down with no phone in frame is `away_from_pc`.
-
-Head pose is YuNet 5-point yaw/pitch ratios in image space. A little
-downward pitch still counts as at-PC (webcam sits above the screen). A deeper
-nod does not. Phone detect is **YOLOX-s @ 640** on the full frame plus a
-lower-center square, not YOLOX-nano. Target **8 fps**.
-
-## Setup
+## Runtime (lean)
 
 ```powershell
 python -m venv .venv-webcam
-.\.venv-webcam\Scripts\Activate.ps1
-pip install -r webcam_bakeoff/requirements.txt
-python webcam_bakeoff/download_models.py
-python webcam_bakeoff/test_labels.py
+.\.venv-webcam\Scripts\pip install -r webcam_bakeoff\requirements.txt
+.\.venv-webcam-tools\Scripts\python webcam_bakeoff\export_models.py   # once, needs ultralytics
+.\.venv-webcam\Scripts\python webcam_bakeoff\download_models.py
+.\.venv-webcam\Scripts\python webcam_bakeoff\run_tracker.py --preview --fps 8
 ```
 
-Models land in `webcam_bakeoff/models/` (gitignored): YuNet (~230 KB) and
-YOLOX-s (~36 MB). Both Apache-2.0.
+Export uses Ultralytics **offline** only (`sync=False`). Inference is **onnxruntime** + OpenCV — no torch/ultralytics in the runtime venv.
 
-## Run
+## Eval / benchmarks
+
+Heavy tools live in `.venv-webcam-tools` (gitignored). See `eval/build_eval_set.py` and `benchmark.py`. Results: `RESULTS.md`.
+
+## Tests
 
 ```powershell
-python webcam_bakeoff/run_tracker.py
-python webcam_bakeoff/run_tracker.py --overlay --fps 8
+.\.venv-webcam\Scripts\python -m pytest webcam_bakeoff
+# or
+.\.venv-webcam\Scripts\python webcam_bakeoff\test_labels.py
 ```
-
-JSON lines on stdout. Overlay also prints `yaw` and `pitch` ratios. `q`
-closes the overlay. Nothing is written to disk.

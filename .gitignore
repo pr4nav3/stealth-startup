@@ -11,3 +11,13 @@ vendor/ponytail/
 voice_bakeoff/model_cache/
 voice_bakeoff/runs/
 webcam_bakeoff/models/
+webcam_bakeoff/eval/images/**
+webcam_bakeoff/eval/coco/**
+webcam_bakeoff/eval/labels.csv
+webcam_bakeoff/eval/results.jsonl
+webcam_bakeoff/eval/youtube/**
+.venv-webcam-tools/
+Ultralytics/
+*.pt
+yolo*.onnx
+yolov8*.onnx
