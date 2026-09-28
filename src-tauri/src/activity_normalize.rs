@@ -37,7 +37,6 @@ const NEUTRAL_EXE_NAMES: &[&str] = &[
     "startmenuexperiencehost",
     "shellexperiencehost",
     "textinputhost",
-    "systemsettings",
 ];
 
 const NEUTRAL_WINDOW_CLASSES: &[&str] = &[

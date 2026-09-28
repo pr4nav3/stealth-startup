@@ -1,4 +1,4 @@
-use crate::activity::ActivitySample;
+use crate::activity::{should_treat_as_neutral, ActivitySample};
 use crate::focus::{
     starter_rules, AppRule, FocusConfig, FocusEngine, FocusSnapshot, FocusState,
     RuleClassification, RuleTarget,
@@ -379,6 +379,7 @@ struct Session {
     last_span_sample: Option<ActivitySample>,
     last_span_state: Option<FocusState>,
     last_span_classification: Option<RuleClassification>,
+    last_window_sample: Option<ActivitySample>,
 }
 
 #[derive(Clone, Debug)]
@@ -423,6 +424,7 @@ impl Session {
             last_span_sample: None,
             last_span_state: None,
             last_span_classification: None,
+            last_window_sample: None,
         }
     }
 
@@ -456,6 +458,21 @@ impl Session {
         if self.status != SessionStatus::Active {
             return;
         }
+
+        // Alt-Tab, Start, Search, taskbar, and desktop stand in for the window the user came from.
+        let sample = if should_treat_as_neutral(&sample) {
+            let Some(previous) = self.last_window_sample.clone() else {
+                return;
+            };
+            ActivitySample {
+                captured_at: sample.captured_at,
+                idle_seconds: sample.idle_seconds,
+                ..previous
+            }
+        } else {
+            self.last_window_sample = Some(sample.clone());
+            sample
+        };
 
         if supervisor.matches(&sample) {
             if !self.observing_supervisor {
@@ -1460,6 +1477,65 @@ mod tests {
     }
 
     #[test]
+    fn shell_surfaces_keep_the_previous_window() {
+        let mut manager = SessionManager::default();
+        manager
+            .start(input("Focus", Strictness::Normal), seconds(0), "start".to_string(), NO_STORAGE)
+            .unwrap();
+        let before = record(&mut manager, sample("Code", "main.rs", 0.0), seconds(1))
+            .current
+            .unwrap()
+            .focus
+            .unwrap();
+        let during = record(&mut manager, shell_sample(), seconds(5))
+            .current
+            .unwrap()
+            .focus
+            .unwrap();
+
+        assert_eq!(during.sample.app_name, "Code");
+        assert_eq!(during.sample.window_title.as_deref(), Some("main.rs"));
+        assert_eq!(during.state, before.state);
+        assert_eq!(during.classification, before.classification);
+    }
+
+    #[test]
+    fn alt_tab_does_not_delay_or_hide_a_nudge() {
+        let mut manager = SessionManager::default();
+        manager
+            .start(input("Focus", Strictness::Normal), seconds(0), "start".to_string(), NO_STORAGE)
+            .unwrap();
+        record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
+        for at in [30, 40, 50] {
+            let focus = record(&mut manager, shell_sample(), seconds(at))
+                .current
+                .unwrap()
+                .focus
+                .unwrap();
+            assert_eq!(focus.sample.app_name, "Chrome");
+            assert_ne!(focus.state, FocusState::Neutral);
+        }
+        let nudge = record(&mut manager, shell_sample(), seconds(60))
+            .current
+            .unwrap()
+            .focus
+            .unwrap();
+
+        assert!(nudge.should_nudge);
+    }
+
+    #[test]
+    fn shell_surface_before_any_window_is_skipped() {
+        let mut manager = SessionManager::default();
+        manager
+            .start(input("Focus", Strictness::Normal), seconds(0), "start".to_string(), NO_STORAGE)
+            .unwrap();
+        let snapshot = record(&mut manager, shell_sample(), seconds(1));
+
+        assert!(snapshot.current.unwrap().focus.is_none());
+    }
+
+    #[test]
     fn mark_current_relevant_wins_over_starter_rules() {
         let mut manager = SessionManager::default();
         manager.start(
@@ -1698,6 +1774,18 @@ mod tests {
             permissions: CapturePermissions {
                 screen_recording: PermissionState::Granted,
             },
+        }
+    }
+
+    fn shell_sample() -> ActivitySample {
+        ActivitySample {
+            platform: "windows",
+            app_name: "MultitaskingViewFrame".to_string(),
+            process_path: "C:\\Windows\\explorer.exe".to_string(),
+            process_id: 99,
+            window_title: None,
+            window_id: "shell".to_string(),
+            ..sample("unused", "unused", 0.0)
         }
     }
 
