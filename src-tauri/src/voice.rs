@@ -1771,43 +1771,36 @@ fn process_ram_bytes(pid: u32) -> Option<u64> {
 
 #[cfg(target_os = "windows")]
 fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
-    const PROCESS_VM_READ: u32 = 0x0010;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
     let handle = unsafe {
         OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            0,
+            false,
             pid,
         )
-    };
-    if handle.is_null() {
-        return None;
     }
-    let mut counters = ProcessMemoryCountersEx {
-        cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
-        page_fault_count: 0,
-        peak_working_set_size: 0,
-        working_set_size: 0,
-        quota_peak_paged_pool_usage: 0,
-        quota_paged_pool_usage: 0,
-        quota_peak_non_paged_pool_usage: 0,
-        quota_non_paged_pool_usage: 0,
-        pagefile_usage: 0,
-        peak_pagefile_usage: 0,
-        private_usage: 0,
+    .ok()?;
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
     };
     let ok = unsafe {
         K32GetProcessMemoryInfo(
             handle,
-            &mut counters as *mut ProcessMemoryCountersEx,
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
             counters.cb,
         )
-    };
-    unsafe {
-        CloseHandle(handle);
     }
-    (ok != 0).then_some(counters.private_usage as u64)
+    .as_bool();
+    let _ = unsafe { CloseHandle(handle) };
+    ok.then_some(counters.PrivateUsage as u64)
 }
 
 #[cfg(target_os = "linux")]
@@ -1855,32 +1848,18 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
 #[cfg(target_os = "windows")]
 fn available_disk_bytes(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
     let wide = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let mut available = 0u64;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut available as *mut u64,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    (ok != 0).then_some(available)
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn GetDiskFreeSpaceExW(
-        directory_name: *const u16,
-        free_bytes_available: *mut u64,
-        total_number_of_bytes: *mut u64,
-        total_number_of_free_bytes: *mut u64,
-    ) -> i32;
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut available), None, None) }
+        .ok()?;
+    Some(available)
 }
 
 #[cfg(target_os = "linux")]
@@ -1947,72 +1926,24 @@ unsafe extern "C" {
 
 #[cfg(target_os = "windows")]
 fn total_ram_bytes() -> Option<u64> {
-    windows_memory_status().map(|status| status.ull_total_phys)
+    windows_memory_status().map(|status| status.ullTotalPhys)
 }
 
 #[cfg(target_os = "windows")]
 fn available_ram_bytes() -> Option<u64> {
-    windows_memory_status().map(|status| status.ull_avail_phys)
+    windows_memory_status().map(|status| status.ullAvailPhys)
 }
 
 #[cfg(target_os = "windows")]
-fn windows_memory_status() -> Option<MemoryStatusEx> {
-    let mut status = MemoryStatusEx {
-        dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
-        dw_memory_load: 0,
-        ull_total_phys: 0,
-        ull_avail_phys: 0,
-        ull_total_page_file: 0,
-        ull_avail_page_file: 0,
-        ull_total_virtual: 0,
-        ull_avail_virtual: 0,
-        ull_avail_extended_virtual: 0,
+fn windows_memory_status() -> Option<windows::Win32::System::SystemInformation::MEMORYSTATUSEX> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
     };
-    let ok = unsafe { GlobalMemoryStatusEx(&mut status as *mut MemoryStatusEx) };
-    (ok != 0).then_some(status)
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct MemoryStatusEx {
-    dw_length: u32,
-    dw_memory_load: u32,
-    ull_total_phys: u64,
-    ull_avail_phys: u64,
-    ull_total_page_file: u64,
-    ull_avail_page_file: u64,
-    ull_total_virtual: u64,
-    ull_avail_virtual: u64,
-    ull_avail_extended_virtual: u64,
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct ProcessMemoryCountersEx {
-    cb: u32,
-    page_fault_count: u32,
-    peak_working_set_size: usize,
-    working_set_size: usize,
-    quota_peak_paged_pool_usage: usize,
-    quota_paged_pool_usage: usize,
-    quota_peak_non_paged_pool_usage: usize,
-    quota_non_paged_pool_usage: usize,
-    pagefile_usage: usize,
-    peak_pagefile_usage: usize,
-    private_usage: usize,
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
-    fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
-    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
-    fn K32GetProcessMemoryInfo(
-        process: *mut std::ffi::c_void,
-        counters: *mut ProcessMemoryCountersEx,
-        size: u32,
-    ) -> i32;
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    Some(status)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -2116,6 +2047,17 @@ fn dir_size(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn system_resource_queries_return_real_values() {
+        let total = total_ram_bytes().expect("total ram");
+        let available = available_ram_bytes().expect("available ram");
+        assert!(total > 1024 * 1024 * 1024);
+        assert!(available > 0 && available <= total);
+        assert!(available_disk_bytes(&std::env::temp_dir()).expect("free disk") > 0);
+        assert!(process_ram_bytes(std::process::id()).expect("own process ram") > 0);
+    }
 
     #[test]
     fn minimal_manifest_excludes_unused_s3gen_checkpoint() {

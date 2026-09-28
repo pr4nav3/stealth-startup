@@ -225,20 +225,18 @@ fn idle_seconds() -> Option<f64> {
 
 #[cfg(target_os = "windows")]
 fn idle_seconds() -> Option<f64> {
-    let mut input = LastInputInfo {
-        cb_size: std::mem::size_of::<LastInputInfo>() as u32,
-        dw_time: 0,
-    };
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
-    let ok = unsafe { GetLastInputInfo(&mut input) };
-    if ok == 0 {
+    let mut input = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if !unsafe { GetLastInputInfo(&mut input) }.as_bool() {
         return None;
     }
 
-    Some(idle_elapsed_seconds(
-        input.dw_time,
-        unsafe { GetTickCount() },
-    ))
+    Some(idle_elapsed_seconds(input.dwTime, unsafe { GetTickCount() }))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -257,26 +255,6 @@ unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGEventSourceSecondsSinceLastEventType(source_state_id: u32, event_type: u32) -> f64;
 }
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct LastInputInfo {
-    cb_size: u32,
-    dw_time: u32,
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "User32")]
-unsafe extern "system" {
-    fn GetLastInputInfo(input: *mut LastInputInfo) -> i32;
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn GetTickCount() -> u32;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

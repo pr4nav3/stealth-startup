@@ -3,75 +3,22 @@ use super::activity_normalize::{
     app_name_from_process_path, classify_foreground_surface, is_neutral_window_class,
     normalize_title_for_browser, normalize_title_text, ForegroundDisposition, RawForegroundIdentity,
 };
-use std::ffi::c_void;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use windows::core::{BOOL, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumChildWindows, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GUITHREADINFO,
+};
 
-type Hwnd = isize;
-
-const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-const DWMWA_CLOAKED: u32 = 14;
-const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+/// Longest path Windows can return (the extended-length path limit).
 const PROCESS_IMAGE_PATH_CHARS: usize = 32768;
-
-#[repr(C)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-#[repr(C)]
-struct GuiThreadInfo {
-    cb_size: u32,
-    flags: u32,
-    hwnd_active: Hwnd,
-    hwnd_focus: Hwnd,
-    hwnd_capture: Hwnd,
-    hwnd_menu_owner: Hwnd,
-    hwnd_move_size: Hwnd,
-    hwnd_caret: Hwnd,
-    rc_caret: Rect,
-}
-
-#[link(name = "User32")]
-unsafe extern "system" {
-    fn GetForegroundWindow() -> Hwnd;
-    fn GetWindowTextW(hwnd: Hwnd, buffer: *mut u16, size: i32) -> i32;
-    fn GetClassNameW(hwnd: Hwnd, buffer: *mut u16, size: i32) -> i32;
-    fn GetWindowThreadProcessId(hwnd: Hwnd, process_id: *mut u32) -> u32;
-    fn IsWindowVisible(hwnd: Hwnd) -> i32;
-    fn IsIconic(hwnd: Hwnd) -> i32;
-    fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
-    fn GetGUIThreadInfo(id_thread: u32, info: *mut GuiThreadInfo) -> i32;
-    fn EnumChildWindows(
-        hwnd_parent: Hwnd,
-        callback: unsafe extern "system" fn(Hwnd, isize) -> i32,
-        LPARAM: isize,
-    ) -> i32;
-}
-
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut c_void;
-    fn CloseHandle(handle: *mut c_void) -> i32;
-    fn QueryFullProcessImageNameW(
-        handle: *mut c_void,
-        flags: u32,
-        buffer: *mut u16,
-        size: *mut u32,
-    ) -> i32;
-}
-
-#[link(name = "Dwmapi")]
-unsafe extern "system" {
-    fn DwmGetWindowAttribute(
-        hwnd: Hwnd,
-        attribute: u32,
-        value: *mut c_void,
-        size: u32,
-    ) -> i32;
-}
 
 pub fn capture_current(
     permissions: CapturePermissions,
@@ -82,22 +29,21 @@ pub fn capture_current(
         .map_err(|error| error.to_string())?;
 
     let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd == 0 {
+    if hwnd.0.is_null() {
         return Err("no foreground window".to_string());
     }
 
-    if is_cloaked(hwnd) || unsafe { IsIconic(hwnd) != 0 } {
+    if is_cloaked(hwnd) || unsafe { IsIconic(hwnd) }.as_bool() {
         return Err("foreground window is not usable".to_string());
     }
 
-    if unsafe { IsWindowVisible(hwnd) == 0 } {
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
         return Err("foreground window is not visible".to_string());
     }
 
-    let window_class = read_wide_string(hwnd, read_class_name);
-    let raw_title = read_wide_string(hwnd, read_window_title);
-    let mut process_id = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
+    let window_class = class_name(hwnd);
+    let raw_title = read_wide_string(|buffer| unsafe { GetWindowTextW(hwnd, buffer) });
+    let process_id = window_process_id(hwnd);
     if process_id == 0 {
         return Err("foreground window has no process".to_string());
     }
@@ -150,7 +96,7 @@ fn build_sample(
     captured_at: String,
     permissions: CapturePermissions,
     idle_seconds: Option<f64>,
-    hwnd: Hwnd,
+    hwnd: HWND,
     process_id: u32,
     process_path: String,
     exe_name: String,
@@ -175,7 +121,7 @@ fn build_sample(
         process_path,
         process_id: process_id as u64,
         window_title,
-        window_id: hwnd.to_string(),
+        window_id: (hwnd.0 as isize).to_string(),
         bounds: read_bounds(hwnd),
         idle_seconds,
         permissions,
@@ -183,7 +129,7 @@ fn build_sample(
 }
 
 fn resolve_process_identity(
-    hwnd: Hwnd,
+    hwnd: HWND,
     process_id: u32,
     window_class: &str,
 ) -> (u32, String, String) {
@@ -193,137 +139,115 @@ fn resolve_process_identity(
     }
 
     match query_process_path(process_id) {
-        Ok(path) => {
+        Some(path) => {
             let exe = file_name_from_path(&path);
             (process_id, path, exe)
         }
-        Err(_) => {
-            let fallback_name = window_class.to_owned();
-            (process_id, String::new(), fallback_name)
-        }
+        None => (process_id, String::new(), window_class.to_owned()),
     }
 }
 
-fn resolve_uwp_process(hwnd: Hwnd, host_pid: u32) -> Option<(u32, String)> {
-    let host_path = query_process_path(host_pid).ok()?;
+fn resolve_uwp_process(hwnd: HWND, host_pid: u32) -> Option<(u32, String)> {
+    let host_path = query_process_path(host_pid)?;
     let host_exe = file_name_from_path(&host_path);
     if !host_exe.eq_ignore_ascii_case("ApplicationFrameHost.exe") {
         return None;
     }
 
     if let Some(child_hwnd) = find_core_window_child(hwnd) {
-        let mut child_pid = 0u32;
-        unsafe { GetWindowThreadProcessId(child_hwnd, &mut child_pid) };
+        let child_pid = window_process_id(child_hwnd);
         if child_pid != 0 {
-            if let Ok(path) = query_process_path(child_pid) {
+            if let Some(path) = query_process_path(child_pid) {
                 return Some((child_pid, path));
             }
         }
     }
 
-    let mut info = GuiThreadInfo {
-        cb_size: std::mem::size_of::<GuiThreadInfo>() as u32,
-        flags: 0,
-        hwnd_active: 0,
-        hwnd_focus: 0,
-        hwnd_capture: 0,
-        hwnd_menu_owner: 0,
-        hwnd_move_size: 0,
-        hwnd_caret: 0,
-        rc_caret: Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        },
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
     };
-    if unsafe { GetGUIThreadInfo(0, &mut info) == 0 } {
-        return None;
-    }
+    unsafe { GetGUIThreadInfo(0, &mut info) }.ok()?;
 
-    let target = if info.hwnd_focus != 0 {
-        info.hwnd_focus
+    let target = if info.hwndFocus.0.is_null() {
+        info.hwndActive
     } else {
-        info.hwnd_active
+        info.hwndFocus
     };
-    if target == 0 {
+    if target.0.is_null() {
         return None;
     }
 
-    let mut gui_pid = 0u32;
-    unsafe { GetWindowThreadProcessId(target, &mut gui_pid) };
+    let gui_pid = window_process_id(target);
     if gui_pid == 0 || gui_pid == host_pid {
         return None;
     }
 
-    query_process_path(gui_pid).ok().map(|path| (gui_pid, path))
+    query_process_path(gui_pid).map(|path| (gui_pid, path))
 }
 
-struct CoreWindowSearch {
-    found: Hwnd,
-}
-
-unsafe extern "system" fn enum_core_window(hwnd: Hwnd, lparam: isize) -> i32 {
-    let search = &mut *(lparam as *mut CoreWindowSearch);
-    let class = read_wide_string(hwnd, read_class_name);
-    if class.eq_ignore_ascii_case("Windows.UI.Core.CoreWindow") {
-        search.found = hwnd;
-        return 0;
+unsafe extern "system" fn enum_core_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let found = unsafe { &mut *(lparam.0 as *mut Option<HWND>) };
+    if class_name(hwnd).eq_ignore_ascii_case("Windows.UI.Core.CoreWindow") {
+        *found = Some(hwnd);
+        return false.into();
     }
-    1
+    true.into()
 }
 
-fn find_core_window_child(parent: Hwnd) -> Option<Hwnd> {
-    let mut search = CoreWindowSearch { found: 0 };
-    unsafe {
+fn find_core_window_child(parent: HWND) -> Option<HWND> {
+    let mut found: Option<HWND> = None;
+    // The return value only reports whether enumeration stopped early.
+    let _ = unsafe {
         EnumChildWindows(
-            parent,
-            enum_core_window,
-            (&mut search as *mut CoreWindowSearch) as isize,
-        );
-    }
-    (search.found != 0).then_some(search.found)
+            Some(parent),
+            Some(enum_core_window),
+            LPARAM(&mut found as *mut Option<HWND> as isize),
+        )
+    };
+    found
 }
 
-fn query_process_path(process_id: u32) -> Result<String, ()> {
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
-    if handle.is_null() {
-        return Err(());
-    }
-
-    let result = read_process_image_path(handle);
-    unsafe { CloseHandle(handle) };
-    result
+fn window_process_id(hwnd: HWND) -> u32 {
+    let mut process_id = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    process_id
 }
 
-fn read_process_image_path(handle: *mut c_void) -> Result<String, ()> {
+fn query_process_path(process_id: u32) -> Option<String> {
+    let handle =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
+    let path = read_process_image_path(handle);
+    let _ = unsafe { CloseHandle(handle) };
+    path
+}
+
+fn read_process_image_path(handle: HANDLE) -> Option<String> {
     let mut buffer = vec![0u16; PROCESS_IMAGE_PATH_CHARS];
     let mut size = buffer.len() as u32;
-    let ok = unsafe {
-        QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size as *mut u32)
-    };
-    if ok == 0 {
-        return Err(());
+    unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
     }
-    Ok(String::from_utf16_lossy(&buffer[..size as usize]))
+    .ok()?;
+    Some(String::from_utf16_lossy(&buffer[..size as usize]))
 }
 
-fn read_bounds(hwnd: Hwnd) -> Bounds {
-    let mut rect = Rect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    let dwm_ok = unsafe {
+fn read_bounds(hwnd: HWND) -> Bounds {
+    let mut rect = RECT::default();
+    let dwm = unsafe {
         DwmGetWindowAttribute(
             hwnd,
             DWMWA_EXTENDED_FRAME_BOUNDS,
-            (&mut rect as *mut Rect).cast(),
-            std::mem::size_of::<Rect>() as u32,
+            (&mut rect as *mut RECT).cast(),
+            std::mem::size_of::<RECT>() as u32,
         )
     };
-    if dwm_ok != 0 {
+    if dwm.is_err() {
         let _ = unsafe { GetWindowRect(hwnd, &mut rect) };
     }
 
@@ -335,17 +259,17 @@ fn read_bounds(hwnd: Hwnd) -> Bounds {
     }
 }
 
-fn is_cloaked(hwnd: Hwnd) -> bool {
-    let mut cloaked = 0i32;
-    let ok = unsafe {
+fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked = 0u32;
+    let result = unsafe {
         DwmGetWindowAttribute(
             hwnd,
             DWMWA_CLOAKED,
-            (&mut cloaked as *mut i32).cast(),
-            std::mem::size_of::<i32>() as u32,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
         )
     };
-    ok == 0 && cloaked != 0
+    result.is_ok() && cloaked != 0
 }
 
 fn file_name_from_path(path: &str) -> String {
@@ -356,17 +280,12 @@ fn file_name_from_path(path: &str) -> String {
         .to_owned()
 }
 
-fn read_window_title(hwnd: Hwnd, buffer: &mut [u16]) -> i32 {
-    unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) }
+fn class_name(hwnd: HWND) -> String {
+    read_wide_string(|buffer| unsafe { GetClassNameW(hwnd, buffer) })
 }
 
-fn read_class_name(hwnd: Hwnd, buffer: &mut [u16]) -> i32 {
-    unsafe { GetClassNameW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) }
-}
-
-fn read_wide_string(hwnd: Hwnd, read: fn(Hwnd, &mut [u16]) -> i32) -> String {
+fn read_wide_string(read: impl FnOnce(&mut [u16]) -> i32) -> String {
     let mut buffer = vec![0u16; 512];
-    let length = read(hwnd, &mut buffer);
-    let end = length.max(0) as usize;
-    String::from_utf16_lossy(&buffer[..end.min(buffer.len())])
+    let length = read(&mut buffer).max(0) as usize;
+    String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
 }

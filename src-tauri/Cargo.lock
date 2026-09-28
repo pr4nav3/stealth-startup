@@ -4231,6 +4231,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "time",
+ "windows 0.61.3",
  "zip",
 ]
 

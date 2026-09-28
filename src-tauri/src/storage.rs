@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: i32 = 2;
 
+/// How long a `session` row's timer actually ran. Sessions that never closed cleanly have no
+/// timer value; their tracked span time is the best record of how long they ran.
+const RUN_SECONDS_SQL: &str = "COALESCE(session.elapsed_seconds,
+    (SELECT COALESCE(SUM(span.seconds), 0) FROM span WHERE span.session_id = session.id))";
+
 const WEBCAM_SETTING_KEYS: &[&str] = &[
     "webcam.enabled",
     "webcam.phone_nudge",
@@ -650,15 +655,11 @@ impl SessionStorage {
         Ok(summaries)
     }
 
-    /// Sessions that never closed cleanly have no timer value; their tracked span time is the
-    /// best record of how long they ran.
     fn session_duration_seconds(&self, session_id: u64) -> Result<u64, String> {
         let seconds: i64 = self
             .conn
             .query_row(
-                "SELECT COALESCE(elapsed_seconds,
-                          (SELECT COALESCE(SUM(seconds), 0) FROM span WHERE session_id = ?1))
-                 FROM session WHERE id = ?1",
+                &format!("SELECT {RUN_SECONDS_SQL} FROM session WHERE id = ?1"),
                 [session_id],
                 |row| row.get(0),
             )
@@ -826,15 +827,17 @@ impl SessionStorage {
         let mut daily_stmt = self
             .conn
             .prepare(
-                "SELECT substr(started_at, 1, 10) AS day,
-                        SUM(focused_seconds) AS focus_sum,
-                        SUM(CASE WHEN planned_seconds > 0 THEN planned_seconds ELSE 1 END) AS weight,
-                        COUNT(*) AS session_count
-                 FROM session
-                 WHERE ended_at IS NOT NULL
-                 GROUP BY day
-                 ORDER BY day DESC
-                 LIMIT 14",
+                &format!(
+                    "SELECT substr(started_at, 1, 10) AS day,
+                            SUM(focused_seconds) AS focus_sum,
+                            SUM({RUN_SECONDS_SQL}) AS run_seconds,
+                            COUNT(*) AS session_count
+                     FROM session
+                     WHERE ended_at IS NOT NULL
+                     GROUP BY day
+                     ORDER BY day DESC
+                     LIMIT 14"
+                ),
             )
             .map_err(|error| error.to_string())?;
         let daily_rows = daily_stmt
@@ -850,12 +853,12 @@ impl SessionStorage {
 
         let mut daily_focus = Vec::new();
         for row in daily_rows {
-            let (date, focus_sum, weight, session_count) =
+            let (date, focus_sum, run_seconds, session_count) =
                 row.map_err(|error| error.to_string())?;
-            let focus_percent = if weight == 0 {
+            let focus_percent = if run_seconds == 0 {
                 0
             } else {
-                (focus_sum as u64 * 100) / weight as u64
+                (focus_sum as u64 * 100) / run_seconds as u64
             };
             daily_focus.push(DailyFocus {
                 date,
@@ -1320,6 +1323,28 @@ mod tests {
         assert_eq!(state.history.len(), 1);
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn daily_score_uses_time_actually_run() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage
+            .insert_session("Hour plan", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
+            .expect("insert session");
+        storage
+            .insert_span(id, "Code", None, "work", "focused", 0, 1500)
+            .expect("insert span");
+        storage
+            .insert_span(id, "Chrome", Some("YouTube"), "media", "distracted", 1500, 300)
+            .expect("insert span");
+        storage
+            .close_session(id, "2026-09-22T12:30:00Z", "stopped", 1800)
+            .expect("close session");
+
+        let trends = storage.get_trends().expect("trends");
+        assert_eq!(trends.daily_focus.len(), 1);
+        assert_eq!(trends.daily_focus[0].focus_percent, 83);
+        assert_eq!(trends.sessions[0].focus_percent, 83);
     }
 
     #[test]
