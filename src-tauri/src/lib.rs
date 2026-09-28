@@ -1,6 +1,7 @@
 mod activity;
 mod focus;
 mod session;
+mod storage;
 mod voice;
 mod voice_runtime;
 mod webcam;
@@ -11,6 +12,8 @@ use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
+use storage::{SessionReport, SessionStorage, TrendsData};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
@@ -29,25 +32,12 @@ const OVERLAY_MARGIN: i32 = 18;
 struct AppState {
     focus_engine: Mutex<FocusEngine>,
     sessions: Mutex<SessionManager>,
+    storage: Mutex<SessionStorage>,
     voice_download: Arc<Mutex<voice::VoiceDownloadState>>,
     voice_recording: Mutex<voice::VoiceRecordingState>,
     webcam: webcam::WebcamPreview,
     started_at: Instant,
     identity: SupervisorIdentity,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            focus_engine: Mutex::new(FocusEngine::default()),
-            sessions: Mutex::new(SessionManager::default()),
-            voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
-            voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
-            webcam: webcam::WebcamPreview::default(),
-            started_at: Instant::now(),
-            identity: supervisor_identity(),
-        }
-    }
 }
 
 #[tauri::command]
@@ -74,8 +64,9 @@ fn start_session(
 ) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
 
-    sessions.start(input, now, utc_now()?);
+    sessions.start(input, now, utc_now()?, Some(&*storage))?;
     let should_show_status = sessions.status_window_enabled();
     let snapshot = sessions.snapshot(now);
     drop(sessions);
@@ -99,31 +90,35 @@ fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, S
 fn pause_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
 
-    Ok(sessions.pause(now))
+    Ok(sessions.pause(now, Some(&*storage)))
 }
 
 #[tauri::command]
 fn resume_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
 
-    Ok(sessions.resume(now))
+    Ok(sessions.resume(now, Some(&*storage)))
 }
 
 #[tauri::command]
 fn snooze_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
 
-    Ok(sessions.snooze(now, 5 * 60))
+    Ok(sessions.snooze(now, 5 * 60, Some(&*storage)))
 }
 
 #[tauri::command]
 fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.stop(now);
+    let storage = lock_storage(&state)?;
+    let snapshot = sessions.stop(now, &utc_now()?, Some(&*storage));
     drop(sessions);
 
     hide_status_window(&app);
@@ -134,21 +129,60 @@ fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSna
 fn mark_current_relevant(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
 
-    Ok(sessions.mark_current(focus::RuleClassification::Focused, now))
+    sessions.mark_current(focus::RuleClassification::Focused, now, Some(&*storage))
 }
 
 #[tauri::command]
 fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
 
-    Ok(sessions.mark_current(focus::RuleClassification::Distracting, now))
+    sessions.mark_current(focus::RuleClassification::Distracting, now, Some(&*storage))
 }
 
 #[tauri::command]
 fn get_history(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
     Ok(lock_sessions(&state)?.history())
+}
+
+#[tauri::command]
+fn get_session_report(id: u64, state: State<'_, AppState>) -> Result<SessionReport, String> {
+    Ok(lock_storage(&state)?.get_session_report(id)?)
+}
+
+#[tauri::command]
+fn get_trends(state: State<'_, AppState>) -> Result<TrendsData, String> {
+    Ok(lock_storage(&state)?.get_trends()?)
+}
+
+#[tauri::command]
+fn delete_session(id: u64, state: State<'_, AppState>) -> Result<(), String> {
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    storage.delete_session(id)?;
+    sessions.refresh_history_cache(&storage);
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_all_history(state: State<'_, AppState>) -> Result<(), String> {
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    storage.delete_all_history()?;
+    sessions.refresh_history_cache(&storage);
+    Ok(())
+}
+
+#[tauri::command]
+fn scrub_span_context(state: State<'_, AppState>) -> Result<(), String> {
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    storage.scrub_span_context()?;
+    sessions.refresh_history_cache(&storage);
+    Ok(())
 }
 
 #[tauri::command]
@@ -161,7 +195,9 @@ fn update_settings(
     update: SettingsUpdate,
     state: State<'_, AppState>,
 ) -> Result<SessionSettings, String> {
-    Ok(lock_sessions(&state)?.update_settings(update))
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    sessions.update_settings(update, Some(&*storage))
 }
 
 #[tauri::command]
@@ -171,7 +207,8 @@ fn show_status_window(
 ) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.set_status_window_enabled(true, now);
+    let storage = lock_storage(&state)?;
+    let snapshot = sessions.set_status_window_enabled(true, now, Some(&*storage))?;
     drop(sessions);
 
     show_status_window_internal(&app)?;
@@ -186,7 +223,8 @@ fn set_status_window_enabled(
 ) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.set_status_window_enabled(enabled, now);
+    let storage = lock_storage(&state)?;
+    let snapshot = sessions.set_status_window_enabled(enabled, now, Some(&*storage))?;
     let should_show_status = enabled && snapshot.current.is_some();
     drop(sessions);
 
@@ -206,7 +244,8 @@ fn set_status_window_on_top(
 ) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.set_status_window_on_top(enabled, now);
+    let storage = lock_storage(&state)?;
+    let snapshot = sessions.set_status_window_on_top(enabled, now, Some(&*storage))?;
     drop(sessions);
 
     set_status_window_on_top_internal(&app, enabled)?;
@@ -356,16 +395,113 @@ fn lock_sessions<'a>(
         .map_err(|_| "session manager unavailable".to_string())
 }
 
+fn lock_storage<'a>(
+    state: &'a State<'_, AppState>,
+) -> Result<std::sync::MutexGuard<'a, SessionStorage>, String> {
+    state
+        .storage
+        .lock()
+        .map_err(|_| "session storage unavailable".to_string())
+}
+
+fn database_path(app: &tauri::App) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())
+        .map(|dir| dir.join("sessions.db"))
+}
+
 fn utc_now() -> Result<String, String> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| error.to_string())
 }
 
+fn utc_now_fallback() -> String {
+    utc_now().unwrap_or_else(|error| {
+        eprintln!("supervisor storage: utc_now: {error}");
+        OffsetDateTime::UNIX_EPOCH
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    })
+}
+
+fn bootstrap_sessions_from_storage(
+    storage: SessionStorage,
+) -> Result<(SessionStorage, SessionManager), String> {
+    let settings = storage.load_settings()?;
+    let rules = storage.load_rules()?;
+    let next_id = storage.next_session_id()?;
+    let history = storage
+        .list_history(session::HISTORY_CACHE_LIMIT)
+        .unwrap_or_else(|error| {
+            eprintln!("supervisor storage: load history cache: {error}");
+            Vec::new()
+        });
+    Ok((
+        storage,
+        SessionManager::bootstrap(settings, rules, next_id, history),
+    ))
+}
+
+fn open_storage_for_app(app: &tauri::App) -> SessionStorage {
+    let path = match database_path(app) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("supervisor storage: app data path: {error}");
+            return SessionStorage::open_in_memory()
+                .expect("in-memory session database must open");
+        }
+    };
+    match SessionStorage::open(&path) {
+        Ok(storage) => storage,
+        Err(error) => {
+            eprintln!("supervisor storage: open disk database: {error}");
+            SessionStorage::open_in_memory().expect("in-memory session database must open")
+        }
+    }
+}
+
+fn init_app_storage_and_sessions(app: &tauri::App) -> (SessionStorage, SessionManager) {
+    let disk = open_storage_for_app(app);
+    match bootstrap_sessions_from_storage(disk) {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!(
+                "supervisor storage: bootstrap failed, using in-memory database: {error}"
+            );
+            let storage = SessionStorage::open_in_memory()
+                .expect("in-memory session database must open");
+            bootstrap_sessions_from_storage(storage)
+                .unwrap_or_else(|fallback_error| {
+                    eprintln!("supervisor storage: in-memory bootstrap: {fallback_error}");
+                    let storage = SessionStorage::open_in_memory()
+                        .expect("in-memory session database must open");
+                    (
+                        storage,
+                        SessionManager::default(),
+                    )
+                })
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState::default())
         .setup(|app| {
+            let (storage, sessions) = init_app_storage_and_sessions(app);
+
+            app.manage(AppState {
+                focus_engine: Mutex::new(FocusEngine::default()),
+                sessions: Mutex::new(sessions),
+                storage: Mutex::new(storage),
+                voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
+                voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
+                webcam: webcam::WebcamPreview::default(),
+                started_at: Instant::now(),
+                identity: supervisor_identity(),
+            });
+
             setup_status_window(app)?;
             setup_tray(app)?;
             start_session_ticker(app.handle().clone());
@@ -383,6 +519,11 @@ pub fn run() {
             mark_current_relevant,
             mark_current_distracting,
             get_history,
+            get_session_report,
+            get_trends,
+            delete_session,
+            delete_all_history,
+            scrub_span_context,
             get_settings,
             update_settings,
             show_status_window,
@@ -462,25 +603,30 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "show_status" => {
-                with_sessions(app, |sessions, now| {
-                    sessions.set_status_window_enabled(true, now);
+                with_sessions(app, |sessions, now, storage| {
+                    let _ = sessions.set_status_window_enabled(true, now, Some(storage));
                 });
                 let _ = show_status_window_internal(app);
             }
             "pin_status" => {
-                with_sessions(app, |sessions, _now| {
-                    sessions.set_status_window_enabled(true, _now);
-                    sessions.set_status_window_on_top(true, _now);
+                with_sessions(app, |sessions, now, storage| {
+                    let _ = sessions.set_status_window_enabled(true, now, Some(storage));
+                    let _ = sessions.set_status_window_on_top(true, now, Some(storage));
                 });
                 let _ = set_status_window_on_top_internal(app, true);
                 let _ = show_status_window_internal(app);
             }
-            "pause_resume" => with_sessions(app, |sessions, now| sessions.toggle_pause(now)),
-            "snooze" => with_sessions(app, |sessions, now| {
-                sessions.snooze(now, 5 * 60);
+            "pause_resume" => {
+                with_sessions(app, |sessions, now, storage| {
+                    sessions.toggle_pause(now, Some(storage));
+                })
+            }
+            "snooze" => with_sessions(app, |sessions, now, storage| {
+                sessions.snooze(now, 5 * 60, Some(storage));
             }),
-            "stop" => with_sessions(app, |sessions, now| {
-                sessions.stop(now);
+            "stop" => with_sessions(app, |sessions, now, storage| {
+                let ended_at = utc_now_fallback();
+                sessions.stop(now, &ended_at, Some(storage));
                 hide_status_window(app);
             }),
             "quit" => app.exit(0),
@@ -597,8 +743,11 @@ fn start_session_ticker(app: AppHandle) {
             let Ok(mut sessions) = state.sessions.lock() else {
                 continue;
             };
+            let Ok(storage) = state.storage.lock() else {
+                continue;
+            };
             let had_current = sessions.has_current();
-            let snapshot = sessions.tick(now);
+            let snapshot = sessions.tick(now, Some(&*storage));
             (
                 had_current && matches!(snapshot.status, session::SessionStatus::Idle),
                 sessions.should_poll_activity(),
@@ -625,8 +774,11 @@ fn start_session_ticker(app: AppHandle) {
             let Ok(mut sessions) = state.sessions.lock() else {
                 continue;
             };
+            let Ok(storage) = state.storage.lock() else {
+                continue;
+            };
             let was_polling = sessions.should_poll_activity();
-            let snapshot = sessions.record_sample(sample, now, &identity);
+            let snapshot = sessions.record_sample(sample, now, &identity, Some(&*storage));
             was_polling && matches!(snapshot.status, session::SessionStatus::Idle)
         };
 
@@ -652,11 +804,13 @@ fn supervisor_identity() -> SupervisorIdentity {
 
 fn with_sessions(
     app: &tauri::AppHandle,
-    action: impl FnOnce(&mut SessionManager, std::time::Duration),
+    action: impl FnOnce(&mut SessionManager, std::time::Duration, &SessionStorage),
 ) {
     let state = app.state::<AppState>();
     let now = state.started_at.elapsed();
     if let Ok(mut sessions) = state.sessions.lock() {
-        action(&mut sessions, now);
+        if let Ok(storage) = state.storage.lock() {
+            action(&mut sessions, now, &storage);
+        }
     };
 }
