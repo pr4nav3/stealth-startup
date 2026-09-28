@@ -1,10 +1,11 @@
 use crate::focus::{starter_rules, AppRule, RuleClassification, RuleTarget};
-use crate::session::{SessionSettings, SessionSummary, Strictness};
+use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, HISTORY_CACHE_LIMIT};
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use std::path::Path;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const WEBCAM_SETTING_KEYS: &[&str] = &[
     "webcam.enabled",
@@ -14,6 +15,71 @@ const WEBCAM_SETTING_KEYS: &[&str] = &[
 
 pub struct SessionStorage {
     conn: Connection,
+    failure: RefCell<Option<String>>,
+}
+
+/// What the user must be told about history storage for this run.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StorageNotice {
+    /// The existing database could not be opened; it was moved aside and a fresh one started.
+    Reset { reason: String, moved_to: String },
+    /// No database could be opened or created; history is not saved this run.
+    Off { reason: String },
+    /// A save or read failed during this run.
+    Failed { reason: String },
+}
+
+pub struct StoredState {
+    pub settings: SessionSettings,
+    pub rules: Vec<AppRule>,
+    pub history: Vec<SessionSummary>,
+}
+
+pub fn open_or_reset(
+    path: Result<PathBuf, String>,
+) -> (Option<(SessionStorage, StoredState)>, Option<StorageNotice>) {
+    let path = match path {
+        Ok(path) => path,
+        Err(reason) => return (None, Some(StorageNotice::Off { reason })),
+    };
+    let reason = match SessionStorage::open(&path) {
+        Ok(opened) => return (Some(opened), None),
+        Err(reason) if path.exists() => reason,
+        Err(reason) => return (None, Some(StorageNotice::Off { reason })),
+    };
+    let moved_to = match move_aside(&path) {
+        Ok(moved_to) => moved_to,
+        Err(error) => {
+            let reason = format!("{reason}; could not move the damaged file aside: {error}");
+            return (None, Some(StorageNotice::Off { reason }));
+        }
+    };
+    match SessionStorage::open(&path) {
+        Ok(opened) => (
+            Some(opened),
+            Some(StorageNotice::Reset {
+                reason,
+                moved_to: moved_to.display().to_string(),
+            }),
+        ),
+        Err(reason) => (None, Some(StorageNotice::Off { reason })),
+    }
+}
+
+fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let stamp = time::OffsetDateTime::now_utc().unix_timestamp();
+    let moved = path.with_file_name(format!("sessions.broken-{stamp}.db"));
+    std::fs::rename(path, &moved)?;
+    // A leftover -wal/-shm next to a fresh database would be replayed into it.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        if sidecar.exists() {
+            std::fs::rename(&sidecar, format!("{}{suffix}", moved.display()))
+                .or_else(|_| std::fs::remove_file(&sidecar))?;
+        }
+    }
+    Ok(moved)
 }
 
 #[derive(Clone, Debug)]
@@ -101,22 +167,31 @@ pub struct TrendsData {
 }
 
 impl SessionStorage {
-    pub fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path) -> Result<(Self, StoredState), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let conn = Connection::open(path).map_err(|error| error.to_string())?;
-        let storage = Self { conn };
-        storage.apply_pragmas()?;
-        storage.migrate()?;
-        storage.seed_webcam_setting_keys()?;
+        let storage = Self::from_connection(conn)?;
         storage.recover_orphans()?;
-        Ok(storage)
+        let state = StoredState {
+            settings: storage.load_settings()?,
+            rules: storage.load_rules()?,
+            history: storage.list_history(HISTORY_CACHE_LIMIT)?,
+        };
+        Ok((storage, state))
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, String> {
-        let conn = Connection::open_in_memory().map_err(|error| error.to_string())?;
-        let storage = Self { conn };
+        Self::from_connection(Connection::open_in_memory().map_err(|error| error.to_string())?)
+    }
+
+    fn from_connection(conn: Connection) -> Result<Self, String> {
+        let storage = Self {
+            conn,
+            failure: RefCell::new(None),
+        };
         storage.apply_pragmas()?;
         storage.migrate()?;
         storage.seed_webcam_setting_keys()?;
@@ -132,7 +207,26 @@ impl SessionStorage {
                 ",
             )
             .map_err(|error| error.to_string())?;
+        let check: String = self
+            .conn
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if check != "ok" {
+            return Err(format!("database is damaged: {check}"));
+        }
         Ok(())
+    }
+
+    /// Remembers the first failed save or read so the UI can say history isn't saving.
+    pub fn record_failure(&self, what: &str, error: String) {
+        eprintln!("supervisor storage: {what}: {error}");
+        self.failure
+            .borrow_mut()
+            .get_or_insert_with(|| format!("{what}: {error}"));
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        self.failure.borrow().clone()
     }
 
     fn migrate(&self) -> Result<(), String> {
@@ -140,10 +234,15 @@ impl SessionStorage {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        if version == 0 {
+        if version > SCHEMA_VERSION {
+            return Err(format!("unsupported database schema version {version}"));
+        }
+        // Each step is one transaction, so a crash mid-migration leaves the previous version intact.
+        if version < 1 {
             self.conn
                 .execute_batch(
                     "
+                    BEGIN;
                     CREATE TABLE session (
                       id INTEGER PRIMARY KEY,
                       goal TEXT NOT NULL,
@@ -194,11 +293,23 @@ impl SessionStorage {
                     );
 
                     PRAGMA user_version = 1;
+                    COMMIT;
                     ",
                 )
                 .map_err(|error| error.to_string())?;
-        } else if version != SCHEMA_VERSION {
-            return Err(format!("unsupported database schema version {version}"));
+        }
+        if version < 2 {
+            // Timer seconds at close (pauses excluded). NULL for sessions that never closed cleanly.
+            self.conn
+                .execute_batch(
+                    "
+                    BEGIN;
+                    ALTER TABLE session ADD COLUMN elapsed_seconds INTEGER;
+                    PRAGMA user_version = 2;
+                    COMMIT;
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -213,14 +324,6 @@ impl SessionStorage {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
-    }
-
-    pub fn next_session_id(&self) -> Result<u64, String> {
-        let value: i64 = self
-            .conn
-            .query_row("SELECT COALESCE(MAX(id), 0) FROM session", [], |row| row.get(0))
-            .map_err(|error| error.to_string())?;
-        Ok((value + 1) as u64)
     }
 
     pub fn load_settings(&self) -> Result<SessionSettings, String> {
@@ -342,26 +445,19 @@ impl SessionStorage {
 
     pub fn insert_session(
         &self,
-        id: u64,
         goal: &str,
         strictness: Strictness,
         started_at: &str,
         planned_seconds: u64,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         self.conn
             .execute(
-                "INSERT INTO session (id, goal, strictness, started_at, planned_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    id,
-                    goal,
-                    strictness_key(strictness),
-                    started_at,
-                    planned_seconds
-                ],
+                "INSERT INTO session (goal, strictness, started_at, planned_seconds)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![goal, strictness_key(strictness), started_at, planned_seconds],
             )
             .map_err(|error| error.to_string())?;
-        Ok(())
+        Ok(self.conn.last_insert_rowid() as u64)
     }
 
     pub fn close_session(
@@ -369,11 +465,13 @@ impl SessionStorage {
         id: u64,
         ended_at: &str,
         ended_reason: &str,
+        elapsed_seconds: u64,
     ) -> Result<(), String> {
         self.conn
             .execute(
-                "UPDATE session SET ended_at = ?1, ended_reason = ?2 WHERE id = ?3",
-                params![ended_at, ended_reason, id],
+                "UPDATE session SET ended_at = ?1, ended_reason = ?2, elapsed_seconds = ?3
+                 WHERE id = ?4",
+                params![ended_at, ended_reason, elapsed_seconds, id],
             )
             .map_err(|error| error.to_string())?;
         self.recompute_session_metrics(id)?;
@@ -441,7 +539,7 @@ impl SessionStorage {
                 .map_err(|error| error.to_string())?
         };
         for id in ids {
-            let ended_at = utc_now_rfc3339()?;
+            let ended_at = utc_now();
             self.conn
                 .execute(
                     "UPDATE session SET ended_at = ?1, ended_reason = 'abandoned' WHERE id = ?2",
@@ -510,7 +608,7 @@ impl SessionStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, goal, started_at, planned_seconds, focused_seconds, distracted_seconds,
+                "SELECT id, goal, started_at, focused_seconds, distracted_seconds,
                         idle_seconds, nudge_count
                  FROM session
                  WHERE ended_at IS NOT NULL
@@ -523,21 +621,20 @@ impl SessionStorage {
                 let id: i64 = row.get(0)?;
                 let goal: String = row.get(1)?;
                 let started_at: String = row.get(2)?;
-                let planned_seconds: i64 = row.get(3)?;
-                let focused_seconds: i64 = row.get(4)?;
-                let distracted_seconds: i64 = row.get(5)?;
-                let idle_seconds: i64 = row.get(6)?;
-                let nudges: i64 = row.get(7)?;
-                Ok((id, goal, started_at, planned_seconds, focused_seconds, distracted_seconds, idle_seconds, nudges))
+                let focused_seconds: i64 = row.get(3)?;
+                let distracted_seconds: i64 = row.get(4)?;
+                let idle_seconds: i64 = row.get(5)?;
+                let nudges: i64 = row.get(6)?;
+                Ok((id, goal, started_at, focused_seconds, distracted_seconds, idle_seconds, nudges))
             })
             .map_err(|error| error.to_string())?;
 
         let mut summaries = Vec::new();
         for row in rows {
-            let (id, goal, started_at, planned_seconds, focused_seconds, distracted_seconds, idle_seconds, nudges) =
+            let (id, goal, started_at, focused_seconds, distracted_seconds, idle_seconds, nudges) =
                 row.map_err(|error| error.to_string())?;
             let top_hints = self.top_hints_for_session(id as u64)?;
-            let duration_seconds = self.session_duration_seconds(id as u64, planned_seconds as u64)?;
+            let duration_seconds = self.session_duration_seconds(id as u64)?;
             summaries.push(SessionSummary {
                 id: id as u64,
                 goal,
@@ -553,19 +650,20 @@ impl SessionStorage {
         Ok(summaries)
     }
 
-    fn session_duration_seconds(&self, session_id: u64, planned_seconds: u64) -> Result<u64, String> {
-        let span_total: i64 = self
+    /// Sessions that never closed cleanly have no timer value; their tracked span time is the
+    /// best record of how long they ran.
+    fn session_duration_seconds(&self, session_id: u64) -> Result<u64, String> {
+        let seconds: i64 = self
             .conn
             .query_row(
-                "SELECT COALESCE(SUM(seconds), 0) FROM span WHERE session_id = ?1",
+                "SELECT COALESCE(elapsed_seconds,
+                          (SELECT COALESCE(SUM(seconds), 0) FROM span WHERE session_id = ?1))
+                 FROM session WHERE id = ?1",
                 [session_id],
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
-        if span_total > 0 {
-            return Ok(span_total as u64);
-        }
-        Ok(planned_seconds)
+        Ok(seconds as u64)
     }
 
     fn top_hints_for_session(&self, session_id: u64) -> Result<Vec<String>, String> {
@@ -645,7 +743,7 @@ impl SessionStorage {
             median_stretch_seconds,
         ) = row;
 
-        let duration_seconds = self.session_duration_seconds(id, planned_seconds as u64)?;
+        let duration_seconds = self.session_duration_seconds(id)?;
         let focus_percent = if duration_seconds == 0 {
             0
         } else {
@@ -689,7 +787,7 @@ impl SessionStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, started_at, median_stretch_seconds, focused_seconds, planned_seconds
+                "SELECT id, started_at, median_stretch_seconds, focused_seconds
                  FROM session
                  WHERE ended_at IS NOT NULL
                  ORDER BY started_at DESC
@@ -703,16 +801,15 @@ impl SessionStorage {
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let (id, started_at, median_stretch_seconds, focused_seconds, planned_seconds) =
+            let (id, started_at, median_stretch_seconds, focused_seconds) =
                 row.map_err(|error| error.to_string())?;
-            let duration = self.session_duration_seconds(id as u64, planned_seconds as u64)?;
+            let duration = self.session_duration_seconds(id as u64)?;
             let focus_percent = if duration == 0 {
                 0
             } else {
@@ -1113,12 +1210,6 @@ fn rule_source_label(rule: &AppRule) -> &'static str {
     }
 }
 
-fn utc_now_rfc3339() -> Result<String, String> {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1156,13 +1247,13 @@ mod tests {
     #[test]
     fn recompute_session_metrics_matches_fixture() {
         let storage = SessionStorage::open_in_memory().expect("open db");
-        storage
-            .insert_session(1, "Ship storage", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
+        let id = storage
+            .insert_session("Ship storage", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
             .expect("insert session");
         for span in fixture_spans() {
             storage
                 .insert_span(
-                    1,
+                    id,
                     &span.app,
                     span.context.as_deref(),
                     &span.category,
@@ -1173,13 +1264,13 @@ mod tests {
                 .expect("insert span");
         }
         storage
-            .insert_event(1, 310, "nudge", Some("voice"))
+            .insert_event(id, 310, "nudge", Some("voice"))
             .expect("insert event");
         storage
-            .close_session(1, "2026-09-22T13:00:00Z", "completed")
+            .close_session(id, "2026-09-22T13:00:00Z", "completed", 600)
             .expect("close session");
 
-        let report = storage.get_session_report(1).expect("report");
+        let report = storage.get_session_report(id).expect("report");
         assert_eq!(report.focused_seconds, 480);
         assert_eq!(report.distracted_seconds, 120);
         assert_eq!(report.drift_count, 1);
@@ -1198,15 +1289,15 @@ mod tests {
         let path = dir.join("sessions.db");
         let _ = std::fs::remove_dir_all(&dir);
 
-        {
-            let storage = SessionStorage::open(&path).expect("open db");
-            storage
-                .insert_session(1, "Persist", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
+        let id = {
+            let (storage, _) = SessionStorage::open(&path).expect("open db");
+            let id = storage
+                .insert_session("Persist", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
                 .expect("insert session");
             for span in fixture_spans() {
                 storage
                     .insert_span(
-                        1,
+                        id,
                         &span.app,
                         span.context.as_deref(),
                         &span.category,
@@ -1217,26 +1308,115 @@ mod tests {
                     .expect("insert span");
             }
             storage
-                .close_session(1, "2026-09-22T12:30:00Z", "stopped")
+                .close_session(id, "2026-09-22T12:30:00Z", "stopped", 1800)
                 .expect("close session");
-        }
+            id
+        };
 
-        let storage = SessionStorage::open(&path).expect("reopen db");
-        let report = storage.get_session_report(1).expect("report");
+        let (storage, state) = SessionStorage::open(&path).expect("reopen db");
+        let report = storage.get_session_report(id).expect("report");
         assert_eq!(report.focused_seconds, 480);
         assert_eq!(report.distracted_seconds, 120);
+        assert_eq!(state.history.len(), 1);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_1_database_migrates_and_keeps_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "supervisor-storage-migrate-{}",
+            std::process::id()
+        ));
+        let path = dir.join("sessions.db");
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let (storage, _) = SessionStorage::open(&path).expect("open db");
+            let id = storage
+                .insert_session("Old", Strictness::Normal, "2026-09-01T12:00:00Z", 1500)
+                .expect("insert session");
+            storage
+                .insert_span(id, "Code", None, "work", "focused", 0, 420)
+                .expect("insert span");
+            storage
+                .close_session(id, "2026-09-01T12:30:00Z", "stopped", 999)
+                .expect("close session");
+            storage
+                .conn
+                .execute_batch(
+                    "ALTER TABLE session DROP COLUMN elapsed_seconds; PRAGMA user_version = 1;",
+                )
+                .expect("downgrade to v1");
+        }
+
+        let (storage, state) = SessionStorage::open(&path).expect("migrate db");
+        let version: i32 = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].duration_seconds, 420);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_database_is_moved_aside_and_replaced() {
+        let dir = std::env::temp_dir().join(format!(
+            "supervisor-storage-corrupt-{}",
+            std::process::id()
+        ));
+        let path = dir.join("sessions.db");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::write(&path, b"this is not a sqlite database, just garbage bytes").expect("write");
+
+        let (opened, notice) = open_or_reset(Ok(path.clone()));
+
+        let Some(StorageNotice::Reset { moved_to, .. }) = notice else {
+            panic!("expected a reset notice, got {notice:?}");
+        };
+        assert!(std::path::Path::new(&moved_to).exists());
+        let (storage, state) = opened.expect("fresh database");
+        assert!(state.history.is_empty());
+        storage
+            .insert_session("After reset", Strictness::Normal, "2026-09-28T00:00:00Z", 600)
+            .expect("fresh database accepts writes");
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unusable_location_turns_history_off() {
+        let (opened, notice) = open_or_reset(Err("no app data folder".to_string()));
+        assert!(opened.is_none());
+        assert!(matches!(notice, Some(StorageNotice::Off { .. })));
+
+        let dir = std::env::temp_dir().join(format!(
+            "supervisor-storage-blocked-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let blocker = dir.join("not-a-folder");
+        std::fs::write(&blocker, b"file where a folder should be").expect("write");
+
+        let (opened, notice) = open_or_reset(Ok(blocker.join("sessions.db")));
+        assert!(opened.is_none());
+        assert!(matches!(notice, Some(StorageNotice::Off { .. })));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn orphan_session_recovers_as_abandoned() {
         let storage = SessionStorage::open_in_memory().expect("open db");
-        storage
-            .insert_session(7, "Crash", Strictness::Strict, "2026-09-22T08:00:00Z", 1500)
+        let id = storage
+            .insert_session("Crash", Strictness::Strict, "2026-09-22T08:00:00Z", 1500)
             .expect("insert session");
         storage
             .insert_span(
-                7,
+                id,
                 "Code",
                 Some("lib.rs"),
                 "work",
@@ -1248,7 +1428,7 @@ mod tests {
 
         storage.recover_orphans().expect("recover");
 
-        let report = storage.get_session_report(7).expect("report");
+        let report = storage.get_session_report(id).expect("report");
         assert_eq!(report.ended_reason.as_deref(), Some("abandoned"));
         assert!(report.ended_at.is_some());
         assert_eq!(report.focused_seconds, 90);
