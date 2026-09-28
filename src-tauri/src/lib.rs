@@ -68,7 +68,7 @@ fn start_session(
 
     sessions.start(input, now, utc_now()?, Some(&*storage))?;
     let should_show_status = sessions.status_window_enabled();
-    let snapshot = sessions.snapshot(now, Some(&*storage));
+    let snapshot = sessions.snapshot(now);
     drop(sessions);
 
     if should_show_status {
@@ -83,9 +83,7 @@ fn start_session(
 #[tauri::command]
 fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let sessions = lock_sessions(&state)?;
-    let storage = lock_storage(&state)?;
-    Ok(sessions.snapshot(now, Some(&*storage)))
+    Ok(lock_sessions(&state)?.snapshot(now))
 }
 
 #[tauri::command]
@@ -147,8 +145,7 @@ fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapsho
 
 #[tauri::command]
 fn get_history(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
-    let storage = lock_storage(&state)?;
-    Ok(storage.list_history(20)?)
+    Ok(lock_sessions(&state)?.history())
 }
 
 #[tauri::command]
@@ -163,17 +160,29 @@ fn get_trends(state: State<'_, AppState>) -> Result<TrendsData, String> {
 
 #[tauri::command]
 fn delete_session(id: u64, state: State<'_, AppState>) -> Result<(), String> {
-    lock_storage(&state)?.delete_session(id)
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    storage.delete_session(id)?;
+    sessions.refresh_history_cache(&storage);
+    Ok(())
 }
 
 #[tauri::command]
 fn delete_all_history(state: State<'_, AppState>) -> Result<(), String> {
-    lock_storage(&state)?.delete_all_history()
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    storage.delete_all_history()?;
+    sessions.refresh_history_cache(&storage);
+    Ok(())
 }
 
 #[tauri::command]
 fn scrub_span_context(state: State<'_, AppState>) -> Result<(), String> {
-    lock_storage(&state)?.scrub_span_context()
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    storage.scrub_span_context()?;
+    sessions.refresh_history_cache(&storage);
+    Ok(())
 }
 
 #[tauri::command]
@@ -408,14 +417,79 @@ fn utc_now() -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+fn utc_now_fallback() -> String {
+    utc_now().unwrap_or_else(|error| {
+        eprintln!("supervisor storage: utc_now: {error}");
+        OffsetDateTime::UNIX_EPOCH
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    })
+}
+
+fn bootstrap_sessions_from_storage(
+    storage: SessionStorage,
+) -> Result<(SessionStorage, SessionManager), String> {
+    let settings = storage.load_settings()?;
+    let rules = storage.load_rules()?;
+    let next_id = storage.next_session_id()?;
+    let history = storage
+        .list_history(session::HISTORY_CACHE_LIMIT)
+        .unwrap_or_else(|error| {
+            eprintln!("supervisor storage: load history cache: {error}");
+            Vec::new()
+        });
+    Ok((
+        storage,
+        SessionManager::bootstrap(settings, rules, next_id, history),
+    ))
+}
+
+fn open_storage_for_app(app: &tauri::App) -> SessionStorage {
+    let path = match database_path(app) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("supervisor storage: app data path: {error}");
+            return SessionStorage::open_in_memory()
+                .expect("in-memory session database must open");
+        }
+    };
+    match SessionStorage::open(&path) {
+        Ok(storage) => storage,
+        Err(error) => {
+            eprintln!("supervisor storage: open disk database: {error}");
+            SessionStorage::open_in_memory().expect("in-memory session database must open")
+        }
+    }
+}
+
+fn init_app_storage_and_sessions(app: &tauri::App) -> (SessionStorage, SessionManager) {
+    let disk = open_storage_for_app(app);
+    match bootstrap_sessions_from_storage(disk) {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!(
+                "supervisor storage: bootstrap failed, using in-memory database: {error}"
+            );
+            let storage = SessionStorage::open_in_memory()
+                .expect("in-memory session database must open");
+            bootstrap_sessions_from_storage(storage)
+                .unwrap_or_else(|fallback_error| {
+                    eprintln!("supervisor storage: in-memory bootstrap: {fallback_error}");
+                    let storage = SessionStorage::open_in_memory()
+                        .expect("in-memory session database must open");
+                    (
+                        storage,
+                        SessionManager::default(),
+                    )
+                })
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let storage = SessionStorage::open(&database_path(app)?)?;
-            let settings = storage.load_settings()?;
-            let rules = storage.load_rules()?;
-            let next_id = storage.next_session_id()?;
-            let sessions = SessionManager::bootstrap(settings, rules, next_id);
+            let (storage, sessions) = init_app_storage_and_sessions(app);
 
             app.manage(AppState {
                 focus_engine: Mutex::new(FocusEngine::default()),
@@ -551,7 +625,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 sessions.snooze(now, 5 * 60, Some(storage));
             }),
             "stop" => with_sessions(app, |sessions, now, storage| {
-                let ended_at = utc_now().unwrap_or_else(|_| "stop".to_string());
+                let ended_at = utc_now_fallback();
                 sessions.stop(now, &ended_at, Some(storage));
                 hide_status_window(app);
             }),

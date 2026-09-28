@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
+pub const HISTORY_CACHE_LIMIT: usize = 20;
+
 #[derive(Debug)]
 pub struct SessionManager {
     settings: SessionSettings,
@@ -34,14 +36,26 @@ impl SessionManager {
         settings: SessionSettings,
         rules: Vec<AppRule>,
         next_id: u64,
+        history: Vec<SessionSummary>,
     ) -> Self {
         Self {
             settings,
             persisted_rules: rules,
             current: None,
-            history: Vec::new(),
+            history,
             next_id,
         }
+    }
+
+    pub fn refresh_history_cache(&mut self, storage: &SessionStorage) {
+        match storage.list_history(HISTORY_CACHE_LIMIT) {
+            Ok(history) => self.history = history,
+            Err(error) => warn_storage("refresh history cache", error),
+        }
+    }
+
+    pub fn history(&self) -> Vec<SessionSummary> {
+        self.history.clone()
     }
 }
 
@@ -128,13 +142,13 @@ impl SessionManager {
 
         self.tick_current(now, storage);
         self.finish_expired(now, storage);
-        self.snapshot(now, storage)
+        self.snapshot(now)
     }
 
     pub fn tick(&mut self, now: Duration, storage: Option<&SessionStorage>) -> SessionSnapshot {
         self.tick_current(now, storage);
         self.finish_expired(now, storage);
-        self.snapshot(now, storage)
+        self.snapshot(now)
     }
 
     pub fn should_poll_activity(&self) -> bool {
@@ -166,7 +180,7 @@ impl SessionManager {
         if let Some(session) = self.current.as_mut() {
             session.pause(now, storage);
         }
-        self.snapshot(now, storage)
+        self.snapshot(now)
     }
 
     pub fn resume(
@@ -177,7 +191,7 @@ impl SessionManager {
         if let Some(session) = self.current.as_mut() {
             session.resume(now, storage);
         }
-        self.snapshot(now, storage)
+        self.snapshot(now)
     }
 
     pub fn toggle_pause(&mut self, now: Duration, storage: Option<&SessionStorage>) {
@@ -205,7 +219,7 @@ impl SessionManager {
         if let Some(session) = self.current.as_mut() {
             session.snooze(now, seconds, storage);
         }
-        self.snapshot(now, storage)
+        self.snapshot(now)
     }
 
     pub fn stop(
@@ -215,7 +229,7 @@ impl SessionManager {
         storage: Option<&SessionStorage>,
     ) -> SessionSnapshot {
         self.finish_current(now, "stopped", ended_at, storage);
-        self.snapshot(now, storage)
+        self.snapshot(now)
     }
 
     pub fn mark_current(
@@ -233,7 +247,7 @@ impl SessionManager {
                 self.persisted_rules = session.rules.clone();
             }
         }
-        Ok(self.snapshot(now, storage))
+        Ok(self.snapshot(now))
     }
 
     pub fn settings(&self) -> SessionSettings {
@@ -273,7 +287,7 @@ impl SessionManager {
         if let Some(storage) = storage {
             storage.save_settings(&self.settings)?;
         }
-        Ok(self.snapshot(now, storage))
+        Ok(self.snapshot(now))
     }
 
     pub fn set_status_window_enabled(
@@ -286,18 +300,10 @@ impl SessionManager {
         if let Some(storage) = storage {
             storage.save_settings(&self.settings)?;
         }
-        Ok(self.snapshot(now, storage))
+        Ok(self.snapshot(now))
     }
 
-    pub fn history(&self, storage: Option<&SessionStorage>) -> Vec<SessionSummary> {
-        if let Some(storage) = storage {
-            storage.list_history(20).unwrap_or_default()
-        } else {
-            self.history.clone()
-        }
-    }
-
-    pub fn snapshot(&self, now: Duration, storage: Option<&SessionStorage>) -> SessionSnapshot {
+    pub fn snapshot(&self, now: Duration) -> SessionSnapshot {
         SessionSnapshot {
             status: self
                 .current
@@ -306,7 +312,7 @@ impl SessionManager {
                 .unwrap_or(SessionStatus::Idle),
             settings: self.settings.clone(),
             current: self.current.as_ref().map(|session| session.snapshot(now)),
-            history: self.history(storage),
+            history: self.history.clone(),
         }
     }
 
@@ -320,10 +326,13 @@ impl SessionManager {
         if let Some(mut session) = self.current.take() {
             session.finish(now, storage);
             if let Some(storage) = storage {
-                let _ = storage.close_session(session.id, ended_at, reason);
+                if let Err(error) = storage.close_session(session.id, ended_at, reason) {
+                    warn_storage("close session", error);
+                }
+                self.refresh_history_cache(storage);
             } else {
                 self.history.insert(0, session.summary(now));
-                self.history.truncate(20);
+                self.history.truncate(HISTORY_CACHE_LIMIT);
             }
         }
     }
@@ -340,9 +349,7 @@ impl SessionManager {
             .as_ref()
             .is_some_and(|session| session.is_expired(now))
         {
-            let ended_at = storage
-                .and_then(|_| utc_now_rfc3339().ok())
-                .unwrap_or_else(|| "expired".to_string());
+            let ended_at = utc_now_fallback();
             self.finish_current(now, "completed", &ended_at, storage);
         }
     }
@@ -669,7 +676,7 @@ impl Session {
         let end_offset = self.session_offset_seconds(now);
         let seconds = end_offset.saturating_sub(open.started_offset_seconds);
         if let Some(storage) = storage {
-            let _ = storage.insert_span(
+            if let Err(error) = storage.insert_span(
                 self.id,
                 &open.app,
                 open.context.as_deref(),
@@ -677,7 +684,9 @@ impl Session {
                 &open.state,
                 open.started_offset_seconds,
                 seconds,
-            );
+            ) {
+                warn_storage("insert span", error);
+            }
         }
     }
 
@@ -689,12 +698,14 @@ impl Session {
         storage: Option<&SessionStorage>,
     ) {
         if let Some(storage) = storage {
-            let _ = storage.insert_event(
+            if let Err(error) = storage.insert_event(
                 self.id,
                 self.session_offset_seconds(now),
                 kind,
                 detail,
-            );
+            ) {
+                warn_storage("insert event", error);
+            }
         }
     }
 
@@ -1054,6 +1065,19 @@ fn utc_now_rfc3339() -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+fn utc_now_fallback() -> String {
+    utc_now_rfc3339().unwrap_or_else(|error| {
+        warn_storage("utc_now", error);
+        time::OffsetDateTime::UNIX_EPOCH
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    })
+}
+
+fn warn_storage(context: &str, error: impl std::fmt::Display) {
+    eprintln!("supervisor storage: {context}: {error}");
+}
+
 fn marked_focus(
     focus: &FocusSnapshot,
     matched_rule: AppRule,
@@ -1138,7 +1162,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(manager.snapshot(seconds(1), NO_STORAGE).settings.status_window_on_top);
+        assert!(manager.snapshot(seconds(1)).settings.status_window_on_top);
     }
 
     #[test]
@@ -1158,7 +1182,7 @@ mod tests {
                 NO_STORAGE,
             )
             .unwrap();
-        let settings = manager.snapshot(seconds(1), NO_STORAGE).settings;
+        let settings = manager.snapshot(seconds(1)).settings;
 
         assert!(!settings.status_window_enabled);
         assert!(settings.status_window_on_top);
@@ -1536,8 +1560,8 @@ mod tests {
         .unwrap();
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(10));
-        let first = manager.snapshot(seconds(10), NO_STORAGE);
-        let second = manager.snapshot(seconds(20), NO_STORAGE);
+        let first = manager.snapshot(seconds(10));
+        let second = manager.snapshot(seconds(20));
 
         assert_eq!(
             first.current.unwrap().metrics,
@@ -1564,6 +1588,35 @@ mod tests {
         assert!(event.value.contains("DISTRACTED"));
         assert!(event.value.contains("TITLE YouTube"));
         assert!(event.value.contains("NUDGE ARMED"));
+    }
+
+    #[test]
+    fn history_cache_refreshes_after_close_and_delete() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let mut manager = SessionManager::bootstrap(
+            SessionSettings::default(),
+            starter_rules(),
+            1,
+            Vec::new(),
+        );
+        manager
+            .start(
+                input("Cache test", Strictness::Normal),
+                seconds(0),
+                "2026-09-22T12:00:00Z".to_string(),
+                Some(&storage),
+            )
+            .expect("start session");
+        record(&mut manager, sample("Code", "main.rs", 0.0), seconds(10));
+        manager.stop(seconds(11), "2026-09-22T12:30:00Z", Some(&storage));
+
+        assert_eq!(manager.history().len(), 1);
+        assert_eq!(manager.snapshot(seconds(11)).history.len(), 1);
+
+        storage.delete_session(1).expect("delete session");
+        manager.refresh_history_cache(&storage);
+        assert!(manager.history().is_empty());
+        assert!(manager.snapshot(seconds(11)).history.is_empty());
     }
 
     #[test]
