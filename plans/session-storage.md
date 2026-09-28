@@ -165,6 +165,26 @@ Always-on tracking, work-hour schedules, pie charts, contribution heatmaps,
 composite scores, streaks and badges, PDF export, per-website breakdown before
 the Windows URL path is real, weekly digests, cloud sync of any kind.
 
+## Category mapping
+
+Span categories are assigned deterministically from focus state, rule
+classification, app name, and window title (lowercased). Order matters:
+
+1. **offscreen** — focus state is `idle` (future `away` / `phone` webcam spans
+   will also land here).
+2. **media** — app/title contains a media marker (`youtube`, `netflix`, `tiktok`,
+   `instagram`, `reddit`, `spotify`, `twitch`, `hulu`, `disney+`, `prime video`).
+3. **comms** — app name contains `slack`, `discord`, `teams`, `zoom`, `outlook`,
+   `mail`, `messages`, `telegram`, or `whatsapp`.
+4. **work** — state is `focused`, or classification is `focused`.
+5. **media** or **browse** — classification/state is distracting: media markers
+   win, otherwise `browse`.
+6. **work** — app matches a work tool (`code`, `cursor`, `visual studio`, IDE
+   names, `terminal`, `notion`, `obsidian`, `figma`, …).
+7. **browse** — browser apps (`chrome`, `firefox`, `edge`, `brave`, `safari`,
+   `opera`, `arc`) with neutral/suspicious focus.
+8. Default **browse** for anything else.
+
 ## Check
 
 `recompute_session_metrics(id)` is the seam to test: build spans in a fixture,
