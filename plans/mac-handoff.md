@@ -9,6 +9,10 @@ Work through it on a Mac before any Mac release, and tick items off in this file
 - [ ] `npm run tauri dev` starts the app.
 - [ ] A release build opens without Gatekeeper warnings. Code signing and notarization are
       not set up yet.
+- [ ] The Python workers (webcam, voice) are frozen with PyInstaller, which cannot build for
+      another OS: build both on the Mac (Apple Silicon and Intel separately). Every library
+      inside them must be signed for notarization, and the camera permission prompt must
+      appear when the webcam worker starts.
 
 ## 2. Hand-written Apple declarations (replace, then test)
 
