@@ -4,16 +4,12 @@ mod activity_normalize;
 #[path = "activity_win32.rs"]
 mod activity_win32;
 
-use activity_normalize::{
-    classify_foreground_surface, idle_elapsed_seconds, is_neutral_window_class,
-    normalize_title_text, ForegroundDisposition, RawForegroundIdentity,
-};
-use serde::ser::{SerializeStruct, Serializer};
+use activity_normalize::{idle_elapsed_seconds, normalize_title_text};
 use serde::Serialize;
 #[cfg(not(target_os = "windows"))]
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ActivitySample {
     pub captured_at: String,
     pub platform: &'static str,
@@ -25,81 +21,8 @@ pub struct ActivitySample {
     pub bounds: Bounds,
     pub idle_seconds: Option<f64>,
     pub permissions: CapturePermissions,
-}
-
-impl Serialize for ActivitySample {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("ActivitySample", 12)?;
-        state.serialize_field("captured_at", &self.captured_at)?;
-        state.serialize_field("platform", &self.platform)?;
-        state.serialize_field("app_name", &self.app_name)?;
-        state.serialize_field("process_path", &self.process_path)?;
-        state.serialize_field("process_id", &self.process_id)?;
-        state.serialize_field("window_title", &self.window_title)?;
-        state.serialize_field("window_id", &self.window_id)?;
-        state.serialize_field("bounds", &self.bounds)?;
-        state.serialize_field("idle_seconds", &self.idle_seconds)?;
-        state.serialize_field("permissions", &self.permissions)?;
-        state.serialize_field("capture_kind", capture_kind_label(self))?;
-        if let Some(window_class) = window_class_hint(self) {
-            state.serialize_field("window_class", &window_class)?;
-        }
-        state.end()
-    }
-}
-
-pub fn should_treat_as_neutral(sample: &ActivitySample) -> bool {
-    if sample.platform != "windows" {
-        return false;
-    }
-
-    matches!(
-        classify_foreground_surface(&foreground_identity_from_sample(sample)),
-        ForegroundDisposition::Neutral
-    )
-}
-
-fn capture_kind_label(sample: &ActivitySample) -> &'static str {
-    if should_treat_as_neutral(sample) {
-        "neutral"
-    } else {
-        "normal"
-    }
-}
-
-fn window_class_hint(sample: &ActivitySample) -> Option<String> {
-    if is_neutral_window_class(&sample.app_name) {
-        return Some(sample.app_name.clone());
-    }
-    None
-}
-
-fn foreground_identity_from_sample(sample: &ActivitySample) -> RawForegroundIdentity {
-    let exe_name = if let Some(file_name) = std::path::Path::new(&sample.process_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-    {
-        file_name.to_string()
-    } else if sample.app_name.to_ascii_lowercase().ends_with(".exe") {
-        sample.app_name.clone()
-    } else {
-        format!("{}.exe", sample.app_name)
-    };
-
-    let window_class = if is_neutral_window_class(&sample.app_name) {
-        sample.app_name.clone()
-    } else {
-        String::new()
-    };
-
-    RawForegroundIdentity {
-        exe_name,
-        window_class,
-        window_title: sample.window_title.clone().unwrap_or_default(),
-    }
+    /// OS shell UI (Start, Search, Alt-Tab, taskbar...). Sessions keep the previous window.
+    pub shell_surface: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -174,6 +97,7 @@ fn sample_from_active_window(
         },
         idle_seconds,
         permissions,
+        shell_surface: false,
     }
 }
 

@@ -32,28 +32,15 @@ const PLACEHOLDER_TITLES: &[&str] = &[
     "edge://newtab",
 ];
 
-const NEUTRAL_EXE_NAMES: &[&str] = &[
-    "searchhost",
-    "startmenuexperiencehost",
-    "shellexperiencehost",
-    "textinputhost",
-];
-
-const NEUTRAL_WINDOW_CLASSES: &[&str] = &[
-    "Progman",
-    "WorkerW",
-    "Shell_TrayWnd",
-    "Shell_SecondaryTrayWnd",
-    "XamlExplorerHostIslandWindow",
-    "MultitaskingViewFrame",
-    "TopLevelWindowForOverflowXamlIsland",
-    "Windows.UI.Core.CoreWindow",
-];
+/// The window class File Explorer folder windows have used for decades. Every other top-level
+/// window owned by explorer.exe is shell UI: desktop, taskbar, Alt-Tab, tray, Run dialog.
+const FILE_EXPLORER_WINDOW_CLASS: &str = "CabinetWClass";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForegroundDisposition {
     Sample,
-    Neutral,
+    /// Shell UI (Start, Search, Alt-Tab, taskbar...): the session keeps the previous window.
+    ShellSurface,
     NoSample,
 }
 
@@ -62,6 +49,9 @@ pub struct RawForegroundIdentity {
     pub exe_name: String,
     pub window_class: String,
     pub window_title: String,
+    /// The process runs from `<Windows>\SystemApps`, where Windows installs its shell UI
+    /// (Start, Search, notification center, touch keyboard, system dialogs).
+    pub is_system_app: bool,
 }
 
 pub fn classify_foreground_surface(identity: &RawForegroundIdentity) -> ForegroundDisposition {
@@ -77,41 +67,29 @@ pub fn classify_foreground_surface(identity: &RawForegroundIdentity) -> Foregrou
         return ForegroundDisposition::NoSample;
     }
 
-    if exe == "applicationframehost" {
-        // Frame host with only shell chrome and no page title is usually Start/search chrome.
-        if title.is_none() {
-            return ForegroundDisposition::Neutral;
-        }
-        return ForegroundDisposition::Sample;
+    if identity.is_system_app {
+        return ForegroundDisposition::ShellSurface;
     }
 
-    if is_neutral_window_class(class) {
-        return ForegroundDisposition::Neutral;
+    if exe == "explorer" && !class.eq_ignore_ascii_case(FILE_EXPLORER_WINDOW_CLASS) {
+        return ForegroundDisposition::ShellSurface;
     }
 
-    if is_neutral_exe_name(&exe) {
-        return ForegroundDisposition::Neutral;
-    }
-
-    if exe == "explorer" && is_desktop_shell_class(class) {
-        return ForegroundDisposition::Neutral;
+    if exe == "applicationframehost" && title.is_none() {
+        // A Store-app frame whose app could not be resolved and has no title: nothing to credit.
+        return ForegroundDisposition::ShellSurface;
     }
 
     ForegroundDisposition::Sample
 }
 
-pub fn is_neutral_window_class(class: &str) -> bool {
-    NEUTRAL_WINDOW_CLASSES
-        .iter()
-        .any(|candidate| class.eq_ignore_ascii_case(candidate))
-}
-
-pub fn is_neutral_exe_name(exe_lower: &str) -> bool {
-    NEUTRAL_EXE_NAMES.iter().any(|candidate| *candidate == exe_lower)
-}
-
-pub fn is_desktop_shell_class(class: &str) -> bool {
-    class.eq_ignore_ascii_case("Progman") || class.eq_ignore_ascii_case("WorkerW")
+/// Case-insensitive "is `path` inside `dir`", as Windows paths are.
+pub fn is_inside_dir(path: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches(['\\', '/']);
+    path.len() > dir.len()
+        && path.is_char_boundary(dir.len())
+        && path[..dir.len()].eq_ignore_ascii_case(dir)
+        && path[dir.len()..].starts_with(['\\', '/'])
 }
 
 pub fn normalize_title_text(raw: &str) -> Option<String> {
@@ -266,37 +244,65 @@ mod tests {
         );
     }
 
-    #[test]
-    fn classifies_shell_surfaces_as_neutral() {
-        let desktop = RawForegroundIdentity {
-            exe_name: "explorer.exe".to_string(),
-            window_class: "WorkerW".to_string(),
-            window_title: String::new(),
-        };
-        assert_eq!(
-            classify_foreground_surface(&desktop),
-            ForegroundDisposition::Neutral
-        );
+    fn identity(exe: &str, class: &str, title: &str, is_system_app: bool) -> RawForegroundIdentity {
+        RawForegroundIdentity {
+            exe_name: exe.to_string(),
+            window_class: class.to_string(),
+            window_title: title.to_string(),
+            is_system_app,
+        }
+    }
 
-        let task_view = RawForegroundIdentity {
-            exe_name: "explorer.exe".to_string(),
-            window_class: "MultitaskingViewFrame".to_string(),
-            window_title: String::new(),
-        };
+    #[test]
+    fn explorer_shell_windows_are_shell_surfaces_but_folders_are_not() {
+        for class in ["WorkerW", "Shell_TrayWnd", "XamlExplorerHostIslandWindow", "SomeFutureClass"] {
+            assert_eq!(
+                classify_foreground_surface(&identity("explorer.exe", class, "", false)),
+                ForegroundDisposition::ShellSurface,
+                "{class}"
+            );
+        }
         assert_eq!(
-            classify_foreground_surface(&task_view),
-            ForegroundDisposition::Neutral
+            classify_foreground_surface(&identity("Explorer.EXE", "CabinetWClass", "Downloads", false)),
+            ForegroundDisposition::Sample
+        );
+    }
+
+    #[test]
+    fn system_apps_are_shell_surfaces_whatever_their_name() {
+        for exe in ["SearchHost.exe", "StartMenuExperienceHost.exe", "RenamedIn2030.exe"] {
+            assert_eq!(
+                classify_foreground_surface(&identity(exe, "Windows.UI.Core.CoreWindow", "", true)),
+                ForegroundDisposition::ShellSurface,
+                "{exe}"
+            );
+        }
+    }
+
+    #[test]
+    fn store_apps_are_not_hidden_by_their_window_class() {
+        assert_eq!(
+            classify_foreground_surface(&identity("Spotify.exe", "Windows.UI.Core.CoreWindow", "Spotify", false)),
+            ForegroundDisposition::Sample
         );
     }
 
     #[test]
     fn lock_screen_is_no_sample() {
-        let lock = RawForegroundIdentity {
-            exe_name: "LockApp.exe".to_string(),
-            window_class: "Windows.UI.Core.CoreWindow".to_string(),
-            window_title: String::new(),
-        };
-        assert_eq!(classify_foreground_surface(&lock), ForegroundDisposition::NoSample);
+        assert_eq!(
+            classify_foreground_surface(&identity("LockApp.exe", "Windows.UI.Core.CoreWindow", "", true)),
+            ForegroundDisposition::NoSample
+        );
+    }
+
+    #[test]
+    fn inside_dir_matches_whole_folder_names_only() {
+        let apps = r"C:\WINDOWS\SystemApps";
+        assert!(is_inside_dir(r"c:\windows\systemapps\Search\SearchHost.exe", apps));
+        assert!(is_inside_dir(r"C:\WINDOWS\SystemApps\x.exe", r"C:\Windows\SystemApps\"));
+        assert!(!is_inside_dir(r"C:\WINDOWS\SystemAppsX\x.exe", apps));
+        assert!(!is_inside_dir(r"C:\WINDOWS\SystemApps", apps));
+        assert!(!is_inside_dir(r"C:\Program Files\app.exe", apps));
     }
 
     #[test]

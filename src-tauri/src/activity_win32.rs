@@ -1,14 +1,16 @@
 use crate::activity::{ActivitySample, Bounds, CapturePermissions};
 use super::activity_normalize::{
-    app_name_from_process_path, classify_foreground_surface, is_neutral_window_class,
+    app_name_from_process_path, classify_foreground_surface, is_inside_dir,
     normalize_title_for_browser, normalize_title_text, ForegroundDisposition, RawForegroundIdentity,
 };
+use std::sync::OnceLock;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use windows::core::{BOOL, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
+use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -55,28 +57,16 @@ pub fn capture_current(
         exe_name: exe_name.clone(),
         window_class: window_class.clone(),
         window_title: raw_title.clone(),
+        is_system_app: system_apps_dir().is_some_and(|dir| is_inside_dir(&process_path, dir)),
     });
 
-    match disposition {
+    let shell_surface = match disposition {
         ForegroundDisposition::NoSample => {
             return Err("foreground surface is not classifiable".to_string());
         }
-        ForegroundDisposition::Neutral => {
-            return Ok(build_sample(
-                captured_at,
-                permissions,
-                idle_seconds,
-                hwnd,
-                process_id,
-                process_path,
-                exe_name,
-                window_class,
-                raw_title,
-                true,
-            ));
-        }
-        ForegroundDisposition::Sample => {}
-    }
+        ForegroundDisposition::ShellSurface => true,
+        ForegroundDisposition::Sample => false,
+    };
 
     Ok(build_sample(
         captured_at,
@@ -88,8 +78,20 @@ pub fn capture_current(
         exe_name,
         window_class,
         raw_title,
-        false,
+        shell_surface,
     ))
+}
+
+/// `<Windows>\SystemApps`, asked from Windows once (the Windows folder is not always `C:\Windows`).
+fn system_apps_dir() -> Option<&'static str> {
+    static DIR: OnceLock<Option<String>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let mut buffer = vec![0u16; MAX_PATH as usize];
+        let length = unsafe { GetSystemWindowsDirectoryW(Some(&mut buffer)) } as usize;
+        (length > 0 && length < buffer.len())
+            .then(|| format!(r"{}\SystemApps", String::from_utf16_lossy(&buffer[..length])))
+    })
+    .as_deref()
 }
 
 fn build_sample(
@@ -102,14 +104,11 @@ fn build_sample(
     exe_name: String,
     window_class: String,
     raw_title: String,
-    neutral_surface: bool,
+    shell_surface: bool,
 ) -> ActivitySample {
     let mut app_name = app_name_from_process_path(&process_path, &window_class);
     if app_name.is_empty() {
         app_name = exe_name.clone();
-    }
-    if neutral_surface && is_neutral_window_class(&window_class) {
-        app_name = window_class.clone();
     }
     let window_title = normalize_title_for_browser(&exe_name, &raw_title)
         .or_else(|| normalize_title_text(&raw_title));
@@ -125,6 +124,7 @@ fn build_sample(
         bounds: read_bounds(hwnd),
         idle_seconds,
         permissions,
+        shell_surface,
     }
 }
 
@@ -288,4 +288,25 @@ fn read_wide_string(read: impl FnOnce(&mut [u16]) -> i32) -> String {
     let mut buffer = vec![0u16; 512];
     let length = read(&mut buffer).max(0) as usize;
     String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_apps_dir_is_a_real_folder_holding_shell_programs() {
+        let dir = system_apps_dir().expect("Windows folder");
+        let has_program = std::fs::read_dir(dir)
+            .expect("read SystemApps")
+            .filter_map(Result::ok)
+            .filter_map(|package| std::fs::read_dir(package.path()).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|file| {
+                let path = file.path().to_string_lossy().into_owned();
+                path.to_ascii_lowercase().ends_with(".exe") && is_inside_dir(&path, dir)
+            });
+        assert!(has_program, "no programs found under {dir}");
+    }
 }

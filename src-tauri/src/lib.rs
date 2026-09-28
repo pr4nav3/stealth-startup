@@ -670,7 +670,6 @@ fn supervisor_identity() -> SupervisorIdentity {
         process_path: std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        app_name: "Supervisor".to_string(),
     }
 }
 

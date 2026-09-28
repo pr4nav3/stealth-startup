@@ -420,6 +420,7 @@ mod tests {
             permissions: CapturePermissions {
                 screen_recording: PermissionState::Granted,
             },
+            shell_surface: false,
         }
     }
 

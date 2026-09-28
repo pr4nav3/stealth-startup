@@ -1,4 +1,4 @@
-use crate::activity::{should_treat_as_neutral, ActivitySample};
+use crate::activity::ActivitySample;
 use crate::focus::{
     starter_rules, AppRule, FocusConfig, FocusEngine, FocusSnapshot, FocusState,
     RuleClassification, RuleTarget,
@@ -137,17 +137,11 @@ impl SessionManager {
 pub struct SupervisorIdentity {
     pub process_id: u64,
     pub process_path: String,
-    pub app_name: String,
 }
 
 impl SupervisorIdentity {
     pub fn matches(&self, sample: &ActivitySample) -> bool {
-        // ponytail: Supervisor window detection is a V1 process/app-name heuristic; upgrade with
-        // explicit Tauri window handles if platform metadata proves ambiguous.
-        sample.process_id == self.process_id
-            || paths_match(&sample.process_path, &self.process_path)
-            || sample.app_name.eq_ignore_ascii_case(&self.app_name)
-            || sample.app_name.eq_ignore_ascii_case("Supervisor")
+        sample.process_id == self.process_id || paths_match(&sample.process_path, &self.process_path)
     }
 }
 
@@ -469,7 +463,7 @@ impl Session {
         }
 
         // Alt-Tab, Start, Search, taskbar, and desktop stand in for the window the user came from.
-        let sample = if should_treat_as_neutral(&sample) {
+        let sample = if sample.shell_surface {
             let Some(previous) = self.last_window_sample.clone() else {
                 return;
             };
@@ -1652,8 +1646,20 @@ mod tests {
         SupervisorIdentity {
             process_id: 7,
             process_path: "/Applications/Supervisor.app".to_string(),
-            app_name: "Supervisor".to_string(),
         }
+    }
+
+    #[test]
+    fn another_app_named_supervisor_is_tracked() {
+        let mut manager = test_manager();
+        manager.start(input("Focus", Strictness::Strict), seconds(0));
+        let other = ActivitySample {
+            process_path: "/Applications/Other/Supervisor.app".to_string(),
+            ..sample("Supervisor", "Someone else's app", 0.0)
+        };
+        let snapshot = record(&mut manager, other, seconds(5));
+
+        assert!(snapshot.current.unwrap().focus.is_some());
     }
 
     fn sample(app_name: &str, title: &str, idle_seconds: f64) -> ActivitySample {
@@ -1684,17 +1690,19 @@ mod tests {
             permissions: CapturePermissions {
                 screen_recording: PermissionState::Granted,
             },
+            shell_surface: false,
         }
     }
 
     fn shell_sample() -> ActivitySample {
         ActivitySample {
             platform: "windows",
-            app_name: "MultitaskingViewFrame".to_string(),
+            app_name: "explorer".to_string(),
             process_path: "C:\\Windows\\explorer.exe".to_string(),
             process_id: 99,
             window_title: None,
             window_id: "shell".to_string(),
+            shell_surface: true,
             ..sample("unused", "unused", 0.0)
         }
     }
