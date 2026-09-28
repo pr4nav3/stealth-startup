@@ -3,7 +3,8 @@
 Living log of what is done and what is left. Update this file when a item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-09-22 (session storage design settled; extension popup dropped)
+Last updated: 2026-09-27 (SQLite backend and Win32 capture hardening merged
+into `test-features`; webcam scope cut to phone + presence)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
 ship target. There is no Mac on hand anymore, so Windows is the development and
@@ -18,7 +19,8 @@ same Chatterbox-Nano worker users already use.
 These are in the repo and were verified on the last Mac, except where noted.
 
 - [x] Local-first Tauri 2 shell (vanilla TypeScript UI, no React)
-- [x] Activity capture for macOS and Windows (`active-win-pos-rs`)
+- [x] Activity capture for macOS (`active-win-pos-rs`) and Windows (direct
+      Win32 in `activity_win32.rs`)
 - [x] Focus engine with cooldowns, idle skip, no instant nudge on app switch
 - [x] Session start / pause / snooze / stop / mark relevant / mark distracting
 - [x] Session, Settings, History screens plus compact overlay and tray
@@ -29,8 +31,9 @@ These are in the repo and were verified on the last Mac, except where noted.
       `supervisor-voice-runtime-macos-arm64.zip` (not in Git)
 
 Not done even if the UI implies it: starter voices have no real audio.
-Rules, settings, history, and selected voice are in-memory only. Voice
-reference files and generated clips already live under app data.
+Sessions, rules, settings, and selected voice persist in local SQLite
+(`sessions.db` under app data). Voice reference files and generated clips
+already live under app data.
 
 ## Open
 
@@ -42,8 +45,11 @@ Status: **in progress** · owner machine: Windows
 
 - [x] Run the app on Windows: session, overlay pin/unpin, snooze, first-click
       (Chrome extension deferred; native window titles are enough for V1)
-- [ ] Prove Win32 capture edge cases (empty titles, UWP host, idle, protected
-      processes, fullscreen / UAC)
+- [x] Win32 capture edge cases: direct Win32 capture, UWP host resolution,
+      protected-process fallback, cloaked/minimized skip, browser title
+      suffix stripping, shell surfaces (Start, Search, Alt-Tab, taskbar,
+      desktop) neutral without resetting drift, idle tick wraparound.
+      Unit-tested; UAC, lock screen, and cloaked windows not live-probed yet
 - [x] Build `supervisor-voice-runtime-windows-x64.zip` on Windows with
       `scripts/build_voice_runtime.py --target windows-x64`
       (local zip: `dist/supervisor-voice-runtime-windows-x64.zip`,
@@ -83,30 +89,36 @@ should not hide a broken runtime.
 
 ### 4. Local SQLite persistence, session reports, trends
 
-Status: **not started** (nothing in the repo yet; voice files already persist
-on disk) · design: `plans/session-storage.md`
+Status: **backend done, UI not started** · design: `plans/session-storage.md`
 
 Keep it local. No cloud. Session-only tracking; no always-on mode.
 
-- [ ] `rusqlite` bundled, migrations, `setting` + `rule` persistence
-- [ ] Span writer (merge on change, flush on close) + `session` / `span` /
+- [x] `rusqlite` bundled, migrations, `setting` + `rule` persistence
+- [x] Span writer (merge on change, flush on close) + `session` / `span` /
       `event` tables
-- [ ] Orphan recovery on launch: `ended_at IS NULL` closes as `abandoned`
-- [ ] Rollups + `recompute_session_metrics`, history and report commands
+- [x] Orphan recovery on launch: `ended_at IS NULL` closes as `abandoned`
+- [x] Rollups + `recompute_session_metrics`, history and report commands
+      (`get_history` unchanged shape; new `get_session_report(id)`,
+      `get_trends()`)
 - [ ] Session report screen: headline, timeline bar, category bars, top drifts
 - [ ] Trends above History: attention-span sparkline, focus % per day
-- [ ] Deletion paths: delete a voice, delete clips, delete one session, delete
-      all history, scrub window titles
-- [ ] One runnable check around rollup + reload + orphan recovery
+- [ ] Deletion paths: backend commands done for one session
+      (`delete_session`), all history (`delete_all_history`), and window
+      titles (`scrub_span_context`); no UI yet. Voice / clip deletion not
+      done
+- [x] One runnable check around rollup + reload + orphan recovery
+- [ ] `phone` / `away` / `back` events and `away_seconds` / `phone_seconds`:
+      schema ready, not emitted until webcam wiring
 
 ### 5. UI overhaul
 
-Status: **later, not started** · direction still to be confirmed
+Status: **next** · owner has a specific design in mind for the session
+screen and preflight
 
-Reference vibe: BrainDock-ish, simpler, less clutter, more intuitive. Style
-notes already live in `plans/supervisor-style-guide-braindock-ish.md` and
-`plans/supervisor-style-guide-mashup.md`. Do not start this until the Windows
-loop in item 1 is usable.
+Style notes live in `plans/supervisor-style-guide-braindock-ish.md` and
+`plans/supervisor-style-guide-mashup.md`. Do not rewrite the voice phrase
+lines; the owner is rewriting them. Leave the Settings webcam preview section
+of `src/main.ts` alone while `feat/webcam-models` is open.
 
 The report and trend screens in item 4 are the overhaul for the History tab
 and the post-session view. Settle the styling before building them so they are
@@ -123,8 +135,12 @@ Status: **not started**
 
 Status: **in progress** · Settings live preview wired on Windows
 
-Signals and toggles: `plans/webcam-tracking.md`. `at phone` only if a phone
-is in frame; otherwise looking down is `away from PC`.
+Scope is now two signals only: **phone in frame** (the app will nudge
+immediately) and **present / away** (away is logged once absent long enough).
+Gaze and head pose are paused. Model work lives on `feat/webcam-models`
+(not merged): YuNet + YOLO11n, presence = face OR person, hysteresis. Phone
+recall is still weak (~0.63); next step is trying YOLO26 before any
+fine-tuning. Signals and toggles: `plans/webcam-tracking.md`.
 
 - [x] Offline bakeoff: YuNet + YOLOX-s, 4 fps, JSON labels
 - [x] Prove: face in/out; when in frame, at PC / away from PC / at phone;

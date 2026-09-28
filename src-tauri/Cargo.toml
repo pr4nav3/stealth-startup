@@ -17,9 +17,24 @@ active-win-pos-rs = "0.11"
 cpal = "0.15"
 hound = "3.5"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
+tauri-plugin-single-instance = "~2.4"
 time = { version = "0.3", features = ["formatting"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Keep in step with the version Tauri uses, so the crate is compiled once, not twice.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Storage_FileSystem",
+  "Win32_System_ProcessStatus",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }

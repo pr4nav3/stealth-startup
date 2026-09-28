@@ -3,26 +3,133 @@ use crate::focus::{
     starter_rules, AppRule, FocusConfig, FocusEngine, FocusSnapshot, FocusState,
     RuleClassification, RuleTarget,
 };
+use crate::storage::{
+    focus_state_key, open_or_reset, span_category, SessionReport, SessionStorage, StorageNotice,
+    TrendsData,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug)]
+pub const HISTORY_CACHE_LIMIT: usize = 20;
+
 pub struct SessionManager {
     settings: SessionSettings,
+    persisted_rules: Vec<AppRule>,
     current: Option<Session>,
     history: Vec<SessionSummary>,
-    next_id: u64,
+    /// `None` means history is off for this run; `startup_notice` says why.
+    storage: Option<SessionStorage>,
+    startup_notice: Option<StorageNotice>,
 }
 
-impl Default for SessionManager {
-    fn default() -> Self {
+impl SessionManager {
+    pub fn open(database_path: Result<PathBuf, String>) -> Self {
+        let (opened, startup_notice) = open_or_reset(database_path);
+        match opened {
+            Some((storage, state)) => Self {
+                settings: state.settings,
+                persisted_rules: state.rules,
+                current: None,
+                history: state.history,
+                storage: Some(storage),
+                startup_notice,
+            },
+            None => Self::without_storage(startup_notice),
+        }
+    }
+
+    fn without_storage(startup_notice: Option<StorageNotice>) -> Self {
         Self {
             settings: SessionSettings::default(),
+            persisted_rules: starter_rules(),
             current: None,
             history: Vec::new(),
-            next_id: 1,
+            storage: None,
+            startup_notice,
         }
+    }
+
+    #[cfg(test)]
+    fn with_storage(storage: SessionStorage) -> Self {
+        Self {
+            storage: Some(storage),
+            ..Self::without_storage(None)
+        }
+    }
+
+    pub fn history(&self) -> Vec<SessionSummary> {
+        self.history.clone()
+    }
+
+    pub fn session_report(&self, id: u64) -> Result<SessionReport, String> {
+        self.storage()?.get_session_report(id)
+    }
+
+    pub fn trends(&self) -> Result<TrendsData, String> {
+        self.storage()?.get_trends()
+    }
+
+    pub fn delete_session(&mut self, id: u64) -> Result<(), String> {
+        self.storage()?.delete_session(id)?;
+        self.refresh_history();
+        Ok(())
+    }
+
+    pub fn delete_all_history(&mut self) -> Result<(), String> {
+        self.storage()?.delete_all_history()?;
+        self.refresh_history();
+        Ok(())
+    }
+
+    pub fn scrub_span_context(&mut self) -> Result<(), String> {
+        self.storage()?.scrub_span_context()?;
+        self.refresh_history();
+        Ok(())
+    }
+
+    /// Clears the one-time "started a fresh database" card. Other notices stay until fixed.
+    pub fn dismiss_storage_notice(&mut self, now: Duration) -> SessionSnapshot {
+        if matches!(self.startup_notice, Some(StorageNotice::Reset { .. })) {
+            self.startup_notice = None;
+        }
+        self.snapshot(now)
+    }
+
+    fn storage(&self) -> Result<&SessionStorage, String> {
+        self.storage
+            .as_ref()
+            .ok_or_else(|| "History is off: Supervisor could not open its storage.".to_string())
+    }
+
+    fn storage_notice(&self) -> Option<StorageNotice> {
+        match self.storage.as_ref().and_then(SessionStorage::failure) {
+            Some(reason) => Some(StorageNotice::Failed { reason }),
+            None => self.startup_notice.clone(),
+        }
+    }
+
+    fn refresh_history(&mut self) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        match storage.list_history(HISTORY_CACHE_LIMIT) {
+            Ok(history) => self.history = history,
+            Err(error) => storage.record_failure("read history", error),
+        }
+    }
+
+    fn save_settings(&self) {
+        save(self.storage.as_ref(), "save settings", |storage| {
+            storage.save_settings(&self.settings)
+        });
+    }
+
+    fn save_rules(&mut self, rules: Vec<AppRule>) {
+        save(self.storage.as_ref(), "save rules", |storage| {
+            storage.replace_rules(&rules)
+        });
+        self.persisted_rules = rules;
     }
 }
 
@@ -30,39 +137,46 @@ impl Default for SessionManager {
 pub struct SupervisorIdentity {
     pub process_id: u64,
     pub process_path: String,
-    pub app_name: String,
 }
 
 impl SupervisorIdentity {
     pub fn matches(&self, sample: &ActivitySample) -> bool {
-        // ponytail: Supervisor window detection is a V1 process/app-name heuristic; upgrade with
-        // explicit Tauri window handles if platform metadata proves ambiguous.
-        sample.process_id == self.process_id
-            || paths_match(&sample.process_path, &self.process_path)
-            || sample.app_name.eq_ignore_ascii_case(&self.app_name)
-            || sample.app_name.eq_ignore_ascii_case("Supervisor")
+        sample.process_id == self.process_id || paths_match(&sample.process_path, &self.process_path)
     }
 }
 
 impl SessionManager {
-    pub fn start(&mut self, input: StartSessionInput, now: Duration, started_at: String) {
+    pub fn start(&mut self, input: StartSessionInput, now: Duration) {
         let strictness = input.strictness.unwrap_or(self.settings.default_strictness);
         let duration_seconds = input.duration_minutes.clamp(5, 180) * 60;
         let goal = clean_goal(input.goal);
-        let rules = clean_rules(input.rules.unwrap_or_else(starter_rules));
-        let session = Session::new(
-            self.next_id,
+        let rules = clean_rules(
+            input
+                .rules
+                .unwrap_or_else(|| self.persisted_rules.clone()),
+        );
+        let started_at = utc_now();
+        // Id 0 marks a session that is not in the database (history off or the insert failed).
+        let session_id = match self.storage.as_ref() {
+            Some(storage) => storage
+                .insert_session(&goal, strictness, &started_at, duration_seconds)
+                .unwrap_or_else(|error| {
+                    storage.record_failure("start session", error);
+                    0
+                }),
+            None => 0,
+        };
+        self.current = Some(Session::new(
+            session_id,
             goal,
             duration_seconds,
             strictness,
-            rules,
+            rules.clone(),
             now,
-            started_at,
-        );
-
-        self.next_id += 1;
+        ));
+        self.save_rules(rules);
         self.settings.status_window_on_top = true;
-        self.current = Some(session);
+        self.save_settings();
     }
 
     pub fn record_sample(
@@ -73,11 +187,9 @@ impl SessionManager {
     ) -> SessionSnapshot {
         self.tick_current(now);
         self.finish_expired(now);
-
         if let Some(session) = self.current.as_mut() {
-            session.record_sample(sample, now, supervisor);
+            session.record_sample(sample, now, supervisor, self.storage.as_ref());
         }
-
         self.tick_current(now);
         self.finish_expired(now);
         self.snapshot(now)
@@ -112,54 +224,49 @@ impl SessionManager {
 
     pub fn pause(&mut self, now: Duration) -> SessionSnapshot {
         if let Some(session) = self.current.as_mut() {
-            session.pause(now);
+            session.pause(now, self.storage.as_ref());
         }
         self.snapshot(now)
     }
 
     pub fn resume(&mut self, now: Duration) -> SessionSnapshot {
         if let Some(session) = self.current.as_mut() {
-            session.resume(now);
+            session.resume(now, self.storage.as_ref());
         }
         self.snapshot(now)
     }
 
     pub fn toggle_pause(&mut self, now: Duration) {
-        match self.current.as_ref().map(|session| session.status) {
-            Some(SessionStatus::Paused) => {
-                if let Some(session) = self.current.as_mut() {
-                    session.resume(now);
-                }
-            }
-            Some(SessionStatus::Active | SessionStatus::Snoozed) => {
-                if let Some(session) = self.current.as_mut() {
-                    session.pause(now);
-                }
-            }
+        let storage = self.storage.as_ref();
+        let Some(session) = self.current.as_mut() else {
+            return;
+        };
+        match session.status {
+            SessionStatus::Paused => session.resume(now, storage),
+            SessionStatus::Active | SessionStatus::Snoozed => session.pause(now, storage),
             _ => {}
         }
     }
 
     pub fn snooze(&mut self, now: Duration, seconds: u64) -> SessionSnapshot {
         if let Some(session) = self.current.as_mut() {
-            session.snooze(now, seconds);
+            session.snooze(now, seconds, self.storage.as_ref());
         }
         self.snapshot(now)
     }
 
     pub fn stop(&mut self, now: Duration) -> SessionSnapshot {
-        self.finish_current(now);
+        self.finish_current(now, "stopped");
         self.snapshot(now)
     }
 
-    pub fn mark_current(
-        &mut self,
-        classification: RuleClassification,
-        now: Duration,
-    ) -> SessionSnapshot {
-        if let Some(session) = self.current.as_mut() {
-            session.mark_current(classification, now);
-        }
+    pub fn mark_current(&mut self, classification: RuleClassification, now: Duration) -> SessionSnapshot {
+        let Some(session) = self.current.as_mut() else {
+            return self.snapshot(now);
+        };
+        session.mark_current(classification, now, self.storage.as_ref());
+        let rules = session.rules.clone();
+        self.save_rules(rules);
         self.snapshot(now)
     }
 
@@ -180,21 +287,20 @@ impl SessionManager {
                 self.settings.voice_profile = voice_profile.chars().take(120).collect();
             }
         }
+        self.save_settings();
         self.settings.clone()
     }
 
     pub fn set_status_window_on_top(&mut self, enabled: bool, now: Duration) -> SessionSnapshot {
         self.settings.status_window_on_top = enabled;
+        self.save_settings();
         self.snapshot(now)
     }
 
     pub fn set_status_window_enabled(&mut self, enabled: bool, now: Duration) -> SessionSnapshot {
         self.settings.status_window_enabled = enabled;
+        self.save_settings();
         self.snapshot(now)
-    }
-
-    pub fn history(&self) -> Vec<SessionSummary> {
-        self.history.clone()
     }
 
     pub fn snapshot(&self, now: Duration) -> SessionSnapshot {
@@ -207,15 +313,23 @@ impl SessionManager {
             settings: self.settings.clone(),
             current: self.current.as_ref().map(|session| session.snapshot(now)),
             history: self.history.clone(),
+            storage_notice: self.storage_notice(),
         }
     }
 
-    fn finish_current(&mut self, now: Duration) {
-        if let Some(mut session) = self.current.take() {
-            session.finish(now);
-            self.history.insert(0, session.summary(now));
-            self.history.truncate(20);
+    fn finish_current(&mut self, now: Duration, reason: &str) {
+        let Some(mut session) = self.current.take() else {
+            return;
+        };
+        session.finish(now, self.storage.as_ref());
+        if session.id != 0 {
+            let ended_at = utc_now();
+            let elapsed_seconds = session.timer_elapsed_seconds(now);
+            save(self.storage.as_ref(), "close session", |storage| {
+                storage.close_session(session.id, &ended_at, reason, elapsed_seconds)
+            });
         }
+        self.refresh_history();
     }
 
     fn tick_current(&mut self, now: Duration) {
@@ -230,7 +344,21 @@ impl SessionManager {
             .as_ref()
             .is_some_and(|session| session.is_expired(now))
         {
-            self.finish_current(now);
+            self.finish_current(now, "completed");
+        }
+    }
+}
+
+/// Runs a write against storage when history is on; a failure is recorded for the UI, never
+/// allowed to stop the session.
+fn save(
+    storage: Option<&SessionStorage>,
+    what: &str,
+    write: impl FnOnce(&SessionStorage) -> Result<(), String>,
+) {
+    if let Some(storage) = storage {
+        if let Err(error) = write(storage) {
+            storage.record_failure(what, error);
         }
     }
 }
@@ -243,11 +371,9 @@ struct Session {
     strictness: Strictness,
     status: SessionStatus,
     started_at_seconds: u64,
-    started_at: String,
     snoozed_until_seconds: Option<u64>,
     metrics: SessionMetrics,
     evidence: Vec<EvidenceEvent>,
-    app_seconds: HashMap<String, u64>,
     latest_focus: Option<FocusSnapshot>,
     rules: Vec<AppRule>,
     engine: FocusEngine,
@@ -255,6 +381,20 @@ struct Session {
     observing_supervisor: bool,
     timer_held_seconds: u64,
     timer_hold_started_at_seconds: Option<u64>,
+    open_span: Option<OpenSpan>,
+    last_span_sample: Option<ActivitySample>,
+    last_span_state: Option<FocusState>,
+    last_span_classification: Option<RuleClassification>,
+    last_window_sample: Option<ActivitySample>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenSpan {
+    app: String,
+    context: Option<String>,
+    category: String,
+    state: String,
+    started_offset_seconds: u64,
 }
 
 impl Session {
@@ -265,7 +405,6 @@ impl Session {
         strictness: Strictness,
         rules: Vec<AppRule>,
         now: Duration,
-        started_at: String,
     ) -> Self {
         Self {
             id,
@@ -274,11 +413,9 @@ impl Session {
             strictness,
             status: SessionStatus::Active,
             started_at_seconds: now.as_secs(),
-            started_at,
             snoozed_until_seconds: None,
             metrics: SessionMetrics::default(),
             evidence: Vec::new(),
-            app_seconds: HashMap::new(),
             latest_focus: None,
             rules: rules.clone(),
             engine: FocusEngine::new(strictness.focus_config(), rules),
@@ -286,6 +423,11 @@ impl Session {
             observing_supervisor: false,
             timer_held_seconds: 0,
             timer_hold_started_at_seconds: None,
+            open_span: None,
+            last_span_sample: None,
+            last_span_state: None,
+            last_span_classification: None,
+            last_window_sample: None,
         }
     }
 
@@ -309,6 +451,7 @@ impl Session {
         sample: ActivitySample,
         now: Duration,
         supervisor: &SupervisorIdentity,
+        storage: Option<&SessionStorage>,
     ) {
         self.tick(now);
         if self.status == SessionStatus::Snoozed {
@@ -319,9 +462,25 @@ impl Session {
             return;
         }
 
+        // Alt-Tab, Start, Search, taskbar, and desktop stand in for the window the user came from.
+        let sample = if sample.shell_surface {
+            let Some(previous) = self.last_window_sample.clone() else {
+                return;
+            };
+            ActivitySample {
+                captured_at: sample.captured_at,
+                idle_seconds: sample.idle_seconds,
+                ..previous
+            }
+        } else {
+            self.last_window_sample = Some(sample.clone());
+            sample
+        };
+
         if supervisor.matches(&sample) {
             if !self.observing_supervisor {
                 self.account_latest(now);
+                self.close_open_span(now, storage);
                 self.observing_supervisor = true;
             }
             self.last_accounted_at = now;
@@ -335,18 +494,26 @@ impl Session {
         }
 
         let focus = self.engine.record_sample(&sample, now);
-        self.account(now, focus.state, &sample);
+        self.account(now, focus.state);
+        self.sync_span(
+            now,
+            &sample,
+            focus.state,
+            focus.classification,
+            storage,
+        );
 
         if focus.should_nudge {
             self.metrics.nudges += 1;
             self.push_event(now, "Voice nudge queued", "VOICE 01");
+            self.persist_event(now, "nudge", Some("voice"), storage);
         }
 
         self.push_focus_event(now, &focus);
         self.latest_focus = Some(focus);
     }
 
-    fn pause(&mut self, now: Duration) {
+    fn pause(&mut self, now: Duration, storage: Option<&SessionStorage>) {
         if self.status == SessionStatus::Active {
             if self.observing_supervisor {
                 self.last_accounted_at = now;
@@ -354,18 +521,22 @@ impl Session {
                 self.account_latest(now);
             }
             self.start_timer_hold(now);
+            self.close_open_span(now, storage);
             self.status = SessionStatus::Paused;
             self.push_event(now, "Session paused", "HOLD");
+            self.persist_event(now, "pause", None, storage);
         } else if self.status == SessionStatus::Snoozed {
+            self.close_open_span(now, storage);
             self.status = SessionStatus::Paused;
             self.snoozed_until_seconds = None;
             self.last_accounted_at = now;
             self.observing_supervisor = false;
             self.push_event(now, "Session paused", "HOLD");
+            self.persist_event(now, "pause", None, storage);
         }
     }
 
-    fn resume(&mut self, now: Duration) {
+    fn resume(&mut self, now: Duration, storage: Option<&SessionStorage>) {
         if self.status == SessionStatus::Paused {
             self.finish_timer_hold(now);
             self.status = SessionStatus::Active;
@@ -373,6 +544,7 @@ impl Session {
             self.engine = FocusEngine::new(self.strictness.focus_config(), self.rules.clone());
             self.observing_supervisor = false;
             self.push_event(now, "Session resumed", "LIVE");
+            self.persist_event(now, "resume", None, storage);
         } else if self.status == SessionStatus::Snoozed {
             self.status = SessionStatus::Active;
             self.snoozed_until_seconds = None;
@@ -380,10 +552,11 @@ impl Session {
             self.engine = FocusEngine::new(self.strictness.focus_config(), self.rules.clone());
             self.observing_supervisor = false;
             self.push_event(now, "Snooze cleared", "LIVE");
+            self.persist_event(now, "resume", None, storage);
         }
     }
 
-    fn snooze(&mut self, now: Duration, seconds: u64) {
+    fn snooze(&mut self, now: Duration, seconds: u64, storage: Option<&SessionStorage>) {
         if matches!(self.status, SessionStatus::Active | SessionStatus::Paused) {
             if self.status == SessionStatus::Paused {
                 self.finish_timer_hold(now);
@@ -395,12 +568,19 @@ impl Session {
             self.status = SessionStatus::Snoozed;
             self.snoozed_until_seconds = Some(now.as_secs() + seconds);
             self.last_accounted_at = now;
+            self.close_open_span(now, storage);
             self.observing_supervisor = false;
             self.push_event(now, "Snoozed nudges", &format!("{} MIN", seconds / 60));
+            self.persist_event(now, "snooze", Some(&seconds.to_string()), storage);
         }
     }
 
-    fn mark_current(&mut self, classification: RuleClassification, now: Duration) {
+    fn mark_current(
+        &mut self,
+        classification: RuleClassification,
+        now: Duration,
+        storage: Option<&SessionStorage>,
+    ) {
         let Some(focus) = self.latest_focus.clone() else {
             return;
         };
@@ -436,17 +616,114 @@ impl Session {
             },
             "RULE SAVED",
         );
+        match classification {
+            RuleClassification::Focused => {
+                self.persist_event(now, "marked_relevant", None, storage);
+            }
+            RuleClassification::Distracting => {
+                self.persist_event(now, "marked_distracting", None, storage);
+            }
+            RuleClassification::Neutral => {}
+        }
     }
 
-    fn finish(&mut self, now: Duration) {
+    fn finish(&mut self, now: Duration, storage: Option<&SessionStorage>) {
         if self.status == SessionStatus::Active && !self.observing_supervisor {
             self.account_latest(now);
         } else {
             self.last_accounted_at = now;
         }
+        self.close_open_span(now, storage);
         self.finish_timer_hold(now);
         self.status = SessionStatus::Complete;
         self.push_event(now, "Session saved", "LOCAL");
+    }
+
+    fn session_offset_seconds(&self, now: Duration) -> u64 {
+        now.as_secs().saturating_sub(self.started_at_seconds)
+    }
+
+    fn sync_span(
+        &mut self,
+        now: Duration,
+        sample: &ActivitySample,
+        state: FocusState,
+        classification: RuleClassification,
+        storage: Option<&SessionStorage>,
+    ) {
+        let state_key = focus_state_key(state);
+        let category = span_category(
+            &sample.app_name,
+            sample.window_title.as_deref(),
+            state_key,
+            classification,
+        );
+        let context = sample
+            .window_title
+            .as_ref()
+            .filter(|title| !title.trim().is_empty())
+            .cloned();
+        let same = self.open_span.as_ref().is_some_and(|open| {
+            open.app == sample.app_name
+                && open.context == context
+                && open.state == state_key
+                && open.category == category
+        });
+        if same {
+            self.last_span_sample = Some(sample.clone());
+            self.last_span_state = Some(state);
+            self.last_span_classification = Some(classification);
+            return;
+        }
+        self.close_open_span(now, storage);
+        let offset = self.session_offset_seconds(now);
+        self.open_span = Some(OpenSpan {
+            app: sample.app_name.clone(),
+            context,
+            category: category.to_string(),
+            state: state_key.to_string(),
+            started_offset_seconds: offset,
+        });
+        self.last_span_sample = Some(sample.clone());
+        self.last_span_state = Some(state);
+        self.last_span_classification = Some(classification);
+    }
+
+    fn close_open_span(&mut self, now: Duration, storage: Option<&SessionStorage>) {
+        let Some(open) = self.open_span.take() else {
+            return;
+        };
+        if self.id == 0 {
+            return;
+        }
+        let end_offset = self.session_offset_seconds(now);
+        let seconds = end_offset.saturating_sub(open.started_offset_seconds);
+        save(storage, "save span", |storage| {
+            storage.insert_span(
+                self.id,
+                &open.app,
+                open.context.as_deref(),
+                &open.category,
+                &open.state,
+                open.started_offset_seconds,
+                seconds,
+            )
+        });
+    }
+
+    fn persist_event(
+        &self,
+        now: Duration,
+        kind: &str,
+        detail: Option<&str>,
+        storage: Option<&SessionStorage>,
+    ) {
+        if self.id == 0 {
+            return;
+        }
+        save(storage, "save event", |storage| {
+            storage.insert_event(self.id, self.session_offset_seconds(now), kind, detail)
+        });
     }
 
     fn snapshot(&self, now: Duration) -> CurrentSession {
@@ -467,33 +744,19 @@ impl Session {
         }
     }
 
-    fn summary(&self, now: Duration) -> SessionSummary {
-        SessionSummary {
-            id: self.id,
-            goal: self.goal.clone(),
-            started_at: self.started_at.clone(),
-            duration_seconds: self.timer_elapsed_seconds(now),
-            focus_seconds: self.metrics.focused_seconds + self.metrics.neutral_seconds,
-            distracted_seconds: self.metrics.distracted_seconds,
-            idle_seconds: self.metrics.idle_seconds,
-            nudges: self.metrics.nudges,
-            top_hints: top_hints(&self.app_seconds),
-        }
-    }
-
     fn is_expired(&self, now: Duration) -> bool {
         self.raw_timer_elapsed_seconds(now) >= self.duration_seconds
     }
 
     fn account_latest(&mut self, now: Duration) {
         if let Some(focus) = self.latest_focus.clone() {
-            self.account(now, focus.state, &focus.sample);
+            self.account(now, focus.state);
         } else {
             self.last_accounted_at = now;
         }
     }
 
-    fn account(&mut self, now: Duration, state: FocusState, sample: &ActivitySample) {
+    fn account(&mut self, now: Duration, state: FocusState) {
         let delta = now.saturating_sub(self.last_accounted_at).as_secs();
         if delta == 0 {
             return;
@@ -506,8 +769,6 @@ impl Session {
             FocusState::Distracted => self.metrics.distracted_seconds += delta,
             FocusState::Idle => self.metrics.idle_seconds += delta,
         }
-
-        *self.app_seconds.entry(sample_hint(sample)).or_insert(0) += delta;
         self.last_accounted_at = now;
     }
 
@@ -645,6 +906,7 @@ pub struct SessionSnapshot {
     pub settings: SessionSettings,
     pub current: Option<CurrentSession>,
     pub history: Vec<SessionSummary>,
+    pub storage_notice: Option<StorageNotice>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -717,15 +979,6 @@ fn clean_rules(rules: Vec<AppRule>) -> Vec<AppRule> {
         .collect()
 }
 
-fn sample_hint(sample: &ActivitySample) -> String {
-    sample
-        .window_title
-        .as_ref()
-        .filter(|title| !title.trim().is_empty())
-        .cloned()
-        .unwrap_or_else(|| sample.app_name.clone())
-}
-
 fn focus_event_label(focus: &FocusSnapshot) -> String {
     let app = focus.sample.app_name.trim();
     let title = focus
@@ -785,18 +1038,14 @@ fn nudge_hint(focus: &FocusSnapshot) -> &'static str {
     }
 }
 
-fn top_hints(app_seconds: &HashMap<String, u64>) -> Vec<String> {
-    let mut pairs: Vec<_> = app_seconds.iter().collect();
-    pairs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-    pairs
-        .into_iter()
-        .take(3)
-        .map(|(hint, _)| hint.clone())
-        .collect()
-}
-
 fn paths_match(left: &str, right: &str) -> bool {
     !left.trim().is_empty() && left.eq_ignore_ascii_case(right)
+}
+
+pub fn utc_now() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("RFC 3339 formatting only fails for years outside 0000-9999")
 }
 
 fn marked_focus(
@@ -843,14 +1092,18 @@ mod tests {
     use super::*;
     use crate::activity::{Bounds, CapturePermissions, PermissionState};
 
+    fn test_manager() -> SessionManager {
+        SessionManager::with_storage(SessionStorage::open_in_memory().expect("open db"))
+    }
+
     #[test]
     fn start_pause_resume_stop_creates_history() {
-        let mut manager = SessionManager::default();
-        manager.start(
-            input("Write tests", Strictness::Normal),
-            seconds(0),
-            "start".to_string(),
-        );
+        let mut manager = test_manager();
+        manager
+            .start(
+                input("Write tests", Strictness::Normal),
+                seconds(0),
+            );
         record(&mut manager, sample("Code", "Supervisor", 0.0), seconds(1));
         manager.pause(seconds(11));
         manager.resume(seconds(20));
@@ -865,27 +1118,30 @@ mod tests {
 
     #[test]
     fn starting_session_pins_status_window_again() {
-        let mut manager = SessionManager::default();
-        manager.set_status_window_on_top(false, seconds(0));
-        manager.start(
-            input("Write tests", Strictness::Normal),
-            seconds(1),
-            "start".to_string(),
-        );
+        let mut manager = test_manager();
+        manager
+            .set_status_window_on_top(false, seconds(0));
+        manager
+            .start(
+                input("Write tests", Strictness::Normal),
+                seconds(1),
+            );
 
         assert!(manager.snapshot(seconds(1)).settings.status_window_on_top);
     }
 
     #[test]
     fn side_window_enabled_setting_is_independent_from_pinning() {
-        let mut manager = SessionManager::default();
-        manager.set_status_window_enabled(false, seconds(0));
-        manager.set_status_window_on_top(false, seconds(0));
-        manager.start(
-            input("Write tests", Strictness::Normal),
-            seconds(1),
-            "start".to_string(),
-        );
+        let mut manager = test_manager();
+        manager
+            .set_status_window_enabled(false, seconds(0));
+        manager
+            .set_status_window_on_top(false, seconds(0));
+        manager
+            .start(
+                input("Write tests", Strictness::Normal),
+                seconds(1),
+            );
         let settings = manager.snapshot(seconds(1)).settings;
 
         assert!(!settings.status_window_enabled);
@@ -894,7 +1150,7 @@ mod tests {
 
     #[test]
     fn session_start_uses_provided_rules() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             StartSessionInput {
                 goal: "Read docs".to_string(),
@@ -906,7 +1162,6 @@ mod tests {
                 )]),
             },
             seconds(0),
-            "start".to_string(),
         );
 
         let snapshot = record(
@@ -922,11 +1177,10 @@ mod tests {
 
     #[test]
     fn snooze_prevents_nudges_until_expiry() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         manager.snooze(seconds(1), 300);
@@ -942,11 +1196,10 @@ mod tests {
 
     #[test]
     fn idle_does_not_accumulate_distracted_time() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         let snapshot = record(
@@ -962,11 +1215,10 @@ mod tests {
 
     #[test]
     fn supervisor_owned_samples_do_not_record_activity() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         let supervisor = identity();
         let snapshot = manager.record_sample(
@@ -984,11 +1236,10 @@ mod tests {
 
     #[test]
     fn supervisor_foreground_freezes_after_accounting_previous_window() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(10));
@@ -1009,11 +1260,10 @@ mod tests {
 
     #[test]
     fn timer_advances_while_supervisor_foreground_without_accounting_it() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(10));
@@ -1033,11 +1283,10 @@ mod tests {
 
     #[test]
     fn timer_holds_while_paused_but_not_snoozed() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         manager.pause(seconds(10));
@@ -1062,11 +1311,10 @@ mod tests {
 
     #[test]
     fn clock_expiry_finishes_session_even_on_supervisor_window() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input_minutes("Focus", Strictness::Strict, 5),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "Docs", 0.0), seconds(0));
         let supervisor = identity();
@@ -1085,11 +1333,10 @@ mod tests {
 
     #[test]
     fn paused_then_snoozed_time_is_not_accounted() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(6));
@@ -1103,11 +1350,10 @@ mod tests {
 
     #[test]
     fn app_switch_does_not_nudge_immediately_inside_session() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Normal),
             seconds(0),
-            "start".to_string(),
         );
         assert!(
             !manager
@@ -1139,12 +1385,67 @@ mod tests {
     }
 
     #[test]
+    fn shell_surfaces_keep_the_previous_window() {
+        let mut manager = test_manager();
+        manager
+            .start(input("Focus", Strictness::Normal), seconds(0));
+        let before = record(&mut manager, sample("Code", "main.rs", 0.0), seconds(1))
+            .current
+            .unwrap()
+            .focus
+            .unwrap();
+        let during = record(&mut manager, shell_sample(), seconds(5))
+            .current
+            .unwrap()
+            .focus
+            .unwrap();
+
+        assert_eq!(during.sample.app_name, "Code");
+        assert_eq!(during.sample.window_title.as_deref(), Some("main.rs"));
+        assert_eq!(during.state, before.state);
+        assert_eq!(during.classification, before.classification);
+    }
+
+    #[test]
+    fn alt_tab_does_not_delay_or_hide_a_nudge() {
+        let mut manager = test_manager();
+        manager
+            .start(input("Focus", Strictness::Normal), seconds(0));
+        record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
+        for at in [30, 40, 50] {
+            let focus = record(&mut manager, shell_sample(), seconds(at))
+                .current
+                .unwrap()
+                .focus
+                .unwrap();
+            assert_eq!(focus.sample.app_name, "Chrome");
+            assert_ne!(focus.state, FocusState::Neutral);
+        }
+        let nudge = record(&mut manager, shell_sample(), seconds(60))
+            .current
+            .unwrap()
+            .focus
+            .unwrap();
+
+        assert!(nudge.should_nudge);
+    }
+
+    #[test]
+    fn shell_surface_before_any_window_is_skipped() {
+        let mut manager = test_manager();
+        manager
+            .start(input("Focus", Strictness::Normal), seconds(0));
+        let snapshot = record(&mut manager, shell_sample(), seconds(1));
+
+        assert!(snapshot.current.unwrap().focus.is_none());
+    }
+
+    #[test]
     fn mark_current_relevant_wins_over_starter_rules() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(
             &mut manager,
@@ -1171,11 +1472,10 @@ mod tests {
 
     #[test]
     fn mark_current_distracting_refreshes_cached_focus_immediately() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Notes", "Plan", 0.0), seconds(0));
         record(&mut manager, sample("Notes", "Plan", 0.0), seconds(10));
@@ -1190,11 +1490,10 @@ mod tests {
 
     #[test]
     fn mark_current_uses_latest_external_window_after_supervisor_focus() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(
             &mut manager,
@@ -1222,11 +1521,10 @@ mod tests {
 
     #[test]
     fn snapshot_reads_do_not_advance_metrics() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(10));
@@ -1241,11 +1539,10 @@ mod tests {
 
     #[test]
     fn evidence_records_decision_metadata() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         let snapshot = record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(10));
@@ -1259,12 +1556,58 @@ mod tests {
     }
 
     #[test]
+    fn history_cache_refreshes_after_close_and_delete() {
+        let mut manager = test_manager();
+        manager.start(input("Cache test", Strictness::Normal), seconds(0));
+        record(&mut manager, sample("Code", "main.rs", 0.0), seconds(10));
+        manager.stop(seconds(11));
+
+        let history = manager.history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(manager.snapshot(seconds(11)).history.len(), 1);
+
+        manager.delete_session(history[0].id).expect("delete session");
+        assert!(manager.history().is_empty());
+        assert!(manager.snapshot(seconds(11)).history.is_empty());
+        assert_eq!(manager.snapshot(seconds(11)).storage_notice, None);
+    }
+
+    #[test]
+    fn history_off_still_runs_sessions() {
+        let notice = StorageNotice::Off { reason: "disk full".to_string() };
+        let mut manager = SessionManager::without_storage(Some(notice.clone()));
+        manager.start(input("Focus", Strictness::Normal), seconds(0));
+        record(&mut manager, sample("Code", "main.rs", 0.0), seconds(10));
+        assert!(manager.snapshot(seconds(10)).current.is_some());
+
+        let snapshot = manager.stop(seconds(11));
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        assert!(snapshot.history.is_empty());
+        assert_eq!(snapshot.storage_notice, Some(notice.clone()));
+        assert!(manager.trends().is_err());
+        assert_eq!(manager.dismiss_storage_notice(seconds(12)).storage_notice, Some(notice));
+    }
+
+    #[test]
+    fn reset_notice_is_dismissible() {
+        let notice = StorageNotice::Reset {
+            reason: "damaged".to_string(),
+            moved_to: "sessions.broken-1.db".to_string(),
+        };
+        let mut manager = SessionManager {
+            startup_notice: Some(notice),
+            ..test_manager()
+        };
+        assert!(manager.snapshot(seconds(0)).storage_notice.is_some());
+        assert_eq!(manager.dismiss_storage_notice(seconds(0)).storage_notice, None);
+    }
+
+    #[test]
     fn stop_summary_includes_top_hints_and_nudges() {
-        let mut manager = SessionManager::default();
+        let mut manager = test_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
-            "start".to_string(),
         );
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(0));
         record(&mut manager, sample("Chrome", "YouTube", 0.0), seconds(30));
@@ -1303,8 +1646,20 @@ mod tests {
         SupervisorIdentity {
             process_id: 7,
             process_path: "/Applications/Supervisor.app".to_string(),
-            app_name: "Supervisor".to_string(),
         }
+    }
+
+    #[test]
+    fn another_app_named_supervisor_is_tracked() {
+        let mut manager = test_manager();
+        manager.start(input("Focus", Strictness::Strict), seconds(0));
+        let other = ActivitySample {
+            process_path: "/Applications/Other/Supervisor.app".to_string(),
+            ..sample("Supervisor", "Someone else's app", 0.0)
+        };
+        let snapshot = record(&mut manager, other, seconds(5));
+
+        assert!(snapshot.current.unwrap().focus.is_some());
     }
 
     fn sample(app_name: &str, title: &str, idle_seconds: f64) -> ActivitySample {
@@ -1335,6 +1690,20 @@ mod tests {
             permissions: CapturePermissions {
                 screen_recording: PermissionState::Granted,
             },
+            shell_surface: false,
+        }
+    }
+
+    fn shell_sample() -> ActivitySample {
+        ActivitySample {
+            platform: "windows",
+            app_name: "explorer".to_string(),
+            process_path: "C:\\Windows\\explorer.exe".to_string(),
+            process_id: 99,
+            window_title: None,
+            window_id: "shell".to_string(),
+            shell_surface: true,
+            ..sample("unused", "unused", 0.0)
         }
     }
 

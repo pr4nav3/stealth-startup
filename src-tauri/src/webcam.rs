@@ -135,7 +135,7 @@ pub fn start_preview(app: AppHandle, state: &WebcamPreview) -> Result<(), String
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
     }
 
     let mut child = command

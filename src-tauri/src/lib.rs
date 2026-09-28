@@ -1,6 +1,7 @@
 mod activity;
 mod focus;
 mod session;
+mod storage;
 mod voice;
 mod voice_runtime;
 mod webcam;
@@ -11,6 +12,8 @@ use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
+use storage::{SessionReport, TrendsData};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
@@ -18,7 +21,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const OVERLAY_WINDOW_LABEL: &str = "overlay";
@@ -34,20 +36,6 @@ struct AppState {
     webcam: webcam::WebcamPreview,
     started_at: Instant,
     identity: SupervisorIdentity,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            focus_engine: Mutex::new(FocusEngine::default()),
-            sessions: Mutex::new(SessionManager::default()),
-            voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
-            voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
-            webcam: webcam::WebcamPreview::default(),
-            started_at: Instant::now(),
-            identity: supervisor_identity(),
-        }
-    }
 }
 
 #[tauri::command]
@@ -75,7 +63,7 @@ fn start_session(
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
 
-    sessions.start(input, now, utc_now()?);
+    sessions.start(input, now);
     let should_show_status = sessions.status_window_enabled();
     let snapshot = sessions.snapshot(now);
     drop(sessions);
@@ -98,33 +86,25 @@ fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, S
 #[tauri::command]
 fn pause_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-
-    Ok(sessions.pause(now))
+    Ok(lock_sessions(&state)?.pause(now))
 }
 
 #[tauri::command]
 fn resume_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-
-    Ok(sessions.resume(now))
+    Ok(lock_sessions(&state)?.resume(now))
 }
 
 #[tauri::command]
 fn snooze_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-
-    Ok(sessions.snooze(now, 5 * 60))
+    Ok(lock_sessions(&state)?.snooze(now, 5 * 60))
 }
 
 #[tauri::command]
 fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.stop(now);
-    drop(sessions);
+    let snapshot = lock_sessions(&state)?.stop(now);
 
     hide_status_window(&app);
     Ok(snapshot)
@@ -133,22 +113,49 @@ fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSna
 #[tauri::command]
 fn mark_current_relevant(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-
-    Ok(sessions.mark_current(focus::RuleClassification::Focused, now))
+    Ok(lock_sessions(&state)?.mark_current(focus::RuleClassification::Focused, now))
 }
 
 #[tauri::command]
 fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-
-    Ok(sessions.mark_current(focus::RuleClassification::Distracting, now))
+    Ok(lock_sessions(&state)?.mark_current(focus::RuleClassification::Distracting, now))
 }
 
 #[tauri::command]
 fn get_history(state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
     Ok(lock_sessions(&state)?.history())
+}
+
+#[tauri::command]
+fn get_session_report(id: u64, state: State<'_, AppState>) -> Result<SessionReport, String> {
+    lock_sessions(&state)?.session_report(id)
+}
+
+#[tauri::command]
+fn get_trends(state: State<'_, AppState>) -> Result<TrendsData, String> {
+    lock_sessions(&state)?.trends()
+}
+
+#[tauri::command]
+fn delete_session(id: u64, state: State<'_, AppState>) -> Result<(), String> {
+    lock_sessions(&state)?.delete_session(id)
+}
+
+#[tauri::command]
+fn delete_all_history(state: State<'_, AppState>) -> Result<(), String> {
+    lock_sessions(&state)?.delete_all_history()
+}
+
+#[tauri::command]
+fn scrub_span_context(state: State<'_, AppState>) -> Result<(), String> {
+    lock_sessions(&state)?.scrub_span_context()
+}
+
+#[tauri::command]
+fn dismiss_storage_notice(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    Ok(lock_sessions(&state)?.dismiss_storage_notice(now))
 }
 
 #[tauri::command]
@@ -170,9 +177,7 @@ fn show_status_window(
     state: State<'_, AppState>,
 ) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.set_status_window_enabled(true, now);
-    drop(sessions);
+    let snapshot = lock_sessions(&state)?.set_status_window_enabled(true, now);
 
     show_status_window_internal(&app)?;
     Ok(snapshot)
@@ -185,10 +190,8 @@ fn set_status_window_enabled(
     state: State<'_, AppState>,
 ) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.set_status_window_enabled(enabled, now);
+    let snapshot = lock_sessions(&state)?.set_status_window_enabled(enabled, now);
     let should_show_status = enabled && snapshot.current.is_some();
-    drop(sessions);
 
     if should_show_status {
         show_status_window_internal(&app)?;
@@ -205,9 +208,7 @@ fn set_status_window_on_top(
     state: State<'_, AppState>,
 ) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let mut sessions = lock_sessions(&state)?;
-    let snapshot = sessions.set_status_window_on_top(enabled, now);
-    drop(sessions);
+    let snapshot = lock_sessions(&state)?.set_status_window_on_top(enabled, now);
 
     set_status_window_on_top_internal(&app, enabled)?;
     if enabled {
@@ -356,16 +357,31 @@ fn lock_sessions<'a>(
         .map_err(|_| "session manager unavailable".to_string())
 }
 
-fn utc_now() -> Result<String, String> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
+fn database_path(app: &tauri::App) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
         .map_err(|error| error.to_string())
+        .map(|dir| dir.join("sessions.db"))
 }
 
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState::default())
+        // Must be the first plugin: a second launch focuses this window and exits before
+        // it can open the database.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .setup(|app| {
+            app.manage(AppState {
+                focus_engine: Mutex::new(FocusEngine::default()),
+                sessions: Mutex::new(SessionManager::open(database_path(app))),
+                voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
+                voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
+                webcam: webcam::WebcamPreview::default(),
+                started_at: Instant::now(),
+                identity: supervisor_identity(),
+            });
+
             setup_status_window(app)?;
             setup_tray(app)?;
             start_session_ticker(app.handle().clone());
@@ -383,6 +399,12 @@ pub fn run() {
             mark_current_relevant,
             mark_current_distracting,
             get_history,
+            get_session_report,
+            get_trends,
+            delete_session,
+            delete_all_history,
+            scrub_span_context,
+            dismiss_storage_notice,
             get_settings,
             update_settings,
             show_status_window,
@@ -468,9 +490,9 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let _ = show_status_window_internal(app);
             }
             "pin_status" => {
-                with_sessions(app, |sessions, _now| {
-                    sessions.set_status_window_enabled(true, _now);
-                    sessions.set_status_window_on_top(true, _now);
+                with_sessions(app, |sessions, now| {
+                    sessions.set_status_window_enabled(true, now);
+                    sessions.set_status_window_on_top(true, now);
                 });
                 let _ = set_status_window_on_top_internal(app, true);
                 let _ = show_status_window_internal(app);
@@ -479,10 +501,12 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             "snooze" => with_sessions(app, |sessions, now| {
                 sessions.snooze(now, 5 * 60);
             }),
-            "stop" => with_sessions(app, |sessions, now| {
-                sessions.stop(now);
+            "stop" => {
+                with_sessions(app, |sessions, now| {
+                    sessions.stop(now);
+                });
                 hide_status_window(app);
-            }),
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -646,7 +670,6 @@ fn supervisor_identity() -> SupervisorIdentity {
         process_path: std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        app_name: "Supervisor".to_string(),
     }
 }
 

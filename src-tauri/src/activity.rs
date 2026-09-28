@@ -1,8 +1,15 @@
-use active_win_pos_rs::{get_active_window, ActiveWindow};
+#[path = "activity_normalize.rs"]
+mod activity_normalize;
+#[cfg(target_os = "windows")]
+#[path = "activity_win32.rs"]
+mod activity_win32;
+
+use activity_normalize::{idle_elapsed_seconds, normalize_title_text};
 use serde::Serialize;
+#[cfg(not(target_os = "windows"))]
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ActivitySample {
     pub captured_at: String,
     pub platform: &'static str,
@@ -14,6 +21,8 @@ pub struct ActivitySample {
     pub bounds: Bounds,
     pub idle_seconds: Option<f64>,
     pub permissions: CapturePermissions,
+    /// OS shell UI (Start, Search, Alt-Tab, taskbar...). Sessions keep the previous window.
+    pub shell_surface: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -39,22 +48,35 @@ pub enum PermissionState {
 }
 
 pub fn current_activity_sample() -> Result<ActivitySample, String> {
-    let captured_at = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|error| error.to_string())?;
-    let active_window =
-        get_active_window().map_err(|_| "could not read the active window".to_string())?;
+    let permissions = capture_permissions();
+    let idle_seconds = idle_seconds();
 
-    Ok(sample_from_active_window(
-        active_window,
-        captured_at,
-        capture_permissions(),
-        idle_seconds(),
-    ))
+    #[cfg(target_os = "windows")]
+    {
+        return activity_win32::capture_current(permissions, idle_seconds);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use active_win_pos_rs::get_active_window;
+
+        let captured_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|error| error.to_string())?;
+        let active_window =
+            get_active_window().map_err(|_| "could not read the active window".to_string())?;
+
+        Ok(sample_from_active_window(
+            active_window,
+            captured_at,
+            permissions,
+            idle_seconds,
+        ))
+    }
 }
 
 fn sample_from_active_window(
-    active_window: ActiveWindow,
+    active_window: active_win_pos_rs::ActiveWindow,
     captured_at: String,
     permissions: CapturePermissions,
     idle_seconds: Option<f64>,
@@ -75,12 +97,12 @@ fn sample_from_active_window(
         },
         idle_seconds,
         permissions,
+        shell_surface: false,
     }
 }
 
 fn non_empty(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    normalize_title_text(&value)
 }
 
 fn platform() -> &'static str {
@@ -122,32 +144,28 @@ fn idle_seconds() -> Option<f64> {
 
     let seconds =
         unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, ANY_INPUT_EVENT) };
-    seconds.is_finite().then(|| round_seconds(seconds))
+    seconds.is_finite().then(|| activity_normalize::round_seconds(seconds))
 }
 
 #[cfg(target_os = "windows")]
 fn idle_seconds() -> Option<f64> {
-    let mut input = LastInputInfo {
-        cb_size: std::mem::size_of::<LastInputInfo>() as u32,
-        dw_time: 0,
-    };
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
-    let ok = unsafe { GetLastInputInfo(&mut input) };
-    if ok == 0 {
+    let mut input = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if !unsafe { GetLastInputInfo(&mut input) }.as_bool() {
         return None;
     }
 
-    let elapsed_ms = unsafe { GetTickCount() }.wrapping_sub(input.dw_time);
-    Some(round_seconds(f64::from(elapsed_ms) / 1000.0))
+    Some(idle_elapsed_seconds(input.dwTime, unsafe { GetTickCount() }))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn idle_seconds() -> Option<f64> {
     None
-}
-
-fn round_seconds(seconds: f64) -> f64 {
-    (seconds * 10.0).round() / 10.0
 }
 
 #[cfg(target_os = "macos")]
@@ -161,26 +179,6 @@ unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGEventSourceSecondsSinceLastEventType(source_state_id: u32, event_type: u32) -> f64;
 }
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct LastInputInfo {
-    cb_size: u32,
-    dw_time: u32,
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "User32")]
-unsafe extern "system" {
-    fn GetLastInputInfo(input: *mut LastInputInfo) -> i32;
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn GetTickCount() -> u32;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,8 +227,23 @@ mod tests {
         );
     }
 
-    fn active_window(title: &str) -> ActiveWindow {
-        ActiveWindow {
+    #[cfg(all(test, target_os = "windows"))]
+    #[test]
+    #[ignore = "manual: prints foreground samples every 500ms"]
+    fn manual_foreground_probe() {
+        use std::{thread, time::Duration};
+
+        for _ in 0..20 {
+            match current_activity_sample() {
+                Ok(sample) => println!("{sample:#?}"),
+                Err(error) => println!("ERR: {error}"),
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    fn active_window(title: &str) -> active_win_pos_rs::ActiveWindow {
+        active_win_pos_rs::ActiveWindow {
             title: title.to_string(),
             process_path: PathBuf::from("/Applications/Test.app"),
             app_name: "Test".to_string(),
