@@ -5,12 +5,7 @@ const ZERO_WIDTH_CHARS: [char; 3] = ['\u{200b}', '\u{200c}', '\u{feff}'];
 const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
     (
         "chrome",
-        &[
-            " - Google Chrome",
-            " — Google Chrome",
-            " - Chromium",
-            " — Chromium",
-        ],
+        &[" - Google Chrome", " — Google Chrome", " - Chromium", " — Chromium"],
     ),
     (
         "msedge",
@@ -23,10 +18,7 @@ const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
     ),
     ("firefox", &[" — Mozilla Firefox", " - Mozilla Firefox"]),
     ("brave", &[" - Brave", " — Brave"]),
-    (
-        "opera",
-        &[" - Opera", " — Opera", " - Opera GX", " — Opera GX"],
-    ),
+    ("opera", &[" - Opera", " — Opera", " - Opera GX", " — Opera GX"]),
     ("arc", &[" - Arc", " — Arc"]),
 ];
 
@@ -40,29 +32,15 @@ const PLACEHOLDER_TITLES: &[&str] = &[
     "edge://newtab",
 ];
 
-const NEUTRAL_EXE_NAMES: &[&str] = &[
-    "searchhost",
-    "startmenuexperiencehost",
-    "shellexperiencehost",
-    "textinputhost",
-    "systemsettings",
-];
-
-const NEUTRAL_WINDOW_CLASSES: &[&str] = &[
-    "Progman",
-    "WorkerW",
-    "Shell_TrayWnd",
-    "Shell_SecondaryTrayWnd",
-    "XamlExplorerHostIslandWindow",
-    "MultitaskingViewFrame",
-    "TopLevelWindowForOverflowXamlIsland",
-    "Windows.UI.Core.CoreWindow",
-];
+/// The window class File Explorer folder windows have used for decades. Every other top-level
+/// window owned by explorer.exe is shell UI: desktop, taskbar, Alt-Tab, tray, Run dialog.
+const FILE_EXPLORER_WINDOW_CLASS: &str = "CabinetWClass";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForegroundDisposition {
     Sample,
-    Neutral,
+    /// Shell UI (Start, Search, Alt-Tab, taskbar...): the session keeps the previous window.
+    ShellSurface,
     NoSample,
 }
 
@@ -71,6 +49,9 @@ pub struct RawForegroundIdentity {
     pub exe_name: String,
     pub window_class: String,
     pub window_title: String,
+    /// The process runs from `<Windows>\SystemApps`, where Windows installs its shell UI
+    /// (Start, Search, notification center, touch keyboard, system dialogs).
+    pub is_system_app: bool,
 }
 
 pub fn classify_foreground_surface(identity: &RawForegroundIdentity) -> ForegroundDisposition {
@@ -86,43 +67,52 @@ pub fn classify_foreground_surface(identity: &RawForegroundIdentity) -> Foregrou
         return ForegroundDisposition::NoSample;
     }
 
-    if exe == "applicationframehost" {
-        // Frame host with only shell chrome and no page title is usually Start/search chrome.
-        if title.is_none() {
-            return ForegroundDisposition::Neutral;
-        }
-        return ForegroundDisposition::Sample;
+    if identity.is_system_app {
+        return ForegroundDisposition::ShellSurface;
     }
 
-    if is_neutral_window_class(class) {
-        return ForegroundDisposition::Neutral;
+    if exe == "explorer" && !class.eq_ignore_ascii_case(FILE_EXPLORER_WINDOW_CLASS) {
+        return ForegroundDisposition::ShellSurface;
     }
 
-    if is_neutral_exe_name(&exe) {
-        return ForegroundDisposition::Neutral;
-    }
-
-    if exe == "explorer" && is_desktop_shell_class(class) {
-        return ForegroundDisposition::Neutral;
+    if exe == "applicationframehost" && title.is_none() {
+        // A Store-app frame whose app could not be resolved and has no title: nothing to credit.
+        return ForegroundDisposition::ShellSurface;
     }
 
     ForegroundDisposition::Sample
 }
 
-pub fn is_neutral_window_class(class: &str) -> bool {
-    NEUTRAL_WINDOW_CLASSES
-        .iter()
-        .any(|candidate| class.eq_ignore_ascii_case(candidate))
+/// macOS system UI runs from the CoreServices folder. Finder folders stay real windows.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub fn classify_macos_surface(
+    app_path: &str,
+    window_title: Option<&str>,
+    core_services: &str,
+) -> ForegroundDisposition {
+    let at = |bundle: &str| {
+        let dir = format!("{}/{bundle}", core_services.trim_end_matches('/'));
+        app_path.eq_ignore_ascii_case(&dir) || is_inside_dir(app_path, &dir)
+    };
+    if !is_inside_dir(app_path, core_services) || at("Applications") {
+        return ForegroundDisposition::Sample;
+    }
+    if at("loginwindow.app") {
+        return ForegroundDisposition::NoSample;
+    }
+    if at("Finder.app") && window_title.is_some() {
+        return ForegroundDisposition::Sample;
+    }
+    ForegroundDisposition::ShellSurface
 }
 
-pub fn is_neutral_exe_name(exe_lower: &str) -> bool {
-    NEUTRAL_EXE_NAMES
-        .iter()
-        .any(|candidate| *candidate == exe_lower)
-}
-
-pub fn is_desktop_shell_class(class: &str) -> bool {
-    class.eq_ignore_ascii_case("Progman") || class.eq_ignore_ascii_case("WorkerW")
+/// Case-insensitive "is `path` inside `dir`", as Windows and macOS paths are.
+pub fn is_inside_dir(path: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches(['\\', '/']);
+    path.len() > dir.len()
+        && path.is_char_boundary(dir.len())
+        && path[..dir.len()].eq_ignore_ascii_case(dir)
+        && path[dir.len()..].starts_with(['\\', '/'])
 }
 
 pub fn normalize_title_text(raw: &str) -> Option<String> {
@@ -132,10 +122,7 @@ pub fn normalize_title_text(raw: &str) -> Option<String> {
         return None;
     }
     let lower = stripped.to_ascii_lowercase();
-    if PLACEHOLDER_TITLES
-        .iter()
-        .any(|placeholder| *placeholder == lower)
-    {
+    if PLACEHOLDER_TITLES.iter().any(|placeholder| *placeholder == lower) {
         return None;
     }
     Some(stripped.to_owned())
@@ -207,22 +194,37 @@ fn strip_profile_browser_suffix(title: &str, browser_key: &str) -> Option<String
     None
 }
 
-const BROWSER_STEMS: &[&str] = &[
-    "chrome",
-    "chromium",
-    "msedge",
-    "edge",
-    "microsoft edge",
-    "firefox",
-    "brave",
-    "opera",
-    "opera gx",
-    "arc",
-    "safari",
-    "vivaldi",
-];
+pub fn app_name_from_process_path(path: &str, fallback_class: &str) -> String {
+    let trimmed = path.trim();
+    if !trimmed.is_empty() {
+        if let Some(name) = std::path::Path::new(trimmed)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+        {
+            return name.to_owned();
+        }
+    }
 
-/// Book reader. A Chromium browser shares this name; this install is the book app.
+    if !fallback_class.is_empty() {
+        return fallback_class.to_owned();
+    }
+
+    "unknown-window".to_owned()
+}
+
+pub fn idle_elapsed_seconds(last_input_tick: u32, now_tick: u32) -> f64 {
+    let elapsed_ms = now_tick.wrapping_sub(last_input_tick);
+    round_seconds(f64::from(elapsed_ms) / 1000.0)
+}
+
+pub fn round_seconds(seconds: f64) -> f64 {
+    (seconds * 10.0).round() / 10.0
+}
+
+const BROWSER_STEMS: &[&str] = &[
+    "chrome", "msedge", "firefox", "brave", "opera", "arc", "safari", "vivaldi",
+];
 const APP_NAME_STEMS: &[&str] = &["thorium"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,9 +262,7 @@ fn is_browser_process(app_name: &str, process_path: &str) -> bool {
 }
 
 fn is_browser_stem(stem: &str) -> bool {
-    BROWSER_STEMS.iter().any(|browser| {
-        stem == *browser || stem.ends_with(&format!(" {browser}"))
-    })
+    BROWSER_STEMS.iter().any(|browser| stem == *browser || stem.ends_with(&format!(" {browser}")))
 }
 
 fn display_app_name(app_name: &str, process_path: &str) -> String {
@@ -286,34 +286,6 @@ fn display_app_name(app_name: &str, process_path: &str) -> String {
             }
         }
     }
-}
-
-pub fn app_name_from_process_path(path: &str, fallback_class: &str) -> String {
-    let trimmed = path.trim();
-    if !trimmed.is_empty() {
-        if let Some(name) = std::path::Path::new(trimmed)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|stem| !stem.is_empty())
-        {
-            return name.to_owned();
-        }
-    }
-
-    if !fallback_class.is_empty() {
-        return fallback_class.to_owned();
-    }
-
-    "unknown-window".to_owned()
-}
-
-pub fn idle_elapsed_seconds(last_input_tick: u32, now_tick: u32) -> f64 {
-    let elapsed_ms = now_tick.wrapping_sub(last_input_tick);
-    round_seconds(f64::from(elapsed_ms) / 1000.0)
-}
-
-pub fn round_seconds(seconds: f64) -> f64 {
-    (seconds * 10.0).round() / 10.0
 }
 
 fn exe_stem_lower(exe_name: &str) -> String {
@@ -353,45 +325,95 @@ mod tests {
             Some("Docs".to_string())
         );
         assert_eq!(
-            normalize_title_for_browser("msedge.exe", "Inbox - Profile 1 - Microsoft Edge",),
+            normalize_title_for_browser(
+                "msedge.exe",
+                "Inbox - Profile 1 - Microsoft Edge",
+            ),
             Some("Inbox".to_string())
         );
     }
 
-    #[test]
-    fn classifies_shell_surfaces_as_neutral() {
-        let desktop = RawForegroundIdentity {
-            exe_name: "explorer.exe".to_string(),
-            window_class: "WorkerW".to_string(),
-            window_title: String::new(),
-        };
-        assert_eq!(
-            classify_foreground_surface(&desktop),
-            ForegroundDisposition::Neutral
-        );
+    fn identity(exe: &str, class: &str, title: &str, is_system_app: bool) -> RawForegroundIdentity {
+        RawForegroundIdentity {
+            exe_name: exe.to_string(),
+            window_class: class.to_string(),
+            window_title: title.to_string(),
+            is_system_app,
+        }
+    }
 
-        let task_view = RawForegroundIdentity {
-            exe_name: "explorer.exe".to_string(),
-            window_class: "MultitaskingViewFrame".to_string(),
-            window_title: String::new(),
-        };
+    #[test]
+    fn explorer_shell_windows_are_shell_surfaces_but_folders_are_not() {
+        for class in ["WorkerW", "Shell_TrayWnd", "XamlExplorerHostIslandWindow", "SomeFutureClass"] {
+            assert_eq!(
+                classify_foreground_surface(&identity("explorer.exe", class, "", false)),
+                ForegroundDisposition::ShellSurface,
+                "{class}"
+            );
+        }
         assert_eq!(
-            classify_foreground_surface(&task_view),
-            ForegroundDisposition::Neutral
+            classify_foreground_surface(&identity("Explorer.EXE", "CabinetWClass", "Downloads", false)),
+            ForegroundDisposition::Sample
+        );
+    }
+
+    #[test]
+    fn system_apps_are_shell_surfaces_whatever_their_name() {
+        for exe in ["SearchHost.exe", "StartMenuExperienceHost.exe", "RenamedIn2030.exe"] {
+            assert_eq!(
+                classify_foreground_surface(&identity(exe, "Windows.UI.Core.CoreWindow", "", true)),
+                ForegroundDisposition::ShellSurface,
+                "{exe}"
+            );
+        }
+    }
+
+    #[test]
+    fn store_apps_are_not_hidden_by_their_window_class() {
+        assert_eq!(
+            classify_foreground_surface(&identity("Spotify.exe", "Windows.UI.Core.CoreWindow", "Spotify", false)),
+            ForegroundDisposition::Sample
         );
     }
 
     #[test]
     fn lock_screen_is_no_sample() {
-        let lock = RawForegroundIdentity {
-            exe_name: "LockApp.exe".to_string(),
-            window_class: "Windows.UI.Core.CoreWindow".to_string(),
-            window_title: String::new(),
-        };
         assert_eq!(
-            classify_foreground_surface(&lock),
+            classify_foreground_surface(&identity("LockApp.exe", "Windows.UI.Core.CoreWindow", "", true)),
             ForegroundDisposition::NoSample
         );
+    }
+
+    #[test]
+    fn macos_system_ui_is_a_shell_surface_but_apps_and_finder_folders_are_not() {
+        let core = "/System/Library/CoreServices";
+        let classify = |path: &str, title: Option<&str>| classify_macos_surface(path, title, core);
+        assert_eq!(
+            classify("/System/Library/CoreServices/Dock.app", None),
+            ForegroundDisposition::ShellSurface
+        );
+        assert_eq!(
+            classify("/System/Library/CoreServices/Finder.app", Some("Downloads")),
+            ForegroundDisposition::Sample
+        );
+        assert_eq!(
+            classify("/System/Library/CoreServices/loginwindow.app", None),
+            ForegroundDisposition::NoSample
+        );
+        assert_eq!(
+            classify("/Applications/Safari.app", Some("Docs")),
+            ForegroundDisposition::Sample
+        );
+    }
+
+    #[test]
+    fn inside_dir_matches_whole_folder_names_only() {
+        let apps = r"C:\WINDOWS\SystemApps";
+        assert!(is_inside_dir(r"c:\windows\systemapps\Search\SearchHost.exe", apps));
+        assert!(is_inside_dir(r"C:\WINDOWS\SystemApps\x.exe", r"C:\Windows\SystemApps\"));
+        assert!(!is_inside_dir(r"C:\WINDOWS\SystemAppsX\x.exe", apps));
+        assert!(!is_inside_dir(r"C:\WINDOWS\SystemApps", apps));
+        assert!(!is_inside_dir(r"C:\Program Files\app.exe", apps));
     }
 
     #[test]
@@ -405,7 +427,10 @@ mod tests {
             app_name_from_process_path("", "TaskManagerWindow"),
             "TaskManagerWindow"
         );
-        assert_eq!(app_name_from_process_path("", ""), "unknown-window");
+        assert_eq!(
+            app_name_from_process_path("", ""),
+            "unknown-window"
+        );
     }
 
     #[test]
@@ -425,13 +450,5 @@ mod tests {
         );
         assert!(tab.by_title);
         assert_eq!(tab.value, "YouTube");
-
-        let shell = mark_subject(
-            "cmd",
-            r"C:\WINDOWS\system32\cmd.exe",
-            Some(r"C:\WINDOWS\system32\cmd.exe"),
-        );
-        assert!(!shell.by_title);
-        assert_eq!(shell.value, "Terminal");
     }
 }

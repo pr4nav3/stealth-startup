@@ -65,6 +65,7 @@ interface SessionSettings {
   voice_profile: string;
   status_window_enabled: boolean;
   status_window_on_top: boolean;
+  webcam_gpu: boolean;
 }
 
 interface SessionMetrics {
@@ -327,10 +328,15 @@ interface RecordedVoice {
 interface WebcamFrame {
   face_in_frame: boolean;
   gaze: WebcamGaze | null;
+  person_in_frame?: boolean;
+  present?: boolean;
   phone_in_frame: boolean;
   looking_at_phone: boolean;
   phone_count: number;
+  phone_confidence?: number;
   jpeg?: string;
+  device?: string;
+  provider?: string;
   error?: string | null;
 }
 
@@ -417,6 +423,7 @@ let settings: SessionSettings = {
   voice_profile: "Starter voice",
   status_window_enabled: true,
   status_window_on_top: true,
+  webcam_gpu: false,
 };
 let history: SessionSummary[] = [];
 let trends: TrendsData = { sessions: [], daily_focus: [] };
@@ -1207,6 +1214,13 @@ function renderWebcamSettings(): string {
               <option value="on" ${webcamSettings.strict ? "selected" : ""}>Strict</option>
             </select>
           </div>
+          <label class="setting-row toggle-row">
+            <span>Run on GPU</span>
+            <span class="toggle-field">
+              <input id="webcam-gpu" class="toggle-input" type="checkbox" ${settings.webcam_gpu ? "checked" : ""} aria-label="Run on GPU" />
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+            </span>
+          </label>
           <div class="setting-row">
             <span>When it fires</span>
             <select id="webcam-reaction" ${webcamSettings.phoneUse ? "" : "disabled"}>
@@ -1226,8 +1240,9 @@ function renderWebcamMetrics(frame: WebcamFrame | null): string {
   return `
     <div class="metric-grid webcam-metrics">
       ${metric("Face", frame?.face_in_frame ? "IN" : "OUT")}
-      ${metric("Gaze", webcamGazeLabel(frame))}
+      ${metric("Present", webcamPresentLabel(frame))}
       ${metric("Phone", frame?.phone_in_frame ? "IN FRAME" : "NO")}
+      ${metric("Runs on", webcamDeviceLabel(frame))}
       ${metric("Alert", webcamWouldAlert(frame) ? "YES" : "NO")}
     </div>
   `;
@@ -2149,6 +2164,10 @@ function bindEvents(): void {
 
   document.getElementById("webcam-reaction")?.addEventListener("change", (event) => {
     webcamSettings.reaction = (event.target as HTMLSelectElement).value as WebcamReaction;
+  });
+
+  document.getElementById("webcam-gpu")?.addEventListener("change", (event) => {
+    void setWebcamGpu((event.target as HTMLInputElement).checked);
   });
 
   document.getElementById("voice-name")?.addEventListener("input", (event) => {
@@ -3154,6 +3173,34 @@ function showFeedback(message: string): void {
   }, 1400);
 }
 
+function webcamDeviceLabel(frame: WebcamFrame | null): string {
+  const provider = frame?.provider ?? "";
+  if (provider.startsWith("Dml") || provider.startsWith("CoreML")) {
+    return "GPU";
+  }
+  if (provider.startsWith("CPU")) {
+    return "CPU";
+  }
+  return settings.webcam_gpu ? "GPU" : "CPU";
+}
+
+async function setWebcamGpu(enabled: boolean): Promise<void> {
+  try {
+    settings = await invoke<SessionSettings>("update_settings", {
+      update: { webcam_gpu: enabled },
+    });
+    if (webcamPreviewStarted) {
+      await stopWebcamPreview();
+      webcamFrame = null;
+      await startWebcamPreview();
+    }
+    webcamError = "";
+  } catch (error) {
+    webcamError = errorText(error);
+  }
+  render();
+}
+
 async function startWebcamPreview(): Promise<void> {
   if (webcamPreviewStarted) {
     return;
@@ -3335,20 +3382,14 @@ function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
   return "Looking away. No phone in the camera.";
 }
 
-function webcamGazeLabel(frame: WebcamFrame | null): string {
-  if (!frame?.face_in_frame) {
-    return "-";
+function webcamPresentLabel(frame: WebcamFrame | null): string {
+  if (frame?.present) {
+    return "YES";
   }
-  if (frame.gaze === "at_pc") {
-    return "PC";
+  if (frame?.face_in_frame || frame?.person_in_frame) {
+    return "RAW";
   }
-  if (frame.gaze === "at_phone") {
-    return "PHONE";
-  }
-  if (frame.gaze === "away_from_pc") {
-    return "AWAY";
-  }
-  return "-";
+  return "NO";
 }
 
 async function fireWebcamAlert(): Promise<void> {

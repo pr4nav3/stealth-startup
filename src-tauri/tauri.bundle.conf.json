@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "app", "dmg"],
+    "resources": {
+      "../build/webcam/": "webcam/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "entitlements": "Entitlements.plist"
+    }
+  }
+}

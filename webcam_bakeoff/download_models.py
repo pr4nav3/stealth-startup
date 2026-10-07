@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch the ONNX files the webcam bakeoff needs. Local disk only."""
+"""The ONNX files the webcam worker needs, pinned by sha256. Local disk only."""
 
 from __future__ import annotations
 
@@ -11,23 +11,22 @@ from typing import Dict
 
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 
-# YuNet 2023mar from OpenCV Zoo (Apache-2.0). Face box + 5 landmarks.
-# YOLOX-s from Megvii (Apache-2.0). COCO, class 67 = cell phone.
-# Nano could not see handheld / edge-on / half-cropped phones; s @ 640 can.
-MODELS = {
-    "face_detection_yunet_2023mar.onnx": {
+FACE_MODEL = "face_detection_yunet_2023mar.onnx"
+DETECTOR = "yolo26s.onnx"
+
+# Shipped with the app. The YOLO file is exported once with export_models.py and committed,
+# so every build ships exactly the model that was benchmarked.
+REQUIRED = {
+    FACE_MODEL: {
         "url": "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
         "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
-        "min_bytes": 200_000,
     },
-    "yolox_s.onnx": {
-        "url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx",
-        "sha256": "c5c2d13e59ae883e6af3b45daea64af4833a4951c92d116ec270d9ddbe998063",
-        "min_bytes": 30_000_000,
+    DETECTOR: {
+        "sha256": "ad1008fe5d198e6a9cbf11233ce50826d2a12aba2b6f5a0987476a120141e77b",
     },
 }
 
-USER_AGENT = "SupervisorWebcamBakeoff/1"
+USER_AGENT = "SupervisorWebcam/1"
 
 
 def sha256_file(path: Path) -> str:
@@ -43,43 +42,37 @@ def download(url: str, dest: Path) -> None:
     tmp = dest.with_suffix(dest.suffix + ".part")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=180) as response, tmp.open("wb") as out:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
+        while chunk := response.read(1024 * 1024):
             out.write(chunk)
     tmp.replace(dest)
 
 
-def ensure_models(models_dir: Path = MODELS_DIR) -> Dict[str, Path]:
-    paths = {}
-    for name, spec in MODELS.items():
+def verify_models(models_dir: Path = MODELS_DIR) -> Dict[str, Path]:
+    """Every required model present with the pinned hash. Never downloads."""
+    problems = []
+    for name, spec in REQUIRED.items():
         path = models_dir / name
-        if path.is_file() and path.stat().st_size >= spec["min_bytes"]:
-            digest = sha256_file(path)
-            if digest == spec["sha256"]:
-                paths[name] = path
-                continue
-            path.unlink()
+        if not path.is_file():
+            problems.append(f"{name} is missing")
+        elif sha256_file(path) != spec["sha256"]:
+            problems.append(f"{name} does not match its pinned sha256")
+    if problems:
+        raise RuntimeError(f"webcam models in {models_dir}: " + "; ".join(problems))
+    return {name: models_dir / name for name in REQUIRED}
 
-        print(f"downloading {name}", file=sys.stderr, flush=True)
-        download(spec["url"], path)
-        if path.stat().st_size < spec["min_bytes"]:
-            raise RuntimeError(f"{name} is too small; got a Git LFS pointer or a truncated file")
-        digest = sha256_file(path)
-        if digest != spec["sha256"]:
-            raise RuntimeError(f"{name} sha256 mismatch: {digest}")
-        paths[name] = path
-    return paths
+
+def ensure_models(models_dir: Path = MODELS_DIR) -> Dict[str, Path]:
+    """Dev helper: fetch the downloadable models, then verify all of them."""
+    for name, spec in REQUIRED.items():
+        path = models_dir / name
+        if "url" in spec and not path.is_file():
+            print(f"downloading {name}", file=sys.stderr, flush=True)
+            download(spec["url"], path)
+    return verify_models(models_dir)
 
 
 def main() -> int:
-    try:
-        paths = ensure_models()
-    except Exception as exc:
-        print(f"download failed: {exc}", file=sys.stderr)
-        return 1
-    for name, path in paths.items():
+    for name, path in ensure_models().items():
         print(f"{name}  {path.stat().st_size}  {path}")
     return 0
 

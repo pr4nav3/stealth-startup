@@ -1,4 +1,4 @@
-use crate::activity::{should_treat_as_neutral, ActivitySample};
+use crate::activity::ActivitySample;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -29,18 +29,6 @@ impl FocusEngine {
     }
 
     pub fn record_sample(&mut self, sample: &ActivitySample, now: Duration) -> FocusSnapshot {
-        if should_treat_as_neutral(sample) {
-            return self.snapshot(
-                sample,
-                FocusState::Neutral,
-                RuleClassification::Neutral,
-                None,
-                false,
-                None,
-                now,
-            );
-        }
-
         let key = WindowKey::from_sample(sample);
         if self.window_key.as_ref() != Some(&key) {
             self.window_key = Some(key);
@@ -432,88 +420,8 @@ mod tests {
             permissions: CapturePermissions {
                 screen_recording: PermissionState::Granted,
             },
+            shell_surface: false,
         }
-    }
-
-    #[test]
-    fn neutral_capture_kind_never_drifts() {
-        let mut engine = test_engine(vec![AppRule::title_contains(
-            "YouTube",
-            RuleClassification::Distracting,
-        )]);
-
-        let neutral = ActivitySample {
-            captured_at: "2026-08-12T00:00:00Z".to_string(),
-            platform: "windows",
-            app_name: "SearchHost".to_string(),
-            process_path:
-                "C:\\Windows\\SystemApps\\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\\SearchHost.exe"
-                    .to_string(),
-            process_id: 42,
-            window_title: Some("Search".to_string()),
-            window_id: "window-1".to_string(),
-            bounds: Bounds {
-                x: 0.0,
-                y: 0.0,
-                width: 1440.0,
-                height: 900.0,
-            },
-            idle_seconds: Some(0.0),
-            permissions: CapturePermissions {
-                screen_recording: PermissionState::Granted,
-            },
-        };
-        let snapshot = engine.record_sample(&neutral, seconds(120));
-
-        assert_eq!(snapshot.state, FocusState::Neutral);
-        assert_eq!(snapshot.classification, RuleClassification::Neutral);
-        assert!(!snapshot.should_nudge);
-    }
-
-    #[test]
-    fn neutral_blip_does_not_reset_drift_timer() {
-        let mut engine = test_engine(vec![AppRule::title_contains(
-            "YouTube",
-            RuleClassification::Distracting,
-        )]);
-        let youtube = sample("Chrome", "YouTube", 0.0);
-        let neutral = ActivitySample {
-            captured_at: "2026-08-12T00:00:00Z".to_string(),
-            platform: "windows",
-            app_name: "MultitaskingViewFrame".to_string(),
-            process_path: "C:\\Windows\\explorer.exe".to_string(),
-            process_id: 99,
-            window_title: None,
-            window_id: "shell-1".to_string(),
-            bounds: Bounds {
-                x: 0.0,
-                y: 0.0,
-                width: 1440.0,
-                height: 900.0,
-            },
-            idle_seconds: Some(0.0),
-            permissions: CapturePermissions {
-                screen_recording: PermissionState::Granted,
-            },
-        };
-
-        engine.record_sample(&youtube, seconds(0));
-        engine.record_sample(&youtube, seconds(5));
-        engine.record_sample(&neutral, seconds(7));
-        let after_return = engine.record_sample(&youtube, seconds(10));
-
-        assert_eq!(after_return.state, FocusState::Distracted);
-        assert!(after_return.should_nudge);
-        assert_eq!(after_return.seconds_on_current_window, 10);
-
-        let mut control = test_engine(vec![AppRule::title_contains(
-            "YouTube",
-            RuleClassification::Distracting,
-        )]);
-        control.record_sample(&youtube, seconds(0));
-        control.record_sample(&youtube, seconds(5));
-        let control_nudge = control.record_sample(&youtube, seconds(10));
-        assert_eq!(control_nudge.should_nudge, after_return.should_nudge);
     }
 
     fn seconds(value: u64) -> Duration {

@@ -1,105 +1,93 @@
-"""Compose webcam labels from a face pose and a phone flag.
-
-Looking-at-phone requires a visible phone. Head-down with no phone is
-away-from-PC.
-
-YuNet's 5 points are image-space. A 2D yaw/pitch ratio matches them.
-solvePnP Euler angles do not: a normal screen-facing face comes back
-around pitch -170, so every at-PC pose looked like "away."
-"""
+"""Phone + presence labels with temporal hysteresis. Gaze is paused."""
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
-
-Point = Tuple[float, float]
-
-AT_PC = "at_pc"
-AWAY_FROM_PC = "away_from_pc"
-AT_PHONE = "at_phone"
-
-# YuNet landmarks are in pixels. Ratios are scale-free.
-# Yaw: nose vs eye midpoint, in units of inter-ocular distance.
-# Pitch: how far the nose sits between the eyes and the mouth (0 = up, 1 = down).
-YAW_LIMIT = 0.45
-# Screen-looking from a top webcam is roughly 0.45–0.58. The old 0.2–0.8
-# window treated a full nod as still at-PC. Tighten only the nod, not the screen.
-PITCH_MIN = 0.28
-PITCH_MAX = 0.64
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Deque, Optional
 
 
-def _mid(a: Point, b: Point) -> Point:
-    return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+@dataclass
+class Hysteresis:
+    """k-of-n to turn on; clear streak to turn off."""
+
+    window: int
+    on_threshold: int
+    off_clear: int
+    _history: Deque[bool] = field(default_factory=deque)
+    _state: bool = False
+    _clear_streak: int = 0
+
+    def __post_init__(self) -> None:
+        self._history = deque(maxlen=self.window)
+
+    def update(self, raw: bool) -> bool:
+        self._history.append(raw)
+        if self._state:
+            if raw:
+                self._clear_streak = 0
+            else:
+                self._clear_streak += 1
+                if self._clear_streak >= self.off_clear:
+                    self._state = False
+                    self._clear_streak = 0
+            return self._state
+
+        hits = sum(1 for v in self._history if v)
+        if len(self._history) >= self.on_threshold and hits >= self.on_threshold:
+            self._state = True
+            self._clear_streak = 0
+        return self._state
+
+    def reset(self) -> None:
+        self._history.clear()
+        self._state = False
+        self._clear_streak = 0
 
 
-def face_yaw_pitch(
-    right_eye: Point,
-    left_eye: Point,
-    nose: Point,
-    right_mouth: Point,
-    left_mouth: Point,
-) -> Optional[Tuple[float, float]]:
-    eye = _mid(right_eye, left_eye)
-    mouth = _mid(right_mouth, left_mouth)
-    iod = ((left_eye[0] - right_eye[0]) ** 2 + (left_eye[1] - right_eye[1]) ** 2) ** 0.5
-    if iod < 1.0:
-        return None
-    span = mouth[1] - eye[1]
-    if abs(span) < 1.0:
-        return None
-    yaw = (nose[0] - eye[0]) / iod
-    pitch = (nose[1] - eye[1]) / span
-    return yaw, pitch
+@dataclass
+class TrackerState:
+    phone: Hysteresis
+    presence: Hysteresis
+
+    @classmethod
+    def default(cls) -> "TrackerState":
+        return cls(
+            phone=Hysteresis(window=5, on_threshold=3, off_clear=2),
+            presence=Hysteresis(window=5, on_threshold=2, off_clear=4),
+        )
 
 
-def looking_at_pc(
-    right_eye: Point,
-    left_eye: Point,
-    nose: Point,
-    right_mouth: Point,
-    left_mouth: Point,
-) -> bool:
-    pose = face_yaw_pitch(right_eye, left_eye, nose, right_mouth, left_mouth)
-    if pose is None:
-        return False
-    yaw, pitch = pose
-    return abs(yaw) <= YAW_LIMIT and PITCH_MIN <= pitch <= PITCH_MAX
+def raw_present(face_in_frame: bool, person_in_frame: bool) -> bool:
+    return face_in_frame or person_in_frame
 
 
-def classify(
+def compose_frame(
+    state: TrackerState,
+    *,
     face_in_frame: bool,
-    at_pc: bool,
-    phone_in_frame: bool,
+    person_in_frame: bool,
+    phone_raw: bool,
+    phone_count: int = 0,
+    phone_confidence: float = 0.0,
 ) -> dict:
-    if not face_in_frame:
-        return {
-            "face_in_frame": False,
-            "gaze": None,
-            "phone_in_frame": phone_in_frame,
-            "looking_at_phone": False,
-        }
-
-    if at_pc:
-        gaze: Optional[str] = AT_PC
-    elif phone_in_frame:
-        gaze = AT_PHONE
-    else:
-        gaze = AWAY_FROM_PC
+    present_raw = raw_present(face_in_frame, person_in_frame)
+    phone_on = state.phone.update(phone_raw)
+    present = state.presence.update(present_raw)
 
     return {
-        "face_in_frame": True,
-        "gaze": gaze,
-        "phone_in_frame": phone_in_frame,
-        "looking_at_phone": gaze == AT_PHONE,
+        "face_in_frame": face_in_frame,
+        "person_in_frame": person_in_frame,
+        "present": present,
+        "gaze": None,
+        "phone_in_frame": phone_on,
+        "looking_at_phone": phone_on,
+        "phone_count": int(phone_count),
+        "phone_confidence": float(phone_confidence),
     }
 
 
-def phone_alert(
-    phone_use: bool,
-    strict: bool,
-    phone_in_frame: bool,
-    looking_at_phone: bool,
-) -> bool:
+def phone_alert(phone_use: bool, strict: bool, phone_in_frame: bool, looking_at_phone: bool) -> bool:
     if not phone_use:
         return False
     if strict:

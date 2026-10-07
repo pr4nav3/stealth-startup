@@ -1,3 +1,9 @@
-opencv-python>=4.8.0,<5
-onnxruntime>=1.16,<2
-numpy>=1.24
+# Webcam worker runtime, frozen into the app by scripts/build_webcam_runtime.py.
+# Exact pins: every build ships what was tested. macOS 14+ (the numpy/OpenCV wheels need it).
+numpy==2.4.6
+opencv-python-headless==4.14.0.94
+# Windows: DirectML build (CPU plus any DirectX 12 GPU). Its newest release is 1.24.4.
+onnxruntime-directml==1.24.4; sys_platform == "win32"
+# macOS: the standard build includes CoreML. 1.23.2 is the last release for Intel Macs.
+onnxruntime==1.29.0; sys_platform == "darwin" and platform_machine == "arm64"
+onnxruntime==1.23.2; sys_platform == "darwin" and platform_machine == "x86_64"

@@ -22,5 +22,31 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "image-ico"] }
+tauri-plugin-single-instance = "~2.4"
 time = { version = "0.3", features = ["formatting"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Keep in step with the version Tauri uses, so the crate is compiled once, not twice.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Storage_FileSystem",
+  "Win32_System_ProcessStatus",
+  "Win32_System_SystemInformation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+# Apple's frameworks through the objc2 bindings Tauri itself uses (same versions, compiled once).
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+libc = "0.2"
+mach2 = "0.4"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEventSource", "CGEventTypes", "CGWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSPathUtilities"] }

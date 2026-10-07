@@ -10,4 +10,14 @@ src-tauri/target/
 vendor/ponytail/
 voice_bakeoff/model_cache/
 voice_bakeoff/runs/
-webcam_bakeoff/models/
+webcam_bakeoff/models/*
+!webcam_bakeoff/models/yolo26s.onnx
+!webcam_bakeoff/models/face_detection_yunet_2023mar.onnx
+webcam_bakeoff/eval/images/**
+webcam_bakeoff/eval/coco/**
+webcam_bakeoff/eval/labels.csv
+webcam_bakeoff/eval/results*.jsonl
+webcam_bakeoff/eval/youtube/**
+.venv-webcam-tools/
+Ultralytics/
+*.pt

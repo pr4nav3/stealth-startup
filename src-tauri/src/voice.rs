@@ -3,8 +3,6 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(target_os = "macos")]
-use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +26,7 @@ const GENERATION_PEAK_HEADROOM_BYTES: u64 = GIBIBYTE;
 const EXTRA_DOWNLOAD_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REFERENCE_AUDIO_BYTES: usize = 60 * 1024 * 1024;
 const DOWNLOAD_CANCELLED: &str = "download cancelled";
+const MAX_VOICE_GENERATION: Duration = Duration::from_secs(30 * 60);
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -800,7 +799,8 @@ pub fn generate_clips(
 }
 
 fn status_for_root(root: &Path) -> VoiceBackendStatus {
-    let model = model_status(root);
+    // Size checks only. The Voice screen polls this, and hashing the model pack keeps the disk busy.
+    let model = model_status_for(root, false);
     let runtime = voice_runtime::status(root);
     VoiceBackendStatus {
         system: system_info(root, model.recommended_free_bytes),
@@ -959,6 +959,10 @@ fn download_pack_to_with_progress(
     })
 }
 
+fn discard_partial_download(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
 fn download_model_to_with_progress(
     root: &Path,
     cancel: Arc<AtomicBool>,
@@ -980,7 +984,6 @@ fn download_model_to_with_progress(
 
     for file in MODEL_FILES {
         if cancel.load(Ordering::SeqCst) {
-            let _ = fs::remove_dir_all(&dir);
             return Err(DOWNLOAD_CANCELLED.to_string());
         }
         let target = dir.join(file.path);
@@ -1009,13 +1012,13 @@ fn download_model_to_with_progress(
         });
         loop {
             if cancel.load(Ordering::SeqCst) {
-                let _ = fs::remove_file(&tmp);
-                let _ = fs::remove_dir_all(&dir);
+                discard_partial_download(&tmp);
                 return Err(DOWNLOAD_CANCELLED.to_string());
             }
             let Some(chunk) =
                 tauri::async_runtime::block_on(response.chunk()).map_err(|error| {
                     if cancel.load(Ordering::SeqCst) {
+                        discard_partial_download(&tmp);
                         DOWNLOAD_CANCELLED.to_string()
                     } else {
                         error.to_string()
@@ -1039,7 +1042,7 @@ fn download_model_to_with_progress(
 
         if cancel.load(Ordering::SeqCst) {
             let _ = fs::remove_file(&tmp);
-            let _ = fs::remove_dir_all(&dir);
+            discard_partial_download(&tmp);
             return Err(DOWNLOAD_CANCELLED.to_string());
         }
         if bytes != file.bytes {
@@ -1052,7 +1055,7 @@ fn download_model_to_with_progress(
         let hash = sha256_file(&tmp)?;
         if cancel.load(Ordering::SeqCst) {
             let _ = fs::remove_file(&tmp);
-            let _ = fs::remove_dir_all(&dir);
+            discard_partial_download(&tmp);
             return Err(DOWNLOAD_CANCELLED.to_string());
         }
         if hash != file.sha256 {
@@ -1708,11 +1711,16 @@ struct WorkerRun {
     stderr: Vec<u8>,
 }
 
-fn run_worker_and_record_peak(root: &Path, mut command: Command) -> Result<WorkerRun, String> {
+fn run_worker_and_record_peak(root: &Path, command: Command) -> Result<WorkerRun, String> {
+    run_worker_until(root, command, MAX_VOICE_GENERATION)
+}
+
+fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Result<WorkerRun, String> {
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.stdin(Stdio::null());
     let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let _job = bind_worker_lifetime(&child);
     let pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -1731,9 +1739,16 @@ fn run_worker_and_record_peak(root: &Path, mut command: Command) -> Result<Worke
         })
     });
 
+    let started = Instant::now();
     let mut peak = process_ram_bytes(pid).unwrap_or(0);
     persist_generation_peak(root, peak);
     let status = loop {
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            finish_generation_peak(root, peak);
+            return Err("voice generation timed out".to_string());
+        }
         if let Some(used) = process_ram_bytes(pid) {
             if used > peak {
                 peak = used;
@@ -1742,7 +1757,7 @@ fn run_worker_and_record_peak(root: &Path, mut command: Command) -> Result<Worke
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(250)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(250).min(timeout)),
             Err(error) => {
                 let _ = child.kill();
                 finish_generation_peak(root, peak);
@@ -1765,49 +1780,105 @@ fn run_worker_and_record_peak(root: &Path, mut command: Command) -> Result<Worke
     })
 }
 
+struct WorkerLifetime {
+    #[cfg(windows)]
+    job: Option<windows::Win32::Foundation::HANDLE>,
+}
+
+impl Drop for WorkerLifetime {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            unsafe { let _ = windows::Win32::Foundation::CloseHandle(job); };
+        }
+    }
+}
+
+fn bind_worker_lifetime(child: &std::process::Child) -> WorkerLifetime {
+    #[cfg(windows)]
+    {
+        WorkerLifetime {
+            job: bind_windows_job(child),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child;
+        WorkerLifetime {}
+    }
+}
+
+#[cfg(windows)]
+fn bind_windows_job(child: &std::process::Child) -> Option<windows::Win32::Foundation::HANDLE> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JobObjectBasicLimitInformation,
+    };
+
+    let job = unsafe { CreateJobObjectW(None, None).ok()? };
+    let limits = JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        ..Default::default()
+    };
+    let configured = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectBasicLimitInformation,
+            &limits as *const JOBOBJECT_BASIC_LIMIT_INFORMATION as *const _,
+            std::mem::size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if configured.is_err() {
+        unsafe { let _ = windows::Win32::Foundation::CloseHandle(job); };
+        return None;
+    }
+    let process = HANDLE(child.as_raw_handle());
+    if unsafe { AssignProcessToJobObject(job, process) }.is_err() {
+        unsafe { let _ = windows::Win32::Foundation::CloseHandle(job); };
+        return None;
+    }
+    Some(job)
+}
+
 fn process_ram_bytes(pid: u32) -> Option<u64> {
     process_ram_bytes_impl(pid)
 }
 
 #[cfg(target_os = "windows")]
 fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
-    const PROCESS_VM_READ: u32 = 0x0010;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
     let handle = unsafe {
         OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            0,
+            false,
             pid,
         )
-    };
-    if handle.is_null() {
-        return None;
     }
-    let mut counters = ProcessMemoryCountersEx {
-        cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
-        page_fault_count: 0,
-        peak_working_set_size: 0,
-        working_set_size: 0,
-        quota_peak_paged_pool_usage: 0,
-        quota_paged_pool_usage: 0,
-        quota_peak_non_paged_pool_usage: 0,
-        quota_non_paged_pool_usage: 0,
-        pagefile_usage: 0,
-        peak_pagefile_usage: 0,
-        private_usage: 0,
+    .ok()?;
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
     };
     let ok = unsafe {
         K32GetProcessMemoryInfo(
             handle,
-            &mut counters as *mut ProcessMemoryCountersEx,
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
             counters.cb,
         )
-    };
-    unsafe {
-        CloseHandle(handle);
     }
-    (ok != 0).then_some(counters.private_usage as u64)
+    .as_bool();
+    let _ = unsafe { CloseHandle(handle) };
+    ok.then_some(counters.PrivateUsage as u64)
 }
 
 #[cfg(target_os = "linux")]
@@ -1825,17 +1896,7 @@ fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
-    let output = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    let kb = String::from_utf8(output.stdout)
-        .ok()?
-        .split_whitespace()
-        .next()?
-        .parse::<u64>()
-        .ok()?;
-    Some(kb * 1024)
+    crate::macos::process_ram_bytes(pid)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -1843,7 +1904,12 @@ fn process_ram_bytes_impl(_pid: u32) -> Option<u64> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn available_disk_bytes(path: &Path) -> Option<u64> {
+    crate::macos::available_disk_bytes(path)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn available_disk_bytes(path: &Path) -> Option<u64> {
     let output = Command::new("df").arg("-k").arg(path).output().ok()?;
     let text = String::from_utf8(output.stdout).ok()?;
@@ -1855,32 +1921,18 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
 #[cfg(target_os = "windows")]
 fn available_disk_bytes(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
     let wide = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let mut available = 0u64;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut available as *mut u64,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    (ok != 0).then_some(available)
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn GetDiskFreeSpaceExW(
-        directory_name: *const u16,
-        free_bytes_available: *mut u64,
-        total_number_of_bytes: *mut u64,
-        total_number_of_free_bytes: *mut u64,
-    ) -> i32;
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut available), None, None) }
+        .ok()?;
+    Some(available)
 }
 
 #[cfg(target_os = "linux")]
@@ -1905,118 +1957,28 @@ fn linux_meminfo_kb(prefix: &str) -> Option<u64> {
 }
 
 #[cfg(target_os = "macos")]
-fn total_ram_bytes() -> Option<u64> {
-    macos_sysctl_u64("hw.memsize")
-}
-
-#[cfg(target_os = "macos")]
-fn available_ram_bytes() -> Option<u64> {
-    let pages = macos_sysctl_u64("vm.page_free_count")?;
-    let page_size = macos_sysctl_u64("hw.pagesize")?;
-    Some(pages.saturating_mul(page_size))
-}
-
-#[cfg(target_os = "macos")]
-fn macos_sysctl_u64(name: &str) -> Option<u64> {
-    let name = CString::new(name).ok()?;
-    let mut value = 0u64;
-    let mut len = std::mem::size_of::<u64>();
-    let ok = unsafe {
-        sysctlbyname(
-            name.as_ptr(),
-            &mut value as *mut u64 as *mut std::ffi::c_void,
-            &mut len as *mut usize,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    (ok == 0).then_some(value)
-}
-
-#[cfg(target_os = "macos")]
-#[link(name = "System")]
-unsafe extern "C" {
-    fn sysctlbyname(
-        name: *const std::ffi::c_char,
-        oldp: *mut std::ffi::c_void,
-        oldlenp: *mut usize,
-        newp: *mut std::ffi::c_void,
-        newlen: usize,
-    ) -> i32;
-}
+use crate::macos::{available_ram_bytes, total_ram_bytes};
 
 #[cfg(target_os = "windows")]
 fn total_ram_bytes() -> Option<u64> {
-    windows_memory_status().map(|status| status.ull_total_phys)
+    windows_memory_status().map(|status| status.ullTotalPhys)
 }
 
 #[cfg(target_os = "windows")]
 fn available_ram_bytes() -> Option<u64> {
-    windows_memory_status().map(|status| status.ull_avail_phys)
+    windows_memory_status().map(|status| status.ullAvailPhys)
 }
 
 #[cfg(target_os = "windows")]
-fn windows_memory_status() -> Option<MemoryStatusEx> {
-    let mut status = MemoryStatusEx {
-        dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
-        dw_memory_load: 0,
-        ull_total_phys: 0,
-        ull_avail_phys: 0,
-        ull_total_page_file: 0,
-        ull_avail_page_file: 0,
-        ull_total_virtual: 0,
-        ull_avail_virtual: 0,
-        ull_avail_extended_virtual: 0,
+fn windows_memory_status() -> Option<windows::Win32::System::SystemInformation::MEMORYSTATUSEX> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
     };
-    let ok = unsafe { GlobalMemoryStatusEx(&mut status as *mut MemoryStatusEx) };
-    (ok != 0).then_some(status)
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct MemoryStatusEx {
-    dw_length: u32,
-    dw_memory_load: u32,
-    ull_total_phys: u64,
-    ull_avail_phys: u64,
-    ull_total_page_file: u64,
-    ull_avail_page_file: u64,
-    ull_total_virtual: u64,
-    ull_avail_virtual: u64,
-    ull_avail_extended_virtual: u64,
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct ProcessMemoryCountersEx {
-    cb: u32,
-    page_fault_count: u32,
-    peak_working_set_size: usize,
-    working_set_size: usize,
-    quota_peak_paged_pool_usage: usize,
-    quota_paged_pool_usage: usize,
-    quota_peak_non_paged_pool_usage: usize,
-    quota_non_paged_pool_usage: usize,
-    pagefile_usage: usize,
-    peak_pagefile_usage: usize,
-    private_usage: usize,
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "Kernel32")]
-unsafe extern "system" {
-    fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
-    fn OpenProcess(
-        desired_access: u32,
-        inherit_handle: i32,
-        process_id: u32,
-    ) -> *mut std::ffi::c_void;
-    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
-    fn K32GetProcessMemoryInfo(
-        process: *mut std::ffi::c_void,
-        counters: *mut ProcessMemoryCountersEx,
-        size: u32,
-    ) -> i32;
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    Some(status)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -2122,6 +2084,18 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    fn system_resource_queries_return_real_values() {
+        let total = total_ram_bytes().expect("total ram");
+        let available = available_ram_bytes().expect("available ram");
+        assert!(total > 1024 * 1024 * 1024);
+        assert!(available > 0 && available <= total);
+        assert!(available > total / 50, "available {available} of {total}");
+        assert!(available_disk_bytes(&std::env::temp_dir()).expect("free disk") > 0);
+        assert!(process_ram_bytes(std::process::id()).expect("own process ram") > 0);
+    }
+
+    #[test]
     fn minimal_manifest_excludes_unused_s3gen_checkpoint() {
         assert!(MODEL_FILES
             .iter()
@@ -2143,7 +2117,10 @@ mod tests {
     #[test]
     fn generation_ram_gate_uses_free_ram_and_measured_peak() {
         assert_eq!(required_free_ram_bytes(None), DEFAULT_MIN_FREE_RAM_BYTES);
-        assert_eq!(required_free_ram_bytes(Some(5 * GIBIBYTE)), 6 * GIBIBYTE);
+        assert_eq!(
+            required_free_ram_bytes(Some(5 * GIBIBYTE)),
+            6 * GIBIBYTE
+        );
         assert_eq!(
             required_free_ram_bytes(Some(2 * GIBIBYTE)),
             MIN_FREE_RAM_AFTER_MEASURE_BYTES
@@ -2178,6 +2155,67 @@ mod tests {
             Path::new("01_focus_tab_switching_lock_in.wav"),
             "other"
         ));
+    }
+
+    #[test]
+    fn status_poll_uses_size_only_model_check() {
+        let root = test_dir("status-size-only");
+        let dir = model_dir(&root);
+        fs::create_dir_all(&dir).unwrap();
+        let file = &MODEL_FILES[0];
+        let path = dir.join(file.path);
+        File::create(&path).unwrap().set_len(file.bytes).unwrap();
+
+        let status = status_for_root(&root);
+        let listed = status
+            .model
+            .files
+            .iter()
+            .find(|item| item.path == file.path)
+            .unwrap();
+        assert!(listed.valid);
+        assert!(!status.model.installed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_download_keeps_verified_model_files() {
+        let dir = test_dir("cancel-download");
+        fs::create_dir_all(&dir).unwrap();
+        let verified = dir.join("verified.bin");
+        let partial = dir.join("weights.download");
+        fs::write(&verified, b"keep").unwrap();
+        fs::write(&partial, b"partial").unwrap();
+        discard_partial_download(&partial);
+        assert_eq!(fs::read(&verified).unwrap(), b"keep");
+        assert!(!partial.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn worker_wait_stops_a_process_at_the_deadline() {
+        let root = test_dir("worker-timeout");
+        fs::create_dir_all(&root).unwrap();
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("ping");
+            command.args(["127.0.0.1", "-n", "8"]);
+            command
+        } else {
+            let mut command = Command::new("sleep");
+            command.arg("5");
+            command
+        };
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let error = match run_worker_until(&root, command, Duration::from_millis(200)) {
+            Err(error) => error,
+            Ok(_) => panic!("worker should time out"),
+        };
+        assert!(error.contains("timed out"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
