@@ -1,8 +1,9 @@
-use crate::activity::{ActivitySample, Bounds, CapturePermissions};
 use super::activity_normalize::{
     app_name_from_process_path, classify_foreground_surface, is_neutral_window_class,
-    normalize_title_for_browser, normalize_title_text, ForegroundDisposition, RawForegroundIdentity,
+    normalize_title_for_browser, normalize_title_text, ForegroundDisposition,
+    RawForegroundIdentity,
 };
+use crate::activity::{ActivitySample, Bounds, CapturePermissions};
 use std::ffi::c_void;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -65,12 +66,7 @@ unsafe extern "system" {
 
 #[link(name = "Dwmapi")]
 unsafe extern "system" {
-    fn DwmGetWindowAttribute(
-        hwnd: Hwnd,
-        attribute: u32,
-        value: *mut c_void,
-        size: u32,
-    ) -> i32;
+    fn DwmGetWindowAttribute(hwnd: Hwnd, attribute: u32, value: *mut c_void, size: u32) -> i32;
 }
 
 pub fn capture_current(

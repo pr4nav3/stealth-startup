@@ -14,7 +14,7 @@ type AppView = "main" | "overlay";
 type SettingsView = "home" | "voice" | "webcam";
 type WebcamGaze = "at_pc" | "away_from_pc" | "at_phone";
 type WebcamReaction = "alarm" | "voice";
-type VoiceTone = "gentle" | "mom" | "stern" | "kind-reset";
+type VoiceTone = string;
 type VoiceSource = "starter" | "custom";
 type VoiceBusy = "download-model" | "delete-model" | "generate-clips" | "delete-voice" | null;
 type VoiceDownloadPhase = "idle" | "downloading" | "cancelling" | "complete" | "error";
@@ -108,6 +108,85 @@ interface SessionSummary {
   nudges: number;
   top_hints: string[];
 }
+
+interface ReportSpan {
+  started_offset_seconds: number;
+  seconds: number;
+  app: string;
+  context: string | null;
+  category: string;
+  state: string;
+}
+
+interface CategoryTotal {
+  category: string;
+  seconds: number;
+}
+
+interface DriftEntry {
+  at_offset_seconds: number;
+  label: string;
+  seconds: number;
+}
+
+interface ReportEvent {
+  at_offset_seconds: number;
+  kind: string;
+  detail: string | null;
+}
+
+interface SessionReport {
+  id: number;
+  goal: string;
+  strictness: string;
+  started_at: string;
+  ended_at: string | null;
+  ended_reason: string | null;
+  planned_seconds: number;
+  duration_seconds: number;
+  focus_percent: number;
+  focused_seconds: number;
+  distracted_seconds: number;
+  idle_seconds: number;
+  away_seconds: number;
+  phone_seconds: number;
+  drift_count: number;
+  nudge_count: number;
+  longest_stretch_seconds: number;
+  median_stretch_seconds: number;
+  spans: ReportSpan[];
+  category_totals: CategoryTotal[];
+  top_apps: string[];
+  top_drifts: DriftEntry[];
+  events: ReportEvent[];
+}
+
+interface TrendSession {
+  id: number;
+  started_at: string;
+  median_stretch_seconds: number;
+  focus_percent: number;
+}
+
+interface DailyFocus {
+  date: string;
+  focus_percent: number;
+  session_count: number;
+}
+
+interface TrendsData {
+  sessions: TrendSession[];
+  daily_focus: DailyFocus[];
+}
+
+type HistoryView = "list" | "report";
+
+interface HistoryConfirm {
+  kind: "delete-all" | "scrub" | "delete-session";
+  id?: number;
+}
+
+const REPORT_CATEGORIES = ["work", "comms", "browse", "media", "offscreen"] as const;
 
 interface SessionSnapshot {
   status: SessionStatus;
@@ -231,6 +310,12 @@ interface PhraseEditor {
   text: string;
 }
 
+interface PhraseLibraryState {
+  custom_tones: string[];
+  custom_phrases: PhraseDefinition[];
+  phrase_overrides: PhraseDefinition[];
+}
+
 interface RecordedVoice {
   path: string;
   url: string;
@@ -321,7 +406,6 @@ const draft = {
   goal: "",
   duration_minutes: 25,
   strictness: "normal" as Strictness,
-  likelyTargets: "",
   voiceId: "starter-female",
 };
 
@@ -335,13 +419,35 @@ let settings: SessionSettings = {
   status_window_on_top: true,
 };
 let history: SessionSummary[] = [];
+let trends: TrendsData = { sessions: [], daily_focus: [] };
+let sessionReport: SessionReport | null = null;
+let historyView: HistoryView = "list";
+let historyConfirm: HistoryConfirm | null = null;
+let historyHydrated = false;
+const knownHistoryIds = new Set<number>();
 let permanentRules = cloneRules(starterRules);
 let preflightOpen = false;
 let preflightRules = cloneRules(starterRules);
+let preflightBlocksOpen = false;
+let preflightAdvancedOpen = false;
+let sessionRulesOpen = false;
+let paintedViewKey = "";
+let overlayMoreOpen = false;
+let distractionDismissedFor = "";
+let distractionLatchKey = "";
+let distractionLatchLabel = "";
+let overlayPlacement = "corner";
+let lastOverlayFit = "";
+const OVERLAY_CORNER_WIDTH = 228;
+const OVERLAY_INTERRUPT_WIDTH = 520;
 let ruleEditor: RuleEditor | null = null;
 let customPhrases: PhraseDefinition[] = [];
+let customPhraseSets: string[] = [];
 let phraseOverrides: Record<string, PhraseDefinition> = {};
 let phraseEditor: PhraseEditor | null = null;
+let phraseSetPickerOpen = false;
+let newPhraseSetName = "";
+const openPhraseGroups = new Set<string>();
 let voiceBackend: VoiceBackendStatus | null = null;
 let voiceDownload: VoiceDownloadSnapshot | null = null;
 let voiceBusy: VoiceBusy = null;
@@ -373,8 +479,6 @@ let webcamHitStreak = 0;
 let webcamAlarmAtMs = 0;
 let webcamPreviewStarted = false;
 
-void init();
-
 function getAppRoot(): HTMLDivElement {
   const element = document.querySelector<HTMLDivElement>("#app");
 
@@ -386,13 +490,23 @@ function getAppRoot(): HTMLDivElement {
 }
 
 async function init(): Promise<void> {
+  render();
   try {
-    const [loadedSettings, loadedHistory] = await Promise.all([
+    const [loadedSettings, loadedHistory, loadedRules, loadedPhraseLibrary] = await Promise.all([
       invoke<SessionSettings>("get_settings"),
       invoke<SessionSummary[]>("get_history"),
+      invoke<AppRule[]>("get_rules"),
+      invoke<PhraseLibraryState>("get_phrase_library"),
     ]);
     settings = loadedSettings;
     history = loadedHistory;
+    permanentRules = loadedRules;
+    customPhraseSets = loadedPhraseLibrary.custom_tones;
+    customPhrases = loadedPhraseLibrary.custom_phrases;
+    phraseOverrides = Object.fromEntries(
+      loadedPhraseLibrary.phrase_overrides.map((phrase) => [phrase.id, phrase]),
+    );
+    history.forEach((item) => knownHistoryIds.add(item.id));
     draft.strictness = loadedSettings.default_strictness;
     draft.voiceId = normalizeStoredVoiceId(loadedSettings.voice_profile);
   } catch (error) {
@@ -400,13 +514,18 @@ async function init(): Promise<void> {
   }
 
   if (appView === "main") {
-    await refreshVoiceStatus(false);
-    await refreshVoiceDownload(false);
     await listen<WebcamFrame>("webcam-frame", (event) => {
       applyWebcamFrame(event.payload);
     });
   }
   await refreshSnapshot();
+  historyHydrated = true;
+
+  if (appView === "main") {
+    void refreshTrends(false);
+    void refreshVoiceStatus(false);
+    void refreshVoiceDownload(false);
+  }
 }
 
 async function refreshVoiceStatus(shouldRender = true): Promise<void> {
@@ -445,11 +564,23 @@ async function refreshSnapshot(): Promise<void> {
     snapshot = await invoke<SessionSnapshot>("get_session_snapshot");
     settings = snapshot.settings;
     history = snapshot.history;
+    if (!snapshot.current) {
+      sessionRulesOpen = false;
+      if (ruleEditor?.scope === "preflight") {
+        ruleEditor = null;
+      }
+    }
+    const newest = noteNewHistory(history);
     if (appView === "main") {
       draft.voiceId = normalizeStoredVoiceId(settings.voice_profile);
       ensureSelectedVoice();
       void playNudgeAudioIfNeeded(snapshot.current);
+      if (historyHydrated && newest && !snapshot.current) {
+        void openHistoryReport(newest);
+        return;
+      }
     }
+    historyHydrated = true;
     lastError = "";
   } catch (error) {
     lastError = errorText(error);
@@ -457,9 +588,98 @@ async function refreshSnapshot(): Promise<void> {
 
   const webcamOpen = appView === "main" && activeTab === "settings" && settingsView === "webcam";
   if (!webcamOpen) {
-    render();
+    const current = snapshot?.current ?? null;
+    if (editorIsOpen() || viewKey() === paintedViewKey) {
+      paintClock(current);
+    } else {
+      render();
+    }
   }
   reconcilePolling();
+}
+
+function editorIsOpen(): boolean {
+  return (
+    preflightOpen ||
+    sessionRulesOpen ||
+    ruleEditor !== null ||
+    phraseEditor !== null ||
+    phraseSetPickerOpen ||
+    recordingOpen ||
+    historyConfirm !== null ||
+    voiceDeleteTargetId !== null
+  );
+}
+
+function sessionViewKey(current: CurrentSession | null): string {
+  if (!current) {
+    return "";
+  }
+  const focus = current.focus;
+  const sample = focus?.sample;
+  const rules = current.rules
+    .map((rule) => `${rule.target}\t${rule.classification}\t${rule.value}`)
+    .join("\n");
+  return [
+    current.id,
+    current.status,
+    current.goal,
+    current.duration_seconds,
+    current.strictness,
+    current.snoozed_until_seconds ?? "",
+    focus?.state ?? "",
+    focus?.classification ?? "",
+    focus?.should_nudge ? 1 : 0,
+    focus?.matched_rule?.value ?? "",
+    sample?.app_name ?? "",
+    sample?.window_title ?? "",
+    current.metrics.nudges,
+    rules,
+  ].join("\u001f");
+}
+
+function viewKey(): string {
+  const current = snapshot?.current ?? null;
+  return [
+    appView,
+    activeTab,
+    settingsView,
+    historyView,
+    sessionViewKey(current),
+    settings.status_window_on_top ? 1 : 0,
+    settings.status_window_enabled ? 1 : 0,
+    settings.voice_profile,
+    overlayPlacement,
+    distractionLatchKey,
+    distractionDismissedFor,
+    lastError,
+    voiceError,
+    feedbackMessage,
+    history.length,
+    sessionReport?.id ?? "",
+  ].join("\u001f");
+}
+
+function paintClock(current: CurrentSession | null): void {
+  if (!current) {
+    return;
+  }
+  const label = formatDuration(current.remaining_seconds);
+  const percent = current.duration_seconds
+    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
+    : 0;
+  document.querySelectorAll<HTMLElement>(".active-timer strong, .interrupt-time").forEach((node) => {
+    node.textContent = label;
+  });
+  const overlayTime = document.querySelector<HTMLElement>(".overlay-progress > span");
+  if (overlayTime) {
+    overlayTime.textContent = `${label} left`;
+  }
+  document
+    .querySelectorAll<HTMLElement>(".active-progress > span, .overlay-progress .progress > span, .interrupt-facts .progress > span")
+    .forEach((node) => {
+      node.style.width = `${percent}%`;
+    });
 }
 
 function render(): void {
@@ -467,6 +687,8 @@ function render(): void {
   if (appView === "overlay") {
     app.innerHTML = renderOverlay(current);
     bindEvents();
+    syncOverlayPlacement(current);
+    paintedViewKey = viewKey();
     return;
   }
 
@@ -474,14 +696,9 @@ function render(): void {
     <main class="app-shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">LOCAL SUPERVISOR</p>
           <h1>Supervisor</h1>
         </div>
-        <div class="chips" aria-label="Local status">
-          <span>LOCAL</span>
-          <span>CPU</span>
-          <span>${escapeHtml(label(settings.default_strictness))}</span>
-        </div>
+        <div class="status-chip" aria-label="Session status">${escapeHtml(current ? statusChip(current) : "READY")}</div>
       </header>
 
       <nav class="tabs" aria-label="Supervisor sections">
@@ -498,6 +715,7 @@ function render(): void {
       ${activeTab === "settings" ? renderSettings() : ""}
       ${activeTab === "history" ? renderHistory() : ""}
       ${renderVoiceDialogs()}
+      ${renderHistoryConfirm()}
       ${renderFeedback()}
     </main>
   `;
@@ -506,61 +724,308 @@ function render(): void {
   if (activeTab === "settings" && settingsView === "webcam") {
     paintWebcamDom();
   }
+  paintedViewKey = viewKey();
 }
 
 function renderSession(current: CurrentSession | null): string {
-  return `
-    <section class="session-home ${current ? "session-active" : "session-ready"}">
-      <section class="state-slab ${stateClass(current)}" aria-live="polite">
-        <div class="state-head">
-          <span>${statusChip(current)}</span>
-          <span>${current ? escapeHtml(label(current.strictness)) : "READY"}</span>
+  if (!current) {
+    const note = dailyNote();
+    const week = weekSummary();
+    return `
+      <section class="home-ready">
+        <div class="home-grid">
+          <article class="quote-card ${quoteFit(note.text)}">
+            <p class="eyebrow">Daily note · ${escapeHtml(note.date)}</p>
+            <blockquote>“${escapeHtml(note.text)}”</blockquote>
+            <p class="quote-by">— ${escapeHtml(note.by)}</p>
+          </article>
+          <div class="home-side">
+            <article class="panel local-card">
+              <p class="eyebrow">Privacy first</p>
+              <p>Everything stays on this device.</p>
+            </article>
+            <article class="panel week-card">
+              <span class="week-mark" aria-hidden="true">+</span>
+              <p class="eyebrow">This week</p>
+              <p class="week-total">${escapeHtml(week.total)}</p>
+              <p class="week-caption">${escapeHtml(week.caption)}</p>
+              <div class="week-bars" role="img" aria-label="Focus time this week">
+                ${week.bars
+                  .map((bar) => `<span class="${bar > 0 ? "is-on" : ""}" style="height: ${barHeight(bar, week.max)}%"></span>`)
+                  .join("")}
+              </div>
+            </article>
+          </div>
         </div>
-        <h2>${escapeHtml(stateTitle(current))}</h2>
-        <p>${escapeHtml(stateCopy(current))}</p>
-        ${current ? renderProgress(current) : renderReadyMeta()}
+        ${renderStartAction()}
       </section>
+      ${preflightOpen ? renderPreflightModal() : ""}
+    `;
+  }
 
-      <section class="panel signal-panel">
-        <h2>Session signal</h2>
-        ${renderMetrics(current)}
-        ${current ? renderActivity(current) : renderSignalStandby()}
-      </section>
+  const percent = current.duration_seconds
+    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
+    : 0;
+  return `
+    <section class="active-session-page">
+      <div class="active-session-grid">
+        <section class="state-slab active-state-card ${stateClass(current)}" aria-live="polite">
+          <p class="eyebrow">Current session</p>
+          <h2>${escapeHtml(stateTitle(current))}</h2>
+          <div class="active-goal">
+            <span>Session goal</span>
+            <strong>${escapeHtml(current.goal)}</strong>
+          </div>
+          <div class="active-timer">
+            <strong>${formatDuration(current.remaining_seconds)}</strong>
+            <span>Remaining</span>
+          </div>
+          <div class="active-progress" aria-label="Session progress">
+            <span style="width: ${percent}%"></span>
+          </div>
+        </section>
 
-      <section class="session-action-panel">
-        ${current ? renderControls(current) : renderStartAction()}
-      </section>
+        <aside class="panel session-rules-card">
+          <p class="eyebrow">This session</p>
+          <h2>What counts</h2>
+          ${renderSessionRuleSummary(current.rules)}
+          <button type="button" data-action="open-session-rules">Edit session rules</button>
+        </aside>
+      </div>
 
-      ${current ? renderEvidencePanel(current) : ""}
+      ${renderActiveSessionControls(current)}
     </section>
-    ${preflightOpen ? renderPreflightModal() : ""}
+    ${sessionRulesOpen ? renderSessionRulesModal() : ""}
+  `;
+}
+
+function renderSessionRuleSummary(rules: AppRule[]): string {
+  const relevant = rules.filter((rule) => rule.classification === "focused");
+  const distracting = rules.filter((rule) => rule.classification === "distracting");
+  return `
+    <div class="session-rule-summary">
+      ${renderSessionRuleSet("Relevant", "focused", relevant)}
+      ${renderSessionRuleSet("Distracting", "distracting", distracting)}
+    </div>
+  `;
+}
+
+function renderSessionRuleSet(
+  title: string,
+  classification: RuleClassification,
+  rules: AppRule[],
+): string {
+  return `
+    <section class="session-rule-set">
+      <h3><i class="rule-dot rule-${classification}" aria-hidden="true"></i>${escapeHtml(title)}</h3>
+      <div>
+        ${
+          rules.length
+            ? rules.map((rule) => `<span>${escapeHtml(rule.value)}</span>`).join("")
+            : `<span class="no-session-rules">None yet</span>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderActiveSessionControls(current: CurrentSession): string {
+  const paused = current.status === "paused";
+  return `
+    <div class="active-session-controls">
+      <button class="${paused ? "primary session-resume" : "overlay-pause"}" type="button" data-action="${paused ? "resume" : "pause"}">${paused ? "Resume" : "Pause"}</button>
+      <button class="danger" type="button" data-action="stop">End session</button>
+    </div>
+  `;
+}
+
+function renderSessionRulesModal(): string {
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel session-rules-panel" role="dialog" aria-modal="true" aria-labelledby="session-rules-title">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">CURRENT SESSION</p>
+            <h2 id="session-rules-title">Edit session rules</h2>
+          </div>
+          <button class="small-button" type="button" data-action="close-session-rules">Done</button>
+        </div>
+        ${renderRuleManager(preflightRules, "preflight", "Session rules")}
+      </section>
+    </div>
   `;
 }
 
 function renderOverlay(current: CurrentSession | null): string {
+  updateDistractionLatch(current);
+  if (distractionIsActive()) {
+    return renderDistractionOverlay(current as CurrentSession);
+  }
+  const paused = current?.status === "paused";
+  const snoozed = current?.status === "snoozed";
+  const nudgesMuted = snoozed || (paused && current?.snoozed_until_seconds != null);
+  const pinned = settings.status_window_on_top;
   return `
     <main class="overlay-shell">
       <section class="state-slab overlay-slab ${stateClass(current)}" aria-live="polite">
-        <div class="state-head">
-          <span>${statusChip(current)}</span>
-          <span>${current ? escapeHtml(label(current.strictness)) : "READY"}</span>
-        </div>
         <h2>${escapeHtml(stateTitle(current))}</h2>
-        <p>${escapeHtml(stateCopy(current))}</p>
-        ${current ? renderProgress(current) : ""}
-        ${current ? renderOverlayControls(current) : ""}
+        <p>${escapeHtml(current?.goal || stateCopy(current))}</p>
+        ${current ? renderOverlayProgress(current) : ""}
       </section>
+      ${
+        current
+          ? `
+            <div class="overlay-actions">
+              <button class="${paused ? "primary" : "overlay-pause"}" type="button" data-action="${paused ? "resume" : "pause"}">${paused ? "Resume" : "Pause"}</button>
+              <button class="danger" type="button" data-action="stop">Stop</button>
+            </div>
+            <details class="overlay-more" ${overlayMoreOpen ? "open" : ""}>
+              <summary>More settings</summary>
+              <div class="overlay-more-body">
+                <label class="overlay-mute">
+                  <span>Mute nudges</span>
+                  <span class="toggle-field">
+                    <input id="overlay-snooze" class="toggle-input" type="checkbox" ${nudgesMuted ? "checked" : ""} aria-label="Mute nudges" />
+                    <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+                  </span>
+                </label>
+                <p>Help Supervisor understand this app.</p>
+                <div class="overlay-marks">
+                  <button type="button" data-action="mark-relevant">Relevant</button>
+                  <button class="mark-distraction" type="button" data-action="mark-distracting">Distracting</button>
+                </div>
+                <button class="overlay-pin" type="button" data-action="${pinned ? "unpin-window" : "pin-window"}">${pinned ? "Unpin window" : "Pin window"}</button>
+              </div>
+            </details>
+          `
+          : ""
+      }
       ${renderFeedback()}
     </main>
   `;
 }
 
-function renderReadyMeta(): string {
+function renderDistractionOverlay(current: CurrentSession): string {
+  const percent = current.duration_seconds
+    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
+    : 0;
   return `
-    <div class="ready-meta">
-      <span>${draft.duration_minutes} min</span>
-      <span>${escapeHtml(label(draft.strictness))}</span>
-      <span>${escapeHtml(selectedVoice().name)}</span>
+    <main class="overlay-shell overlay-interrupt">
+      <section class="state-slab interrupt-alert">
+        <p class="interrupt-kicker">You opened ${escapeHtml(distractionLatchLabel || distractionLabel(current))}</p>
+        <h2>Distraction detected.</h2>
+        <p>${escapeHtml(distractionLatchLabel || distractionLabel(current))} is outside this session's rules.</p>
+      </section>
+      <div class="interrupt-facts">
+        <article class="panel">
+          <p class="eyebrow">Your task</p>
+          <strong>${escapeHtml(current.goal)}</strong>
+        </article>
+        <article class="panel">
+          <p class="eyebrow">Remaining</p>
+          <strong class="interrupt-time">${formatDuration(current.remaining_seconds)}</strong>
+          <div class="progress" aria-label="Session progress"><span style="width: ${percent}%"></span></div>
+        </article>
+      </div>
+      <div class="interrupt-actions">
+        <button class="primary" type="button" data-action="dismiss-distraction">Return to task</button>
+        <button type="button" data-action="dismiss-mark-relevant">Mark as relevant</button>
+      </div>
+    </main>
+  `;
+}
+
+function distractionLabel(current: CurrentSession): string {
+  const sample = current.focus?.sample;
+  const title = sample?.window_title?.trim();
+  const appName = sample?.app_name?.trim();
+  return title || appName || "This app";
+}
+
+function distractionIdentity(current: CurrentSession): string {
+  const sample = current.focus?.sample;
+  return `${sample?.process_id ?? ""}|${sample?.app_name ?? ""}|${sample?.window_title ?? ""}`;
+}
+
+function distractionIsActive(): boolean {
+  return distractionLatchKey !== "" && distractionDismissedFor !== distractionLatchKey;
+}
+
+function updateDistractionLatch(current: CurrentSession | null): void {
+  if (!current || current.status !== "active") {
+    distractionLatchKey = "";
+    distractionLatchLabel = "";
+    return;
+  }
+  const focus = current.focus;
+  if (!focus) {
+    return;
+  }
+  const key = distractionIdentity(current);
+  if (focus.state === "distracted") {
+    if (distractionDismissedFor !== key) {
+      distractionLatchKey = key;
+      distractionLatchLabel = distractionLabel(current);
+    }
+    return;
+  }
+  if (focus.state === "focused" || focus.state === "neutral" || focus.state === "idle") {
+    distractionLatchKey = "";
+    distractionLatchLabel = "";
+    distractionDismissedFor = "";
+  }
+}
+
+function syncOverlayPlacement(current: CurrentSession | null): void {
+  if (appView !== "overlay") {
+    return;
+  }
+  const interrupt = distractionIsActive();
+  const next = interrupt ? "interrupt" : "corner";
+  if (next !== overlayPlacement) {
+    overlayPlacement = next;
+    lastOverlayFit = "";
+    void invoke("set_status_window_size", {
+      width: interrupt ? OVERLAY_INTERRUPT_WIDTH : OVERLAY_CORNER_WIDTH,
+      height: interrupt ? 380 : 220,
+      center: interrupt,
+    }).catch((error) => {
+      lastError = errorText(error);
+    });
+  }
+  requestAnimationFrame(() => fitOverlayWindow());
+}
+
+function fitOverlayWindow(): void {
+  if (appView !== "overlay") {
+    return;
+  }
+  const shell = document.querySelector<HTMLElement>(".overlay-shell");
+  if (!shell) {
+    return;
+  }
+  const interrupt = overlayPlacement === "interrupt";
+  const width = interrupt ? OVERLAY_INTERRUPT_WIDTH : OVERLAY_CORNER_WIDTH;
+  const height = Math.ceil(shell.getBoundingClientRect().height);
+  const key = `${width}x${height}`;
+  if (key === lastOverlayFit) {
+    return;
+  }
+  lastOverlayFit = key;
+  void invoke("set_status_window_size", { width, height, center: interrupt }).catch((error) => {
+    lastOverlayFit = "";
+    lastError = errorText(error);
+  });
+}
+
+function renderOverlayProgress(current: CurrentSession): string {
+  const percent = current.duration_seconds
+    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
+    : 0;
+  return `
+    <div class="overlay-progress">
+      <span>${formatDuration(current.remaining_seconds)} left</span>
+      <div class="progress" aria-label="Session progress"><span style="width: ${percent}%"></span></div>
     </div>
   `;
 }
@@ -571,152 +1036,9 @@ function renderStartAction(): string {
   `;
 }
 
-function renderControls(current: CurrentSession): string {
-  const paused = current.status === "paused";
-  const snoozed = current.status === "snoozed";
-  return `
-    <div class="control-row">
-      <button class="primary" data-action="${paused ? "resume" : "pause"}">${paused ? "Resume" : "Pause"}</button>
-      <button data-action="${snoozed ? "resume" : "snooze"}">${snoozed ? "Unsnooze" : "Snooze 5 min"}</button>
-      <button data-action="mark-relevant">Mark relevant</button>
-      <button data-action="mark-distracting">Mark distracting</button>
-      <button class="danger" data-action="stop">Stop</button>
-    </div>
-  `;
-}
-
-function renderOverlayControls(current: CurrentSession): string {
-  const paused = current.status === "paused";
-  const snoozed = current.status === "snoozed";
-  const pauseLabel = paused ? "Resume" : "Pause";
-  const pinned = settings.status_window_on_top;
-  return `
-    <div class="overlay-controls">
-      <div class="overlay-control-row">
-        <button class="primary icon-button" data-action="${paused ? "resume" : "pause"}" aria-label="${pauseLabel}" title="${pauseLabel}">
-          <span class="control-icon ${paused ? "icon-play" : "icon-pause"}" aria-hidden="true"></span>
-        </button>
-        <button class="danger icon-button" data-action="stop" aria-label="Stop" title="Stop">
-          <span class="control-icon icon-stop" aria-hidden="true"></span>
-        </button>
-        <button class="text-button" data-action="${snoozed ? "resume" : "snooze"}">${snoozed ? "Unsnooze" : "Mute nudges"}</button>
-        <button class="text-button" data-action="${pinned ? "unpin-window" : "pin-window"}">${pinned ? "Unpin window" : "Pin window"}</button>
-      </div>
-      <div class="overlay-control-row mark-control-row">
-        <button class="mark-relevant" data-action="mark-relevant">Relevant</button>
-        <button class="mark-distraction" data-action="mark-distracting">Distraction</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderProgress(current: CurrentSession): string {
-  const percent = current.duration_seconds
-    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
-    : 0;
-
-  return `
-    <div class="progress" aria-label="Session progress">
-      <span style="width: ${percent}%"></span>
-    </div>
-    <div class="state-meta">
-      <span>${formatDuration(current.elapsed_seconds)} elapsed</span>
-      <span>${formatDuration(current.remaining_seconds)} left</span>
-    </div>
-  `;
-}
-
-function renderMetrics(current: CurrentSession | null): string {
-  if (!current) {
-    return `
-      <div class="metric-grid">
-        ${metric("Lock", "-")}
-        ${metric("Rules", String(permanentRules.length))}
-        ${metric("Voice", shortVoiceName(selectedVoice().name))}
-        ${metric("Side", settings.status_window_enabled ? "ON" : "OFF")}
-      </div>
-    `;
-  }
-
-  const accountable = Math.max(1, current.elapsed_seconds - current.metrics.idle_seconds);
-  const focusSeconds = current.metrics.focused_seconds + current.metrics.neutral_seconds;
-  const focusPercent = Math.round((focusSeconds / accountable) * 100);
-
-  return `
-    <div class="metric-grid">
-      ${metric("Lock", `${focusPercent}%`)}
-      ${metric("Drift", formatDuration(current.metrics.distracted_seconds))}
-      ${metric("Nudges", String(current.metrics.nudges))}
-      ${metric("Away", formatDuration(current.metrics.idle_seconds))}
-    </div>
-  `;
-}
-
-function renderSignalStandby(): string {
-  return `
-    <div class="rows compact-rows">
-      <div class="row"><span>Goal</span><strong>${escapeHtml(draft.goal || "Not set")}</strong><time>READY</time></div>
-      <div class="row"><span>Default rule set</span><strong>${permanentRules.length} rules</strong><time>LOCAL</time></div>
-      <div class="row"><span>Status window</span><strong>${settings.status_window_enabled ? "Enabled" : "Disabled"}</strong><time>${settings.status_window_on_top ? "PIN" : "BACK"}</time></div>
-    </div>
-  `;
-}
-
-function renderEvidencePanel(current: CurrentSession): string {
-  return `
-    <section class="panel evidence-panel">
-      <h2>Session log</h2>
-      ${renderEvidence(current)}
-    </section>
-  `;
-}
-
-function renderEvidence(current: CurrentSession | null): string {
-  const rows = current?.evidence ?? [];
-  if (rows.length === 0) {
-    return `<p class="empty">No evidence yet. Supervisor starts receipts after the first decision.</p>`;
-  }
-
-  return `
-    <div class="rows">
-      ${rows
-        .map(
-          (row) => `
-            <div class="row">
-              <span>${escapeHtml(row.label)}</span>
-              <strong>${escapeHtml(row.value)}</strong>
-              <time>${formatDuration(row.at_seconds)}</time>
-            </div>
-          `,
-        )
-        .join("")}
-    </div>
-  `;
-}
-
-function renderActivity(current: CurrentSession | null): string {
-  const focus = current?.focus;
-  if (!focus) {
-    return `
-      <div class="rows compact-rows">
-        <div class="row"><span>Capture</span><strong>Waiting for first sample</strong><time>-</time></div>
-        <div class="row"><span>Mark target</span><strong>Last non-Supervisor window</strong><time>RULE</time></div>
-      </div>
-    `;
-  }
-
-  const sample = focus.sample;
-  return `
-    <div class="rows compact-rows">
-      <div class="row"><span>App</span><strong>${escapeHtml(sample.app_name || "-")}</strong><time>${escapeHtml(sample.platform)}</time></div>
-      <div class="row"><span>Title</span><strong>${escapeHtml(sample.window_title || "Unavailable")}</strong><time>${formatDuration(focus.seconds_on_current_window)}</time></div>
-      <div class="row"><span>Rule</span><strong>${escapeHtml(focus.matched_rule ? ruleLabel(focus.matched_rule) : "NO MATCH")}</strong><time>${escapeHtml(ruleClassificationLabel(focus.classification))}</time></div>
-      <div class="row"><span>Nudge</span><strong>${escapeHtml(nudgeLabel(focus))}</strong><time>${sample.idle_seconds === null ? "IDLE ?" : `${sample.idle_seconds.toFixed(1)}S`}</time></div>
-    </div>
-  `;
-}
-
 function renderPreflightModal(): string {
+  const ruleCount = preflightRules.length;
+  const progress = ((draft.duration_minutes - 15) / 75) * 100;
   return `
     <div class="modal-backdrop" role="presentation">
       <section class="modal-panel preflight-panel" role="dialog" aria-modal="true" aria-labelledby="preflight-title">
@@ -725,48 +1047,57 @@ function renderPreflightModal(): string {
             <p class="eyebrow">SESSION PREFLIGHT</p>
             <h2 id="preflight-title">Set the watch</h2>
           </div>
-          <button class="small-button" type="button" data-action="close-preflight">Close</button>
+          <button class="small-button" type="button" data-action="close-preflight">Cancel</button>
         </div>
 
-        <div class="preflight-grid">
-          <section class="preflight-main">
-            <label>
-              <span>Session goal</span>
-              <textarea id="preflight-goal" rows="3" maxlength="220" placeholder="What are you planning to finish?">${escapeHtml(draft.goal)}</textarea>
-            </label>
-            <label>
-              <span>Likely apps / sites</span>
-              <textarea id="likely-targets" rows="3" maxlength="240" placeholder="Docs, GitHub, Linear, YouTube API docs">${escapeHtml(draft.likelyTargets)}</textarea>
-            </label>
-            <div class="form-row">
-              <label>
-                <span>Minutes</span>
-                <input id="preflight-duration" type="number" min="5" max="180" step="5" value="${draft.duration_minutes}" />
-              </label>
+        <div class="preflight-main">
+          <label class="preflight-goal">
+            <span>What are you working on?</span>
+            <input id="preflight-goal" maxlength="220" value="${attr(draft.goal)}" placeholder="Finish the Supervisor UI overhaul" />
+          </label>
+
+          <section class="duration-field">
+            <div class="duration-head">
+              <span>How long?</span>
+              <output id="preflight-duration-output" for="preflight-duration">${draft.duration_minutes} min</output>
+            </div>
+            <input id="preflight-duration" type="range" min="15" max="90" step="5" value="${draft.duration_minutes}" style="--range-progress: ${progress}%" />
+            <div class="duration-ticks" aria-hidden="true">
+              <span style="left: 0%">15</span>
+              <span style="left: 20%">30</span>
+              <span style="left: 60%">60</span>
+              <span style="left: 100%">90</span>
+            </div>
+          </section>
+
+          <details class="preflight-disclosure" data-preflight-section="blocks" ${preflightBlocksOpen ? "open" : ""}>
+            <summary>
+              <span>Block distractions</span>
+              <span>${ruleCount} ${ruleCount === 1 ? "rule" : "rules"}</span>
+            </summary>
+            <div class="disclosure-body">
+              ${renderRuleManager(preflightRules, "preflight", "Session rules")}
+            </div>
+          </details>
+
+          <details class="preflight-disclosure" data-preflight-section="advanced" ${preflightAdvancedOpen ? "open" : ""}>
+            <summary>
+              <span>Advanced settings</span>
+            </summary>
+            <div class="disclosure-body preflight-advanced">
               <label>
                 <span>Strictness</span>
                 <select id="preflight-strictness">${strictnessOptions(draft.strictness)}</select>
               </label>
+              <label>
+                <span>Voice</span>
+                <select id="preflight-voice">${voiceOptions(draft.voiceId)}</select>
+              </label>
             </div>
-            <label>
-              <span>Voice</span>
-              <select id="preflight-voice">${voiceOptions(draft.voiceId)}</select>
-            </label>
-          </section>
-
-          <aside class="preflight-note">
-            <h3>Rules for this session</h3>
-            <p>These edits are session-only. Permanent changes live in Settings. During the session, Relevant and Distraction add a rule for the last non-Supervisor window.</p>
-            <button type="button" data-action="apply-likely-targets">Add likely apps/sites as focus</button>
-          </aside>
+          </details>
         </div>
 
-        ${renderRuleManager(preflightRules, "preflight", "Session rules")}
-
-        <div class="modal-actions">
-          <button type="button" data-action="close-preflight">Cancel</button>
-          <button class="primary" type="button" data-action="confirm-start-session">Start session</button>
-        </div>
+        <button class="primary preflight-start" type="button" data-action="confirm-start-session">Start focus session</button>
       </section>
     </div>
   `;
@@ -781,53 +1112,52 @@ function renderSettings(): string {
   }
 
   return `
-    <section class="settings-grid">
-      <section class="panel settings-top-panel">
-        <h2>Defaults</h2>
-        <div class="setting-row">
-          <span>Strictness</span>
+    <section class="settings-page">
+      <section class="panel defaults-card">
+        <p class="eyebrow">Defaults</p>
+        <div class="defaults-grid">
+          <label class="default-control">
+            <strong>Strictness</strong>
+            <small>Default intervention level.</small>
           <select id="default-strictness">
             ${strictnessOptions(settings.default_strictness)}
           </select>
+          </label>
+          <label class="default-control default-toggle">
+            <span>
+              <strong>Enable side window</strong>
+              <small>Show the timer during sessions.</small>
+            </span>
+            <span class="toggle-field">
+              <input id="status-window-enabled" class="toggle-input" type="checkbox" ${settings.status_window_enabled ? "checked" : ""} aria-label="Enable side window" />
+              <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+            </span>
+          </label>
         </div>
-        <div class="setting-row">
-          <span>Storage</span>
-          <strong>MEMORY ONLY</strong>
-        </div>
-        <label class="setting-row toggle-row">
-          <span>Enable side window</span>
-          <span class="toggle-field">
-            <input id="status-window-enabled" class="toggle-input" type="checkbox" ${settings.status_window_enabled ? "checked" : ""} aria-label="Enable side window" />
-            <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
-          </span>
-        </label>
       </section>
 
-      <section class="panel settings-top-panel voice-summary-panel">
-        <h2>Voice</h2>
+      <div class="settings-feature-grid">
+        <section class="panel settings-feature-card voice-summary-panel">
+          <p class="eyebrow">Voice</p>
         <div class="voice-summary">
           <strong>${escapeHtml(selectedVoice().name)}</strong>
           <span>${starterVoices.length} starter voices / ${phraseBank.length} bundled phrases</span>
           <button type="button" data-action="open-voice-settings">Customize</button>
         </div>
-      </section>
+        </section>
 
-      <section class="panel settings-top-panel">
-        <h2>Webcam</h2>
-        <div class="voice-summary">
-          <strong>Live camera check</strong>
-          <span>Face, gaze, phone. Local only.</span>
-          <button type="button" data-action="open-webcam-settings">Open</button>
-        </div>
-      </section>
+        <section class="panel settings-feature-card">
+          <p class="eyebrow">Webcam</p>
+          <div class="voice-summary">
+            <strong>Live camera check</strong>
+            <span>Face, gaze, phone. Local only.</span>
+            <button type="button" data-action="open-webcam-settings">Open</button>
+          </div>
+        </section>
+      </div>
 
       <section class="panel settings-rules-panel">
         ${renderRuleManager(permanentRules, "settings", "Permanent rules")}
-      </section>
-
-      <section class="panel settings-note-panel">
-        <h2>Windows signal note</h2>
-        <p class="quiet">Foreground app, PID, title, bounds, and idle time use documented Win32 desktop APIs. Titles can still be empty during app switches, custom-title windows, UWP hosting, or protected-process cases.</p>
       </section>
     </section>
   `;
@@ -905,14 +1235,63 @@ function renderWebcamMetrics(frame: WebcamFrame | null): string {
 
 function renderRuleManager(rules: AppRule[], scope: RuleScope, title: string): string {
   const activeEditor = ruleEditor?.scope === scope ? ruleEditor : null;
+  const helper =
+    scope === "settings"
+      ? "Used as the starting point for every session."
+      : "These rules are temporary. They apply to this session only.";
+  const applyPermanently =
+    scope === "preflight"
+      ? `<button class="apply-permanent-button" type="button" data-action="apply-rules-permanently">Apply permanently</button>`
+      : "";
   return `
-    <div class="rule-manager">
+    <div class="rule-manager permanent-rule-manager">
       <div class="rule-toolbar">
-        <h2>${escapeHtml(title)}</h2>
-        <button class="add-button" type="button" data-rule-action="add" data-rule-scope="${scope}" aria-label="Add rule">+</button>
+        <div>
+          <p class="eyebrow">${escapeHtml(title)}</p>
+          <p class="rule-helper">${escapeHtml(helper)}</p>
+        </div>
+        <div class="rule-toolbar-actions">
+          <button class="primary add-rule-button" type="button" data-rule-action="add" data-rule-scope="${scope}">+ Add rule</button>
+          ${applyPermanently}
+        </div>
       </div>
       ${activeEditor ? renderRuleEditor(activeEditor) : ""}
-      ${renderRuleList(rules, scope)}
+      <div class="rule-groups">
+        ${renderRuleGroup(rules, scope, "distracting", "Distracting")}
+        ${renderRuleGroup(rules, scope, "focused", "Relevant")}
+        ${rules.some((rule) => rule.classification === "neutral") ? renderRuleGroup(rules, scope, "neutral", "Neutral") : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderRuleGroup(
+  rules: AppRule[],
+  scope: RuleScope,
+  classification: RuleClassification,
+  title: string,
+): string {
+  const items = rules
+    .map((rule, index) => ({ rule, index }))
+    .filter((item) => item.rule.classification === classification);
+  return `
+    <div class="rule-group">
+      <div class="rule-group-label">
+        <i class="rule-dot rule-${classification}" aria-hidden="true"></i>
+        <span>${escapeHtml(title)}</span>
+      </div>
+      <div class="rule-chip-list">
+        ${items
+          .map(
+            ({ rule, index }) => `
+              <button class="rule-chip rule-chip-${classification}" type="button" data-rule-action="edit" data-rule-scope="${scope}" data-rule-index="${index}">
+                ${escapeHtml(rule.value)}
+              </button>
+            `,
+          )
+          .join("")}
+        <button class="add-target-button" type="button" data-rule-action="add" data-rule-scope="${scope}" data-rule-classification="${classification}">+ Add target</button>
+      </div>
     </div>
   `;
 }
@@ -934,41 +1313,14 @@ function renderRuleEditor(editor: RuleEditor): string {
       </label>
       <div class="rule-editor-actions">
         <button class="primary" type="submit">Save</button>
+        ${
+          editor.index === null
+            ? ""
+            : `<button class="danger" type="button" data-rule-action="delete" data-rule-scope="${editor.scope}" data-rule-index="${editor.index}">Delete</button>`
+        }
         <button type="button" data-rule-action="cancel" data-rule-scope="${editor.scope}">Cancel</button>
       </div>
     </form>
-  `;
-}
-
-function renderRuleList(rules: AppRule[], scope: RuleScope): string {
-  if (rules.length === 0) {
-    return `<p class="empty">No rules yet.</p>`;
-  }
-
-  return `
-    <div class="rule-table">
-      <div class="rule-row rule-head">
-        <span>Target</span>
-        <span>Mode</span>
-        <span>Match</span>
-        <span>Actions</span>
-      </div>
-      ${rules
-        .map(
-          (rule, index) => `
-            <div class="rule-row">
-              <span class="rule-source">${escapeHtml(ruleTargetLabel(rule.target))}</span>
-              <span>${rulePill(rule.classification)}</span>
-              <strong>${escapeHtml(rule.value)}</strong>
-              <span class="rule-actions">
-                <button type="button" data-rule-action="edit" data-rule-scope="${scope}" data-rule-index="${index}">Edit</button>
-                <button type="button" data-rule-action="delete" data-rule-scope="${scope}" data-rule-index="${index}">Delete</button>
-              </span>
-            </div>
-          `,
-        )
-        .join("")}
-    </div>
   `;
 }
 
@@ -1055,17 +1407,20 @@ function renderClonePanel(): string {
         : "Download model pack";
 
   return `
-    <div class="clone-status">
-      <strong>${installed ? "Voice pack ready" : "Voice pack not downloaded"}</strong>
-      <p>Cloning is a short-lived local job. Focus sessions only play saved clips. Clone only your own voice or a voice you have permission to use.</p>
-      <div class="model-facts">
-        <span>${voiceBackend ? `${voiceBackend.profiles.length} custom voices` : "Checking voices"}</span>
-        <span>${runtime?.installed ? "Runtime ready" : "Runtime missing"}</span>
-        <span>${status ? `${formatBytes(status.installed_bytes)} model` : "No model status"}</span>
-        <span>${status ? `${formatBytes(status.recommended_free_bytes)} disk` : "Disk ?"}</span>
+    <div class="clone-overview">
+      <div class="clone-status">
+        <p class="eyebrow">Status</p>
+        <strong>${installed ? "Voice pack ready" : "Voice pack not downloaded"}</strong>
+        <p>Cloning is a short-lived local job. Focus sessions only play saved clips. Clone only your own voice or a voice you have permission to use.</p>
+        <div class="model-facts">
+          <span>${voiceBackend ? `${voiceBackend.profiles.length} custom voices` : "Checking voices"}</span>
+          <span>${runtime?.installed ? "Runtime ready" : "Runtime missing"}</span>
+          <span>${status ? `${formatBytes(status.installed_bytes)} model` : "No model status"}</span>
+          <span>${status ? `${formatBytes(status.recommended_free_bytes)} disk` : "Disk ?"}</span>
+        </div>
       </div>
+      ${renderRamLock()}
     </div>
-    ${renderRamLock()}
     <div class="clone-actions">
       <button class="primary" type="button" data-action="download-model-pack" ${installed || busy ? "disabled" : ""}>${downloadLabel}</button>
       <button type="button" data-action="record-voice" ${!installed || busy ? "disabled" : ""}>Record voice</button>
@@ -1114,9 +1469,7 @@ function renderPhraseEditor(): string {
     <form class="phrase-editor" id="phrase-editor">
       <label>
         <span>Personality</span>
-        <select name="tone">${toneOrder
-          .map((tone) => `<option value="${tone}" ${tone === editor.tone ? "selected" : ""}>${toneLabel(tone)}</option>`)
-          .join("")}</select>
+        <select name="tone">${phraseToneOptions(editor.tone)}</select>
       </label>
       <label>
         <span>Phrase</span>
@@ -1135,13 +1488,16 @@ function renderPhraseLibrary(): string {
   const editable = canEditPhrases();
   return `
     <div class="phrase-groups">
-      ${toneOrder
+      ${phraseToneOrder()
         .map((tone) => {
-          const items = phrases.filter((phrase) => phrase.tone === tone);
+          const items = phrases.filter((phrase) => phrase.tone.toLowerCase() === tone.toLowerCase());
           return `
-            <section class="phrase-group">
-              <h3>${toneLabel(tone)}</h3>
-              <div class="rows">
+            <details class="phrase-group" data-phrase-group="${attr(tone)}" ${openPhraseGroups.has(tone) ? "open" : ""}>
+              <summary>
+                <span>${escapeHtml(toneLabel(tone))}</span>
+                <small>${items.length} phrase${items.length === 1 ? "" : "s"}</small>
+              </summary>
+              <div class="rows phrase-group-rows">
                 ${items
                   .map(
                     (phrase) => `
@@ -1154,7 +1510,7 @@ function renderPhraseLibrary(): string {
                   )
                   .join("")}
               </div>
-            </section>
+            </details>
           `;
         })
         .join("")}
@@ -1171,7 +1527,95 @@ function renderVoiceDialogs(): string {
   return `
     ${showVoiceDialog && recordingOpen ? renderRecordingModal() : ""}
     ${showVoiceDialog && voiceDeleteTargetId ? renderDeleteVoiceModal() : ""}
+    ${showVoiceDialog && phraseSetPickerOpen ? renderPhraseSetPicker() : ""}
     ${voiceBusy ? renderVoiceBusyModal() : ""}
+  `;
+}
+
+function renderPhraseSetPicker(): string {
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel phrase-set-panel" role="dialog" aria-modal="true" aria-labelledby="phrase-set-title">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">ADD PHRASE</p>
+            <h2 id="phrase-set-title">Choose a phrase set</h2>
+          </div>
+        </div>
+        <p class="phrase-set-copy">Add to an existing set, or name a new one.</p>
+        <div class="phrase-set-options">
+          ${phraseToneOrder()
+            .map(
+              (tone) => `
+                <button type="button" data-action="choose-phrase-set" data-tone="${attr(tone)}">
+                  <span>${escapeHtml(toneLabel(tone))}</span>
+                  <small>${effectivePhrases().filter((phrase) => phrase.tone.toLowerCase() === tone.toLowerCase()).length} phrases</small>
+                </button>
+              `,
+            )
+            .join("")}
+        </div>
+        <div class="new-phrase-set">
+          <label>
+            <span>New set name</span>
+            <input id="new-phrase-set-name" maxlength="80" value="${attr(newPhraseSetName)}" placeholder="Coach, dry humor, gentle reset..." />
+          </label>
+          <button class="primary" type="button" data-action="create-phrase-set">Create set</button>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-action="close-phrase-set-picker">Cancel</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderHistoryConfirm(): string {
+  if (!historyConfirm) {
+    return "";
+  }
+
+  const copy =
+    historyConfirm.kind === "delete-all"
+      ? {
+          eyebrow: "HISTORY",
+          title: "Delete all history?",
+          body: "Every saved session on this computer will be removed. You cannot undo this.",
+          confirm: "Delete all",
+          danger: true,
+        }
+      : historyConfirm.kind === "scrub"
+        ? {
+            eyebrow: "HISTORY",
+            title: "Forget app names?",
+            body: "Saved sessions will keep their times. App and page names will be cleared.",
+            confirm: "Forget names",
+            danger: false,
+          }
+        : {
+            eyebrow: "HISTORY",
+            title: "Delete this session?",
+            body: "This session will be removed from this computer. You cannot undo this.",
+            confirm: "Delete session",
+            danger: true,
+          };
+
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel confirm-panel" role="dialog" aria-modal="true" aria-labelledby="history-confirm-title">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">${copy.eyebrow}</p>
+            <h2 id="history-confirm-title">${escapeHtml(copy.title)}</h2>
+          </div>
+        </div>
+        <p>${escapeHtml(copy.body)}</p>
+        <div class="modal-actions">
+          <button type="button" data-action="cancel-history-confirm">Cancel</button>
+          <button class="${copy.danger ? "danger" : "primary"}" type="button" data-action="confirm-history">${escapeHtml(copy.confirm)}</button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -1325,39 +1769,252 @@ function renderClipPreview(profile: VoiceProfileSummary): string {
 }
 
 function renderHistory(): string {
+  if (historyView === "report" && sessionReport) {
+    return renderSessionReport(sessionReport);
+  }
+
   if (history.length === 0) {
     return `
-      <section class="panel">
-        <h2>History</h2>
-        <p class="empty">No saved sessions yet. Stop a session and the local summary lands here.</p>
+      <section class="history-page">
+        <section class="panel">
+          <p class="eyebrow">HISTORY</p>
+          <h2>No sessions yet</h2>
+          <p class="empty">Stop a session and the local report lands here. Nothing leaves this machine.</p>
+        </section>
       </section>
     `;
   }
 
   return `
-    <section class="panel">
-      <h2>History</h2>
-      <div class="history-list">
-        ${history
-          .map(
-            (item) => `
-              <article class="history-item">
+    <section class="history-page">
+      ${renderTrends()}
+      <section class="panel history-list-panel">
+        <div class="history-list-head">
+          <div>
+            <p class="eyebrow">SESSIONS</p>
+            <h2>Local history</h2>
+          </div>
+          <div class="history-tools">
+            <button type="button" data-action="ask-scrub">Forget names</button>
+            <button class="danger" type="button" data-action="ask-delete-all">Delete all</button>
+          </div>
+        </div>
+        <div class="history-list">
+          ${history
+            .map((item) => {
+              return `
+              <button class="history-item" type="button" data-action="open-report" data-session-id="${item.id}">
                 <div>
                   <h3>${escapeHtml(item.goal)}</h3>
                   <p>${escapeHtml(new Date(item.started_at).toLocaleString())}</p>
+                  <p class="hint-line">${escapeHtml(item.top_hints.join(" / ") || "No app hints")}</p>
                 </div>
-                <dl>
-                  <div><dt>Focus</dt><dd>${formatDuration(item.focus_seconds)}</dd></div>
-                  <div><dt>Drift</dt><dd>${formatDuration(item.distracted_seconds)}</dd></div>
-                  <div><dt>Nudges</dt><dd>${item.nudges}</dd></div>
-                </dl>
-                <p class="hint-line">${escapeHtml(item.top_hints.join(" / ") || "No app hints")}</p>
-              </article>
-            `,
-          )
+                <div class="history-item-stats">
+                  <dl>
+                    <div><dt>Focus</dt><dd>${focusPercent(item)}%</dd></div>
+                    <div><dt>Duration</dt><dd>${formatDuration(item.duration_seconds)}</dd></div>
+                    <div><dt>Nudges</dt><dd>${item.nudges}</dd></div>
+                  </dl>
+                  ${renderMiniTimeline(item)}
+                </div>
+              </button>
+            `;
+            })
+            .join("")}
+        </div>
+      </section>
+    </section>
+  `;
+}
+
+function renderTrends(): string {
+  if (trends.sessions.length === 0 && trends.daily_focus.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="trends-row">
+      <section class="panel trend-card">
+        <p class="eyebrow">ATTENTION SPAN</p>
+        <h2>Typical stretch</h2>
+        ${renderSparkline(trends.sessions)}
+        <p class="trend-caption">${escapeHtml(stretchCaption(trends.sessions))}</p>
+      </section>
+      <section class="panel trend-card">
+        <p class="eyebrow">FOCUS %</p>
+        <h2>Last ${trends.daily_focus.length} days</h2>
+        ${renderDailyBars(trends.daily_focus)}
+      </section>
+    </section>
+  `;
+}
+
+function renderSparkline(sessions: TrendSession[]): string {
+  const values = [...sessions].reverse().map((item) => item.median_stretch_seconds);
+  if (values.length === 0) {
+    return `<p class="empty">Not enough sessions for a line.</p>`;
+  }
+  const max = Math.max(...values, 1);
+  const width = 280;
+  const height = 56;
+  const points = values
+    .map((value, index) => {
+      const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width;
+      const y = height - (value / max) * (height - 6) - 3;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return `
+    <svg class="sparkline" viewBox="0 0 ${width} ${height}" role="img" aria-label="Typical stretch over recent sessions">
+      <polyline fill="none" stroke="currentColor" stroke-width="3" points="${points}" />
+    </svg>
+  `;
+}
+
+function renderDailyBars(days: DailyFocus[]): string {
+  if (days.length === 0) {
+    return `<p class="empty">No daily focus yet.</p>`;
+  }
+  return `
+    <div class="daily-bars" style="grid-template-columns: repeat(${days.length}, minmax(0, 1fr))" role="img" aria-label="Focus percent per day">
+      ${days
+        .map(
+          (day) => `
+            <div class="daily-bar" title="${attr(`${day.date}: ${day.focus_percent}% · ${day.session_count} session${day.session_count === 1 ? "" : "s"}`)}">
+              <span style="height: ${Math.max(4, day.focus_percent)}%"></span>
+              <small>${escapeHtml(day.date.slice(5))}</small>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderMiniTimeline(item: SessionSummary): string {
+  const parts = [
+    { cls: "state-focused", seconds: item.focus_seconds },
+    { cls: "state-distracted", seconds: item.distracted_seconds },
+    { cls: "state-idle", seconds: item.idle_seconds },
+  ].filter((part) => part.seconds > 0);
+  if (parts.length === 0) {
+    return `<div class="mini-timeline" aria-hidden="true"></div>`;
+  }
+  return `
+    <div class="mini-timeline" aria-hidden="true">
+      ${parts.map((part) => `<span class="${part.cls}" style="flex: ${part.seconds} 1 0"></span>`).join("")}
+    </div>
+  `;
+}
+
+function renderSessionReport(report: SessionReport): string {
+  return `
+    <section class="history-page">
+      <div class="report-toolbar">
+        <button class="small-button" type="button" data-action="close-report">Back</button>
+        <button class="small-button danger" type="button" data-action="ask-delete-session" data-session-id="${report.id}">Delete</button>
+      </div>
+      <div class="report-stage">
+        <section class="state-slab report-slab">
+          <h2>${escapeHtml(report.goal)}</h2>
+          <p class="report-headline">${escapeHtml(reportHeadline(report))}</p>
+          <p class="report-started">${escapeHtml(new Date(report.started_at).toLocaleString())} · ${escapeHtml(label(report.strictness))}</p>
+          ${renderReportTimeline(report)}
+        </section>
+        <aside class="report-stats" aria-label="Session stats">
+          ${reportStat("Duration", formatDuration(report.duration_seconds))}
+          ${reportStat("Focus", `${report.focus_percent}%`)}
+          ${reportStat("Nudges", String(report.nudge_count))}
+        </aside>
+      </div>
+      <section class="panel legend-card">
+        ${renderTimelineLegend()}
+      </section>
+      <section class="panel categories-card">
+        <p class="eyebrow">WHERE IT WENT</p>
+        <h2>Categories</h2>
+        ${renderCategoryBars(report)}
+        <p class="hint-line">${escapeHtml(report.top_apps.join(" / ") || "No apps recorded")}</p>
+      </section>
+    </section>
+  `;
+}
+
+function reportStat(labelText: string, value: string): string {
+  return `
+    <div class="report-stat">
+      <span>${escapeHtml(labelText)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function renderReportTimeline(report: SessionReport): string {
+  const duration = Math.max(report.duration_seconds, 1);
+  const nudges = report.events.filter((event) => event.kind === "nudge");
+  if (report.spans.length === 0) {
+    return `<p class="empty">No timeline for this session.</p>`;
+  }
+  return `
+    <div class="timeline-wrap">
+      <div class="timeline-bar" role="img" aria-label="Session timeline">
+        ${report.spans
+          .map((span) => {
+            const title = `${span.app}${span.context ? ` · ${span.context}` : ""} · ${formatDuration(span.seconds)}`;
+            return `<span class="timeline-span state-${escapeHtml(span.state)}" style="flex: ${Math.max(span.seconds, 1)} 1 0" title="${attr(title)}"></span>`;
+          })
+          .join("")}
+        ${nudges
+          .map((event) => {
+            const left = Math.min(100, (event.at_offset_seconds / duration) * 100);
+            return `<i class="timeline-tick" style="left: ${left.toFixed(2)}%" title="${attr(`Nudge at ${formatDuration(event.at_offset_seconds)}`)}"></i>`;
+          })
           .join("")}
       </div>
-    </section>
+    </div>
+  `;
+}
+
+function renderTimelineLegend(): string {
+  const items = [
+    ["state-focused", "Focused"],
+    ["state-neutral", "Neutral"],
+    ["state-suspicious", "Slipping"],
+    ["state-distracted", "Distracted"],
+    ["state-idle", "Idle"],
+  ];
+  return `
+    <ul class="legend-swatches">
+      ${items
+        .map(
+          ([cls, name]) => `
+            <li class="legend-swatch ${cls}">
+              <span>${escapeHtml(name)}</span>
+            </li>
+          `,
+        )
+        .join("")}
+    </ul>
+  `;
+}
+
+function renderCategoryBars(report: SessionReport): string {
+  const totals = new Map(report.category_totals.map((row) => [row.category, row.seconds]));
+  const max = Math.max(...REPORT_CATEGORIES.map((category) => totals.get(category) ?? 0), 1);
+  return `
+    <div class="category-bars">
+      ${REPORT_CATEGORIES.map((category) => {
+        const seconds = totals.get(category) ?? 0;
+        const width = Math.round((seconds / max) * 100);
+        return `
+          <div class="category-row">
+            <span>${escapeHtml(category)}</span>
+            <div class="category-track"><span class="category-${category}" style="width: ${width}%"></span></div>
+            <strong>${formatMinutes(seconds)}</strong>
+          </div>
+        `;
+      }).join("")}
+    </div>
   `;
 }
 
@@ -1369,6 +2026,9 @@ function bindEvents(): void {
       settingsView = "home";
       ruleEditor = null;
       render();
+      if (activeTab === "history") {
+        void refreshTrends();
+      }
       if (leavingWebcam) {
         void stopWebcamPreview();
       }
@@ -1383,14 +2043,14 @@ function bindEvents(): void {
 
   document.querySelectorAll<HTMLButtonElement>("[data-rule-action]").forEach((button) => {
     button.addEventListener("click", () => {
-      handleRuleAction(button);
+      void handleRuleAction(button);
     });
   });
 
   document.querySelectorAll<HTMLFormElement>("[data-rule-form]").forEach((form) => {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      saveRuleForm(form);
+      void saveRuleForm(form);
     });
   });
 
@@ -1399,11 +2059,63 @@ function bindEvents(): void {
     void savePhraseForm(event.currentTarget as HTMLFormElement);
   });
 
+  document.querySelector("details.overlay-more")?.addEventListener("toggle", (event) => {
+    const open = (event.currentTarget as HTMLDetailsElement).open;
+    if (open === overlayMoreOpen) {
+      return;
+    }
+    overlayMoreOpen = open;
+    lastOverlayFit = "";
+    requestAnimationFrame(() => fitOverlayWindow());
+  });
+
+  document.getElementById("overlay-snooze")?.addEventListener("change", (event) => {
+    const mute = (event.target as HTMLInputElement).checked;
+    if (!mute && snapshot?.current?.status === "paused") {
+      void invokeSnapshot("clear_snooze");
+      return;
+    }
+    void invokeSnapshot(mute ? "snooze_session" : "resume_session");
+  });
+
   bindDraftField("preflight-goal", "goal");
-  bindDraftField("likely-targets", "likelyTargets");
+
+  document.querySelectorAll<HTMLDetailsElement>("[data-preflight-section]").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      if (details.dataset.preflightSection === "blocks") {
+        preflightBlocksOpen = details.open;
+      } else {
+        preflightAdvancedOpen = details.open;
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLDetailsElement>("[data-phrase-group]").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      const tone = details.dataset.phraseGroup;
+      if (!tone) {
+        return;
+      }
+      if (details.open) {
+        openPhraseGroups.add(tone);
+      } else {
+        openPhraseGroups.delete(tone);
+      }
+    });
+  });
+
+  document.getElementById("new-phrase-set-name")?.addEventListener("input", (event) => {
+    newPhraseSetName = (event.target as HTMLInputElement).value;
+  });
 
   document.getElementById("preflight-duration")?.addEventListener("input", (event) => {
-    draft.duration_minutes = Number((event.target as HTMLInputElement).value || 25);
+    const slider = event.target as HTMLInputElement;
+    draft.duration_minutes = Number(slider.value || 25);
+    slider.style.setProperty("--range-progress", `${((draft.duration_minutes - 15) / 75) * 100}%`);
+    const output = document.getElementById("preflight-duration-output");
+    if (output) {
+      output.textContent = `${draft.duration_minutes} min`;
+    }
   });
 
   document.getElementById("preflight-strictness")?.addEventListener("change", (event) => {
@@ -1446,7 +2158,7 @@ function bindEvents(): void {
   });
 }
 
-function bindDraftField(id: string, key: "goal" | "likelyTargets"): void {
+function bindDraftField(id: string, key: "goal"): void {
   document.getElementById(id)?.addEventListener("input", (event) => {
     draft[key] = (event.target as HTMLTextAreaElement).value;
   });
@@ -1464,8 +2176,53 @@ async function startSession(): Promise<void> {
 }
 
 async function runAction(action: string, source?: HTMLElement): Promise<void> {
+  if (action === "dismiss-distraction") {
+    const live = snapshot?.current;
+    if (live) {
+      distractionDismissedFor = distractionIdentity(live);
+    }
+    distractionLatchKey = "";
+    distractionLatchLabel = "";
+    overlayMoreOpen = false;
+    render();
+    return;
+  }
+
+  if (action === "dismiss-mark-relevant") {
+    const live = snapshot?.current;
+    if (live) {
+      distractionDismissedFor = distractionIdentity(live);
+    }
+    distractionLatchKey = "";
+    distractionLatchLabel = "";
+    overlayMoreOpen = false;
+    await invokeSnapshot("mark_current_relevant");
+    return;
+  }
+
+  if (action === "open-session-rules") {
+    const current = snapshot?.current;
+    if (current) {
+      preflightRules = cloneRules(current.rules);
+      sessionRulesOpen = true;
+      ruleEditor = null;
+      render();
+    }
+    return;
+  }
+
+  if (action === "close-session-rules") {
+    sessionRulesOpen = false;
+    ruleEditor = null;
+    render();
+    return;
+  }
+
   if (action === "open-preflight") {
     preflightRules = cloneRules(permanentRules);
+    draft.duration_minutes = Math.min(90, Math.max(15, draft.duration_minutes));
+    preflightBlocksOpen = false;
+    preflightAdvancedOpen = false;
     preflightOpen = true;
     ruleEditor = null;
     render();
@@ -1479,17 +2236,63 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "apply-likely-targets") {
-    const added = addLikelyTargetsToPreflight();
-    showFeedback(added ? `${added} focus rules added` : "No new targets");
+  if (action === "apply-rules-permanently") {
+    await applyRulesPermanently();
     return;
   }
 
   if (action === "confirm-start-session") {
-    addLikelyTargetsToPreflight();
     preflightOpen = false;
     ruleEditor = null;
     await startSession();
+    return;
+  }
+
+  if (action === "open-report") {
+    const id = Number(source?.dataset.sessionId);
+    if (Number.isInteger(id) && id > 0) {
+      await openHistoryReport(id);
+    }
+    return;
+  }
+
+  if (action === "close-report") {
+    historyView = "list";
+    sessionReport = null;
+    historyConfirm = null;
+    render();
+    return;
+  }
+
+  if (action === "ask-delete-session") {
+    const id = Number(source?.dataset.sessionId);
+    if (Number.isInteger(id) && id > 0) {
+      historyConfirm = { kind: "delete-session", id };
+      render();
+    }
+    return;
+  }
+
+  if (action === "ask-delete-all") {
+    historyConfirm = { kind: "delete-all" };
+    render();
+    return;
+  }
+
+  if (action === "ask-scrub") {
+    historyConfirm = { kind: "scrub" };
+    render();
+    return;
+  }
+
+  if (action === "cancel-history-confirm") {
+    historyConfirm = null;
+    render();
+    return;
+  }
+
+  if (action === "confirm-history") {
+    await confirmHistoryAction();
     return;
   }
 
@@ -1511,6 +2314,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     const leavingWebcam = settingsView === "webcam";
     settingsView = "home";
     phraseEditor = null;
+    phraseSetPickerOpen = false;
     render();
     if (leavingWebcam) {
       await stopWebcamPreview();
@@ -1562,8 +2366,57 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "open-phrase-editor") {
     if (canEditPhrases()) {
-      openPhraseEditor(source?.dataset.phraseId || null);
+      const phraseId = source?.dataset.phraseId || null;
+      if (phraseId) {
+        openPhraseEditor(phraseId);
+      } else {
+        phraseSetPickerOpen = true;
+        newPhraseSetName = "";
+        render();
+      }
     }
+    return;
+  }
+
+  if (action === "close-phrase-set-picker") {
+    phraseSetPickerOpen = false;
+    newPhraseSetName = "";
+    render();
+    return;
+  }
+
+  if (action === "choose-phrase-set") {
+    const tone = source?.dataset.tone;
+    if (tone) {
+      phraseSetPickerOpen = false;
+      openPhraseGroups.add(tone);
+      openPhraseEditor(null, tone);
+    }
+    return;
+  }
+
+  if (action === "create-phrase-set") {
+    const enteredName = newPhraseSetName.trim().slice(0, 80);
+    if (!enteredName) {
+      showFeedback("Name the phrase set");
+      return;
+    }
+    const tone =
+      phraseToneOrder().find((item) => item.toLowerCase() === enteredName.toLowerCase()) ??
+      enteredName;
+    if (!customPhraseSets.some((item) => item.toLowerCase() === tone.toLowerCase()) && !toneOrder.includes(tone)) {
+      const previousSets = [...customPhraseSets];
+      customPhraseSets.push(tone);
+      if (!(await persistPhraseLibrary())) {
+        customPhraseSets = previousSets;
+        render();
+        return;
+      }
+    }
+    phraseSetPickerOpen = false;
+    newPhraseSetName = "";
+    openPhraseGroups.add(tone);
+    openPhraseEditor(null, tone);
     return;
   }
 
@@ -1652,12 +2505,16 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   const markTarget = action.startsWith("mark-") ? markTargetLabel(snapshot?.current ?? null) : "";
-  if (await invokeSnapshot(command) && action.startsWith("mark-")) {
+  const ok = await invokeSnapshot(command);
+  if (ok && action.startsWith("mark-")) {
     showFeedback(`${action === "mark-relevant" ? "Relevant" : "Distracting"}: ${markTarget}`);
+  }
+  if (ok && action === "stop" && history[0]) {
+    await openHistoryReport(history[0].id);
   }
 }
 
-function handleRuleAction(button: HTMLButtonElement): void {
+async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
   const scope = button.dataset.ruleScope as RuleScope | undefined;
   const action = button.dataset.ruleAction;
   if (!scope || !action) {
@@ -1669,7 +2526,9 @@ function handleRuleAction(button: HTMLButtonElement): void {
       scope,
       index: null,
       target: "window_title",
-      classification: scope === "preflight" ? "focused" : "distracting",
+      classification:
+        (button.dataset.ruleClassification as RuleClassification | undefined) ??
+        (scope === "preflight" ? "focused" : "distracting"),
       value: "",
     };
     render();
@@ -1695,15 +2554,22 @@ function handleRuleAction(button: HTMLButtonElement): void {
   }
 
   if (action === "delete") {
+    const previous = cloneRules(rules);
     rules.splice(index, 1);
     if (ruleEditor?.scope === scope) {
       ruleEditor = null;
     }
-    render();
+    if (scope === "settings") {
+      await persistPermanentRuleChanges(previous);
+    } else if (sessionRulesOpen) {
+      await persistSessionRuleChanges(previous);
+    } else {
+      render();
+    }
   }
 }
 
-function saveRuleForm(form: HTMLFormElement): void {
+async function saveRuleForm(form: HTMLFormElement): Promise<void> {
   const scope = form.dataset.ruleForm as RuleScope | undefined;
   if (!scope || ruleEditor?.scope !== scope) {
     return;
@@ -1721,12 +2587,57 @@ function saveRuleForm(form: HTMLFormElement): void {
   }
 
   const rules = rulesForScope(scope);
+  const previous = cloneRules(rules);
   if (ruleEditor.index === null) {
     rules.unshift(rule);
   } else {
     rules[ruleEditor.index] = rule;
   }
   ruleEditor = null;
+  if (scope === "settings") {
+    await persistPermanentRuleChanges(previous);
+  } else if (sessionRulesOpen) {
+    await persistSessionRuleChanges(previous);
+  } else {
+    render();
+  }
+}
+
+async function persistPermanentRuleChanges(previous: AppRule[]): Promise<void> {
+  try {
+    permanentRules = await invoke<AppRule[]>("update_rules", { rules: permanentRules });
+    lastError = "";
+  } catch (error) {
+    permanentRules = previous;
+    lastError = errorText(error);
+  }
+  render();
+}
+
+async function applyRulesPermanently(): Promise<void> {
+  const previous = cloneRules(permanentRules);
+  try {
+    permanentRules = await invoke<AppRule[]>("update_rules", { rules: cloneRules(preflightRules) });
+    lastError = "";
+    showFeedback("Saved for every session");
+  } catch (error) {
+    permanentRules = previous;
+    lastError = errorText(error);
+  }
+  render();
+}
+
+async function persistSessionRuleChanges(previous: AppRule[]): Promise<void> {
+  try {
+    snapshot = await invoke<SessionSnapshot>("update_session_rules", { rules: preflightRules });
+    settings = snapshot.settings;
+    history = snapshot.history;
+    preflightRules = cloneRules(snapshot.current?.rules ?? preflightRules);
+    lastError = "";
+  } catch (error) {
+    preflightRules = previous;
+    lastError = errorText(error);
+  }
   render();
 }
 
@@ -1761,6 +2672,15 @@ async function savePhraseForm(form: HTMLFormElement): Promise<void> {
     });
   }
 
+  if (!(await persistPhraseLibrary())) {
+    customPhrases = previousCustomPhrases;
+    phraseOverrides = previousPhraseOverrides;
+    phraseEditor = editor;
+    render();
+    return;
+  }
+
+  openPhraseGroups.add(tone);
   phraseEditor = null;
   render();
   const profileId = selectedGeneratedProfileId();
@@ -1769,6 +2689,7 @@ async function savePhraseForm(form: HTMLFormElement): Promise<void> {
     if (!generated) {
       customPhrases = previousCustomPhrases;
       phraseOverrides = previousPhraseOverrides;
+      await persistPhraseLibrary();
       phraseEditor = editor;
       render();
     }
@@ -1777,11 +2698,32 @@ async function savePhraseForm(form: HTMLFormElement): Promise<void> {
   }
 }
 
+async function persistPhraseLibrary(): Promise<boolean> {
+  try {
+    const library = await invoke<PhraseLibraryState>("update_phrase_library", {
+      library: {
+        custom_tones: customPhraseSets,
+        custom_phrases: customPhrases,
+        phrase_overrides: Object.values(phraseOverrides),
+      },
+    });
+    customPhraseSets = library.custom_tones;
+    customPhrases = library.custom_phrases;
+    phraseOverrides = Object.fromEntries(library.phrase_overrides.map((phrase) => [phrase.id, phrase]));
+    voiceError = "";
+    return true;
+  } catch (error) {
+    voiceError = errorText(error);
+    return false;
+  }
+}
+
 async function invokeSnapshot(command: string, args?: Record<string, unknown>): Promise<boolean> {
   try {
     snapshot = await invoke<SessionSnapshot>(command, args);
     settings = snapshot.settings;
     history = snapshot.history;
+    history.forEach((item) => knownHistoryIds.add(item.id));
     lastError = "";
   } catch (error) {
     lastError = errorText(error);
@@ -2523,23 +3465,15 @@ function stateClass(current: CurrentSession | null): string {
     return "state-ready";
   }
 
-  if (current.status === "paused" || current.status === "snoozed") {
+  if (current.status === "paused") {
+    return "state-paused";
+  }
+
+  if (current.status === "snoozed") {
     return "state-muted";
   }
 
   return `state-${current.focus?.state ?? "neutral"}`;
-}
-
-function nudgeLabel(focus: FocusSnapshot): string {
-  if (focus.should_nudge) {
-    return "NOW";
-  }
-
-  if (focus.next_nudge_in_seconds !== null) {
-    return `${focus.next_nudge_in_seconds}S`;
-  }
-
-  return "-";
 }
 
 async function playNudgeAudioIfNeeded(current: CurrentSession | null): Promise<void> {
@@ -2587,10 +3521,6 @@ function selectedNudgeClip(nudgeCount: number): VoiceClipSummary | null {
   return clips[(Math.max(1, nudgeCount) - 1) % clips.length];
 }
 
-function ruleLabel(rule: AppRule): string {
-  return `${ruleTargetLabel(rule.target)} ${rule.value}`;
-}
-
 function ruleTargetLabel(target: RuleTarget): string {
   switch (target) {
     case "app_name":
@@ -2611,10 +3541,6 @@ function ruleClassificationLabel(classification: RuleClassification): string {
     case "neutral":
       return "Neutral";
   }
-}
-
-function rulePill(classification: RuleClassification): string {
-  return `<span class="rule-pill rule-${classification}">${ruleClassificationLabel(classification)}</span>`;
 }
 
 function strictnessOptions(selected: Strictness): string {
@@ -2645,28 +3571,6 @@ function ruleClassificationOptions(selected: RuleClassification): string {
         `<option value="${classification}" ${classification === selected ? "selected" : ""}>${ruleClassificationLabel(classification)}</option>`,
     )
     .join("");
-}
-
-function addLikelyTargetsToPreflight(): number {
-  let added = 0;
-  for (const value of parseTargets(draft.likelyTargets)) {
-    const exists = preflightRules.some(
-      (rule) => rule.target === "window_title" && rule.value.toLowerCase() === value.toLowerCase(),
-    );
-    if (!exists) {
-      preflightRules.unshift({ target: "window_title", value, classification: "focused" });
-      added += 1;
-    }
-  }
-  return added;
-}
-
-function parseTargets(value: string): string[] {
-  return value
-    .split(/[\n,]/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .slice(0, 12);
 }
 
 function rulesForScope(scope: RuleScope): AppRule[] {
@@ -2700,10 +3604,6 @@ function availableVoices(): VoiceOption[] {
 
 function selectedVoice(): VoiceOption {
   return availableVoices().find((voice) => voice.id === draft.voiceId) ?? starterVoices[1];
-}
-
-function shortVoiceName(name: string): string {
-  return name.replace("Starter ", "").replace("Custom ", "Custom");
 }
 
 function modelInstalled(): boolean {
@@ -2775,14 +3675,42 @@ function ensureSelectedVoice(): void {
   }
 }
 
-function openPhraseEditor(phraseId: string | null): void {
+function openPhraseEditor(phraseId: string | null, tone = "gentle"): void {
   const phrase = phraseId ? effectivePhrases().find((item) => item.id === phraseId) : null;
   phraseEditor = {
     phraseId,
-    tone: phrase?.tone ?? "gentle",
+    tone: phrase?.tone ?? tone,
     text: phrase?.text ?? "",
   };
   render();
+}
+
+function phraseToneOrder(): VoiceTone[] {
+  const tones: VoiceTone[] = [...toneOrder];
+  for (const tone of customPhraseSets) {
+    if (!tones.some((item) => item.toLowerCase() === tone.toLowerCase())) {
+      tones.push(tone);
+    }
+  }
+  for (const phrase of effectivePhrases()) {
+    if (!tones.some((tone) => tone.toLowerCase() === phrase.tone.toLowerCase())) {
+      tones.push(phrase.tone);
+    }
+  }
+  return tones;
+}
+
+function phraseToneOptions(selected: VoiceTone): string {
+  const tones = phraseToneOrder();
+  if (!tones.some((tone) => tone.toLowerCase() === selected.toLowerCase())) {
+    tones.push(selected);
+  }
+  return tones
+    .map(
+      (tone) =>
+        `<option value="${attr(tone)}" ${tone.toLowerCase() === selected.toLowerCase() ? "selected" : ""}>${escapeHtml(toneLabel(tone))}</option>`,
+    )
+    .join("");
 }
 
 function effectivePhrases(): PhraseDefinition[] {
@@ -2920,6 +3848,8 @@ function toneLabel(tone: VoiceTone): string {
       return "Stern";
     case "kind-reset":
       return "Kind reset";
+    default:
+      return tone;
   }
 }
 
@@ -2937,6 +3867,215 @@ function formValue(form: HTMLFormElement, name: string): string {
     return field.value;
   }
   return "";
+}
+
+async function refreshTrends(shouldRender = true): Promise<void> {
+  try {
+    trends = await invoke<TrendsData>("get_trends");
+  } catch (error) {
+    lastError = errorText(error);
+  }
+  if (shouldRender) {
+    render();
+  }
+}
+
+function noteNewHistory(items: SessionSummary[]): number | null {
+  let newest: number | null = null;
+  for (const item of items) {
+    if (!knownHistoryIds.has(item.id)) {
+      if (newest === null) {
+        newest = item.id;
+      }
+      knownHistoryIds.add(item.id);
+    }
+  }
+  return newest;
+}
+
+async function openHistoryReport(id: number): Promise<void> {
+  if (settingsView === "webcam") {
+    settingsView = "home";
+    await stopWebcamPreview();
+  }
+  try {
+    sessionReport = await invoke<SessionReport>("get_session_report", { id });
+    historyView = "report";
+    activeTab = "history";
+    lastError = "";
+    knownHistoryIds.add(id);
+  } catch (error) {
+    lastError = errorText(error);
+    historyView = "list";
+    sessionReport = null;
+  }
+  await refreshTrends(false);
+  render();
+  reconcilePolling();
+}
+
+async function confirmHistoryAction(): Promise<void> {
+  const confirm = historyConfirm;
+  if (!confirm) {
+    return;
+  }
+  historyConfirm = null;
+  if (confirm.kind === "delete-session" && confirm.id) {
+    await runHistoryCommand("delete_session", { id: confirm.id }, "Session deleted");
+    historyView = "list";
+    sessionReport = null;
+    render();
+    return;
+  }
+  if (confirm.kind === "delete-all") {
+    await runHistoryCommand("delete_all_history", undefined, "History cleared");
+    historyView = "list";
+    sessionReport = null;
+    render();
+    return;
+  }
+  await runHistoryCommand("scrub_span_context", undefined, "Names forgotten");
+  if (sessionReport) {
+    await openHistoryReport(sessionReport.id);
+  }
+}
+
+async function runHistoryCommand(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  message: string,
+): Promise<void> {
+  try {
+    await invoke(command, args ?? {});
+    snapshot = await invoke<SessionSnapshot>("get_session_snapshot");
+    settings = snapshot.settings;
+    history = snapshot.history;
+    history.forEach((item) => knownHistoryIds.add(item.id));
+    lastError = "";
+    await refreshTrends(false);
+    showFeedback(message);
+  } catch (error) {
+    lastError = errorText(error);
+    render();
+  }
+}
+
+function reportHeadline(report: SessionReport): string {
+  return `${formatMinutes(report.duration_seconds)} · ${report.focus_percent}% focused · typical stretch ${formatMinutes(report.median_stretch_seconds)}`;
+}
+
+function stretchCaption(sessions: TrendSession[]): string {
+  const values = [...sessions].reverse().map((item) => item.median_stretch_seconds);
+  if (values.length < 8) {
+    return "Need 8 sessions to compare recent typical stretch.";
+  }
+  const recent = average(values.slice(-7));
+  const previous = average(values.slice(-14, -7));
+  if (previous === 0) {
+    return `Typical stretch ${formatMinutes(recent)} lately.`;
+  }
+  const delta = Math.round(((recent - previous) / previous) * 100);
+  const direction = delta >= 0 ? `up ${delta}%` : `down ${Math.abs(delta)}%`;
+  return `Last 7 vs prior 7: ${direction}.`;
+}
+
+function average(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function focusPercent(item: SessionSummary): number {
+  if (item.duration_seconds === 0) {
+    return 0;
+  }
+  return Math.round((item.focus_seconds * 100) / item.duration_seconds);
+}
+
+function formatMinutes(totalSeconds: number): string {
+  return `${Math.max(0, Math.round(totalSeconds / 60))} min`;
+}
+
+function dailyNote(): { date: string; text: string; by: string } {
+  const notes = [
+    { text: "To be everywhere is to be nowhere.", by: "Seneca" },
+    { text: "What we do now echoes in eternity.", by: "Marcus Aurelius" },
+    { text: "Well begun is half done.", by: "Aristotle" },
+    { text: "The mind is not a vessel to be filled, but a fire to be kindled.", by: "Plutarch" },
+    { text: "It is not that we have a short time to live, but that we waste a good deal of it.", by: "Seneca" },
+    { text: "No great thing is created suddenly.", by: "Epictetus" },
+    { text: "The first and greatest victory is to conquer yourself.", by: "Plato" },
+  ];
+  const now = new Date();
+  const start = new Date(now.getFullYear(), 0, 0);
+  const day = Math.floor((now.getTime() - start.getTime()) / 86400000);
+  const note = notes[day % notes.length];
+  const date = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }).toUpperCase();
+  return { date, text: note.text, by: note.by };
+}
+
+function quoteFit(text: string): string {
+  if (text.length > 70) {
+    return "quote-long";
+  }
+  if (text.length > 46) {
+    return "quote-mid";
+  }
+  return "quote-short";
+}
+
+function weekSummary(): { total: string; caption: string; bars: number[]; max: number } {
+  const days = Array.from({ length: 7 }, (_, index) => {
+    const day = new Date();
+    day.setHours(0, 0, 0, 0);
+    day.setDate(day.getDate() - (6 - index));
+    return dayKey(day);
+  });
+  const bars = days.map((day) =>
+    history
+      .filter((item) => sessionDay(item.started_at) === day)
+      .reduce((sum, item) => sum + item.duration_seconds, 0),
+  );
+  const seconds = bars.reduce((sum, value) => sum + value, 0);
+  const count = days.reduce(
+    (sum, day) => sum + history.filter((item) => sessionDay(item.started_at) === day).length,
+    0,
+  );
+  return {
+    total: formatHours(seconds),
+    caption: `across ${count} session${count === 1 ? "" : "s"}`,
+    bars,
+    max: Math.max(...bars, 1),
+  };
+}
+
+function dayKey(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function sessionDay(startedAt: string): string {
+  const date = new Date(startedAt);
+  return Number.isNaN(date.getTime()) ? startedAt.slice(0, 10) : dayKey(date);
+}
+
+function barHeight(value: number, max: number): number {
+  if (value <= 0) {
+    return 18;
+  }
+  return Math.max(28, Math.round((value / max) * 100));
+}
+
+function formatHours(totalSeconds: number): string {
+  const minutes = Math.round(Math.max(0, totalSeconds) / 60);
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours === 0) {
+    return `${rest}m`;
+  }
+  return `${hours}h ${String(rest).padStart(2, "0")}m`;
 }
 
 function formatDuration(totalSeconds: number): string {
@@ -2974,3 +4113,5 @@ function escapeHtml(value: string): string {
     }
   });
 }
+
+void init();

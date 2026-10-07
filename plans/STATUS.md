@@ -3,8 +3,7 @@
 Living log of what is done and what is left. Update this file when a item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-09-27 (SQLite backend and Win32 capture hardening merged
-into `test-features`; webcam scope cut to phone + presence)
+Last updated: 2026-10-06 (session UI and temporary rules on `feat/ui`)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
 ship target. There is no Mac on hand anymore, so Windows is the development and
@@ -89,7 +88,7 @@ should not hide a broken runtime.
 
 ### 4. Local SQLite persistence, session reports, trends
 
-Status: **backend done, UI not started** · design: `plans/session-storage.md`
+Status: **history UI on `feat/ui`** · design: `plans/session-storage.md`
 
 Keep it local. No cloud. Session-only tracking; no always-on mode.
 
@@ -100,11 +99,11 @@ Keep it local. No cloud. Session-only tracking; no always-on mode.
 - [x] Rollups + `recompute_session_metrics`, history and report commands
       (`get_history` unchanged shape; new `get_session_report(id)`,
       `get_trends()`)
-- [ ] Session report screen: headline, timeline bar, category bars, top drifts
-- [ ] Trends above History: attention-span sparkline, focus % per day
-- [ ] Deletion paths: backend commands done for one session
+- [x] Session report screen: headline, timeline bar, category bars, top drifts
+- [x] Trends above History: attention-span sparkline, focus % per day
+- [x] Deletion paths: backend commands done for one session
       (`delete_session`), all history (`delete_all_history`), and window
-      titles (`scrub_span_context`); no UI yet. Voice / clip deletion not
+      titles (`scrub_span_context`); History UI wired. Voice / clip deletion not
       done
 - [x] One runnable check around rollup + reload + orphan recovery
 - [ ] `phone` / `away` / `back` events and `away_seconds` / `phone_seconds`:
@@ -115,10 +114,10 @@ Keep it local. No cloud. Session-only tracking; no always-on mode.
 Status: **next** · owner has a specific design in mind for the session
 screen and preflight
 
-Style notes live in `plans/supervisor-style-guide-braindock-ish.md` and
-`plans/supervisor-style-guide-mashup.md`. Do not rewrite the voice phrase
-lines; the owner is rewriting them. Leave the Settings webcam preview section
-of `src/main.ts` alone while `feat/webcam-models` is open.
+The authoritative style direction is `plans/SUPERVISOR_UI_GUIDELINES.md`.
+The older BrainDock-ish and mashup guides are historical references. Do not
+rewrite the voice phrase lines; the owner is rewriting them. Leave the Settings
+webcam preview section of `src/main.ts` alone while `feat/webcam-models` is open.
 
 The report and trend screens in item 4 are the overhaul for the History tab
 and the post-session view. Settle the styling before building them so they are

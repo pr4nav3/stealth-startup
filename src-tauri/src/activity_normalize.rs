@@ -5,7 +5,12 @@ const ZERO_WIDTH_CHARS: [char; 3] = ['\u{200b}', '\u{200c}', '\u{feff}'];
 const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
     (
         "chrome",
-        &[" - Google Chrome", " — Google Chrome", " - Chromium", " — Chromium"],
+        &[
+            " - Google Chrome",
+            " — Google Chrome",
+            " - Chromium",
+            " — Chromium",
+        ],
     ),
     (
         "msedge",
@@ -18,7 +23,10 @@ const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
     ),
     ("firefox", &[" — Mozilla Firefox", " - Mozilla Firefox"]),
     ("brave", &[" - Brave", " — Brave"]),
-    ("opera", &[" - Opera", " — Opera", " - Opera GX", " — Opera GX"]),
+    (
+        "opera",
+        &[" - Opera", " — Opera", " - Opera GX", " — Opera GX"],
+    ),
     ("arc", &[" - Arc", " — Arc"]),
 ];
 
@@ -108,7 +116,9 @@ pub fn is_neutral_window_class(class: &str) -> bool {
 }
 
 pub fn is_neutral_exe_name(exe_lower: &str) -> bool {
-    NEUTRAL_EXE_NAMES.iter().any(|candidate| *candidate == exe_lower)
+    NEUTRAL_EXE_NAMES
+        .iter()
+        .any(|candidate| *candidate == exe_lower)
 }
 
 pub fn is_desktop_shell_class(class: &str) -> bool {
@@ -122,7 +132,10 @@ pub fn normalize_title_text(raw: &str) -> Option<String> {
         return None;
     }
     let lower = stripped.to_ascii_lowercase();
-    if PLACEHOLDER_TITLES.iter().any(|placeholder| *placeholder == lower) {
+    if PLACEHOLDER_TITLES
+        .iter()
+        .any(|placeholder| *placeholder == lower)
+    {
         return None;
     }
     Some(stripped.to_owned())
@@ -194,6 +207,87 @@ fn strip_profile_browser_suffix(title: &str, browser_key: &str) -> Option<String
     None
 }
 
+const BROWSER_STEMS: &[&str] = &[
+    "chrome",
+    "chromium",
+    "msedge",
+    "edge",
+    "microsoft edge",
+    "firefox",
+    "brave",
+    "opera",
+    "opera gx",
+    "arc",
+    "safari",
+    "vivaldi",
+];
+
+/// Book reader. A Chromium browser shares this name; this install is the book app.
+const APP_NAME_STEMS: &[&str] = &["thorium"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkSubject {
+    pub by_title: bool,
+    pub value: String,
+}
+
+pub fn mark_subject(app_name: &str, process_path: &str, window_title: Option<&str>) -> MarkSubject {
+    let title = window_title.and_then(normalize_title_text);
+    if !is_app_name_process(app_name, process_path) && is_browser_process(app_name, process_path) {
+        if let Some(title) = title {
+            return MarkSubject {
+                by_title: true,
+                value: title,
+            };
+        }
+    }
+    MarkSubject {
+        by_title: false,
+        value: display_app_name(app_name, process_path),
+    }
+}
+
+fn is_app_name_process(app_name: &str, process_path: &str) -> bool {
+    is_app_name_stem(&exe_stem_lower(app_name)) || is_app_name_stem(&exe_stem_lower(process_path))
+}
+
+fn is_app_name_stem(stem: &str) -> bool {
+    APP_NAME_STEMS.contains(&stem)
+}
+
+fn is_browser_process(app_name: &str, process_path: &str) -> bool {
+    is_browser_stem(&exe_stem_lower(app_name)) || is_browser_stem(&exe_stem_lower(process_path))
+}
+
+fn is_browser_stem(stem: &str) -> bool {
+    BROWSER_STEMS.iter().any(|browser| {
+        stem == *browser || stem.ends_with(&format!(" {browser}"))
+    })
+}
+
+fn display_app_name(app_name: &str, process_path: &str) -> String {
+    let source = if app_name.trim().is_empty() {
+        process_path
+    } else {
+        app_name
+    };
+    match exe_stem_lower(source).as_str() {
+        "cmd" | "powershell" | "pwsh" | "windowsterminal" | "wt" | "conhost" | "openconsole" => {
+            "Terminal".to_string()
+        }
+        _ => {
+            let trimmed = source.trim();
+            if trimmed.is_empty() {
+                "App".to_string()
+            } else if trimmed.contains('\\') || trimmed.contains('/') {
+                app_name_from_process_path(trimmed, "")
+            } else {
+                trimmed.to_string()
+            }
+        }
+    }
+}
+
 pub fn app_name_from_process_path(path: &str, fallback_class: &str) -> String {
     let trimmed = path.trim();
     if !trimmed.is_empty() {
@@ -259,10 +353,7 @@ mod tests {
             Some("Docs".to_string())
         );
         assert_eq!(
-            normalize_title_for_browser(
-                "msedge.exe",
-                "Inbox - Profile 1 - Microsoft Edge",
-            ),
+            normalize_title_for_browser("msedge.exe", "Inbox - Profile 1 - Microsoft Edge",),
             Some("Inbox".to_string())
         );
     }
@@ -297,7 +388,10 @@ mod tests {
             window_class: "Windows.UI.Core.CoreWindow".to_string(),
             window_title: String::new(),
         };
-        assert_eq!(classify_foreground_surface(&lock), ForegroundDisposition::NoSample);
+        assert_eq!(
+            classify_foreground_surface(&lock),
+            ForegroundDisposition::NoSample
+        );
     }
 
     #[test]
@@ -311,9 +405,33 @@ mod tests {
             app_name_from_process_path("", "TaskManagerWindow"),
             "TaskManagerWindow"
         );
-        assert_eq!(
-            app_name_from_process_path("", ""),
-            "unknown-window"
+        assert_eq!(app_name_from_process_path("", ""), "unknown-window");
+    }
+
+    #[test]
+    fn thorium_book_app_uses_its_name_and_browsers_use_the_tab() {
+        let book = mark_subject(
+            "Thorium",
+            r"C:\Program Files\Thorium\Thorium.exe",
+            Some("Thorium - Bog Standard Isekai: Benighted"),
         );
+        assert!(!book.by_title);
+        assert_eq!(book.value, "Thorium");
+
+        let tab = mark_subject(
+            "chrome",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            Some("YouTube"),
+        );
+        assert!(tab.by_title);
+        assert_eq!(tab.value, "YouTube");
+
+        let shell = mark_subject(
+            "cmd",
+            r"C:\WINDOWS\system32\cmd.exe",
+            Some(r"C:\WINDOWS\system32\cmd.exe"),
+        );
+        assert!(!shell.by_title);
+        assert_eq!(shell.value, "Terminal");
     }
 }

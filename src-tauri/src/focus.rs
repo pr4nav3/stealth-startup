@@ -1,4 +1,4 @@
-use crate::activity::{ActivitySample, should_treat_as_neutral};
+use crate::activity::{should_treat_as_neutral, ActivitySample};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -446,7 +446,9 @@ mod tests {
             captured_at: "2026-08-12T00:00:00Z".to_string(),
             platform: "windows",
             app_name: "SearchHost".to_string(),
-            process_path: "C:\\Windows\\SystemApps\\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\\SearchHost.exe".to_string(),
+            process_path:
+                "C:\\Windows\\SystemApps\\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\\SearchHost.exe"
+                    .to_string(),
             process_id: 42,
             window_title: Some("Search".to_string()),
             window_id: "window-1".to_string(),

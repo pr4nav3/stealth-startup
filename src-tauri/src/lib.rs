@@ -12,10 +12,10 @@ use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
-use storage::{SessionReport, SessionStorage, TrendsData};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use storage::{SessionReport, SessionStorage, StoredPhraseLibrary, TrendsData};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -25,8 +25,8 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const OVERLAY_WINDOW_LABEL: &str = "overlay";
-const OVERLAY_WIDTH: f64 = 312.0;
-const OVERLAY_HEIGHT: f64 = 286.0;
+const OVERLAY_WIDTH: f64 = 228.0;
+const OVERLAY_HEIGHT: f64 = 214.0;
 const OVERLAY_MARGIN: i32 = 18;
 
 struct AppState {
@@ -114,6 +114,15 @@ fn snooze_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String>
 }
 
 #[tauri::command]
+fn clear_snooze(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+
+    Ok(sessions.clear_snooze(now, Some(&*storage)))
+}
+
+#[tauri::command]
 fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
@@ -141,6 +150,17 @@ fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapsho
     let storage = lock_storage(&state)?;
 
     sessions.mark_current(focus::RuleClassification::Distracting, now, Some(&*storage))
+}
+
+#[tauri::command]
+fn update_session_rules(
+    rules: Vec<focus::AppRule>,
+    state: State<'_, AppState>,
+) -> Result<SessionSnapshot, String> {
+    let now = state.started_at.elapsed();
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    sessions.update_current_rules(rules, now, Some(&*storage))
 }
 
 #[tauri::command]
@@ -188,6 +208,34 @@ fn scrub_span_context(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<SessionSettings, String> {
     Ok(lock_sessions(&state)?.settings())
+}
+
+#[tauri::command]
+fn get_rules(state: State<'_, AppState>) -> Result<Vec<focus::AppRule>, String> {
+    Ok(lock_sessions(&state)?.rules())
+}
+
+#[tauri::command]
+fn update_rules(
+    rules: Vec<focus::AppRule>,
+    state: State<'_, AppState>,
+) -> Result<Vec<focus::AppRule>, String> {
+    let mut sessions = lock_sessions(&state)?;
+    let storage = lock_storage(&state)?;
+    sessions.update_rules(rules, Some(&*storage))
+}
+
+#[tauri::command]
+fn get_phrase_library(state: State<'_, AppState>) -> Result<StoredPhraseLibrary, String> {
+    lock_storage(&state)?.load_phrase_library()
+}
+
+#[tauri::command]
+fn update_phrase_library(
+    library: StoredPhraseLibrary,
+    state: State<'_, AppState>,
+) -> Result<StoredPhraseLibrary, String> {
+    lock_storage(&state)?.save_phrase_library(library)
 }
 
 #[tauri::command]
@@ -449,8 +497,7 @@ fn open_storage_for_app(app: &tauri::App) -> SessionStorage {
         Ok(path) => path,
         Err(error) => {
             eprintln!("supervisor storage: app data path: {error}");
-            return SessionStorage::open_in_memory()
-                .expect("in-memory session database must open");
+            return SessionStorage::open_in_memory().expect("in-memory session database must open");
         }
     };
     match SessionStorage::open(&path) {
@@ -467,21 +514,15 @@ fn init_app_storage_and_sessions(app: &tauri::App) -> (SessionStorage, SessionMa
     match bootstrap_sessions_from_storage(disk) {
         Ok(pair) => pair,
         Err(error) => {
-            eprintln!(
-                "supervisor storage: bootstrap failed, using in-memory database: {error}"
-            );
-            let storage = SessionStorage::open_in_memory()
-                .expect("in-memory session database must open");
-            bootstrap_sessions_from_storage(storage)
-                .unwrap_or_else(|fallback_error| {
-                    eprintln!("supervisor storage: in-memory bootstrap: {fallback_error}");
-                    let storage = SessionStorage::open_in_memory()
-                        .expect("in-memory session database must open");
-                    (
-                        storage,
-                        SessionManager::default(),
-                    )
-                })
+            eprintln!("supervisor storage: bootstrap failed, using in-memory database: {error}");
+            let storage =
+                SessionStorage::open_in_memory().expect("in-memory session database must open");
+            bootstrap_sessions_from_storage(storage).unwrap_or_else(|fallback_error| {
+                eprintln!("supervisor storage: in-memory bootstrap: {fallback_error}");
+                let storage =
+                    SessionStorage::open_in_memory().expect("in-memory session database must open");
+                (storage, SessionManager::default())
+            })
         }
     }
 }
@@ -503,6 +544,7 @@ pub fn run() {
             });
 
             setup_status_window(app)?;
+            apply_window_icons(app);
             setup_tray(app)?;
             start_session_ticker(app.handle().clone());
             Ok(())
@@ -515,9 +557,11 @@ pub fn run() {
             pause_session,
             resume_session,
             snooze_session,
+            clear_snooze,
             stop_session,
             mark_current_relevant,
             mark_current_distracting,
+            update_session_rules,
             get_history,
             get_session_report,
             get_trends,
@@ -525,10 +569,15 @@ pub fn run() {
             delete_all_history,
             scrub_span_context,
             get_settings,
+            get_rules,
+            update_rules,
+            get_phrase_library,
+            update_phrase_library,
             update_settings,
             show_status_window,
             set_status_window_enabled,
             set_status_window_on_top,
+            set_status_window_size,
             get_voice_backend_status,
             download_voice_cloning_model,
             start_voice_model_download,
@@ -575,6 +624,17 @@ fn setup_status_window(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn apply_window_icons(app: &tauri::App) {
+    let Some(icon) = app.default_window_icon() else {
+        return;
+    };
+    for label in [MAIN_WINDOW_LABEL, OVERLAY_WINDOW_LABEL] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.set_icon(icon.clone());
+        }
+    }
+}
+
 fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Supervisor", true, None::<&str>)?;
     let show_status =
@@ -616,11 +676,9 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let _ = set_status_window_on_top_internal(app, true);
                 let _ = show_status_window_internal(app);
             }
-            "pause_resume" => {
-                with_sessions(app, |sessions, now, storage| {
-                    sessions.toggle_pause(now, Some(storage));
-                })
-            }
+            "pause_resume" => with_sessions(app, |sessions, now, storage| {
+                sessions.toggle_pause(now, Some(storage));
+            }),
             "snooze" => with_sessions(app, |sessions, now, storage| {
                 sessions.snooze(now, 5 * 60, Some(storage));
             }),
@@ -702,7 +760,43 @@ fn hide_status_window(app: &AppHandle) {
     }
 }
 
+#[tauri::command]
+fn set_status_window_size(
+    width: f64,
+    height: f64,
+    center: bool,
+    app: AppHandle,
+) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
+        return Ok(());
+    };
+    let width = width.clamp(200.0, 800.0);
+    let height = height.clamp(120.0, 960.0);
+    window
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|error| error.to_string())?;
+    if center {
+        let _ = window.set_always_on_top(true);
+    } else if let Some(state) = app.try_state::<AppState>() {
+        let pin = state
+            .sessions
+            .lock()
+            .map(|sessions| sessions.status_window_on_top())
+            .unwrap_or(true);
+        let _ = window.set_always_on_top(pin);
+    }
+    place_status_window(&app, Some((width, height)), center)
+}
+
 fn position_status_window(app: &AppHandle) -> Result<(), String> {
+    place_status_window(app, None, false)
+}
+
+fn place_status_window(
+    app: &AppHandle,
+    logical: Option<(f64, f64)>,
+    center: bool,
+) -> Result<(), String> {
     let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
         return Ok(());
     };
@@ -722,11 +816,24 @@ fn position_status_window(app: &AppHandle) -> Result<(), String> {
         (OVERLAY_WIDTH * scale).round() as u32,
         (OVERLAY_HEIGHT * scale).round() as u32,
     );
-    let size = window.outer_size().unwrap_or(fallback_size);
+    let size = if let Some((width, height)) = logical {
+        tauri::PhysicalSize::new(
+            (width * scale).round() as u32,
+            (height * scale).round() as u32,
+        )
+    } else {
+        window.outer_size().unwrap_or(fallback_size)
+    };
     let min_x = area.position.x + margin;
     let max_x = area.position.x + area.size.width as i32 - size.width as i32 - margin;
-    let x = max_x.max(min_x);
-    let y = area.position.y + margin;
+    let (x, y) = if center {
+        (
+            area.position.x + (area.size.width as i32 - size.width as i32) / 2,
+            area.position.y + (area.size.height as i32 - size.height as i32) / 2,
+        )
+    } else {
+        (max_x.max(min_x), area.position.y + margin)
+    };
 
     window
         .set_position(tauri::PhysicalPosition::new(x, y))

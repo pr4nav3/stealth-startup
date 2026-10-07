@@ -8,6 +8,8 @@ use activity_normalize::{
     classify_foreground_surface, idle_elapsed_seconds, is_neutral_window_class,
     normalize_title_text, ForegroundDisposition, RawForegroundIdentity,
 };
+
+pub use activity_normalize::mark_subject;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::Serialize;
 #[cfg(not(target_os = "windows"))]
@@ -220,7 +222,9 @@ fn idle_seconds() -> Option<f64> {
 
     let seconds =
         unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, ANY_INPUT_EVENT) };
-    seconds.is_finite().then(|| activity_normalize::round_seconds(seconds))
+    seconds
+        .is_finite()
+        .then(|| activity_normalize::round_seconds(seconds))
 }
 
 #[cfg(target_os = "windows")]
@@ -235,10 +239,9 @@ fn idle_seconds() -> Option<f64> {
         return None;
     }
 
-    Some(idle_elapsed_seconds(
-        input.dw_time,
-        unsafe { GetTickCount() },
-    ))
+    Some(idle_elapsed_seconds(input.dw_time, unsafe {
+        GetTickCount()
+    }))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

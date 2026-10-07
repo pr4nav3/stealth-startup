@@ -1,10 +1,12 @@
 use crate::focus::{starter_rules, AppRule, RuleClassification, RuleTarget};
 use crate::session::{SessionSettings, SessionSummary, Strictness};
-use rusqlite::{params, Connection};
-use serde::Serialize;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const SCHEMA_VERSION: i32 = 1;
+const BLOCK_SUGGESTIONS_KEY: &str = "preflight.block_suggestions";
+const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
 
 const WEBCAM_SETTING_KEYS: &[&str] = &[
     "webcam.enabled",
@@ -20,6 +22,21 @@ pub struct SessionStorage {
 pub struct StoredRule {
     pub rule: AppRule,
     pub source: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StoredPhraseLibrary {
+    pub custom_tones: Vec<String>,
+    pub custom_phrases: Vec<StoredPhrase>,
+    pub phrase_overrides: Vec<StoredPhrase>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StoredPhrase {
+    pub id: String,
+    pub tone: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -218,7 +235,9 @@ impl SessionStorage {
     pub fn next_session_id(&self) -> Result<u64, String> {
         let value: i64 = self
             .conn
-            .query_row("SELECT COALESCE(MAX(id), 0) FROM session", [], |row| row.get(0))
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM session", [], |row| {
+                row.get(0)
+            })
             .map_err(|error| error.to_string())?;
         Ok((value + 1) as u64)
     }
@@ -230,7 +249,9 @@ impl SessionStorage {
             .prepare("SELECT key, value FROM setting")
             .map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| error.to_string())?;
         for row in rows {
             let (key, value) = row.map_err(|error| error.to_string())?;
@@ -256,7 +277,10 @@ impl SessionStorage {
     }
 
     pub fn save_settings(&self, settings: &SessionSettings) -> Result<(), String> {
-        self.set_setting("default_strictness", strictness_key(settings.default_strictness))?;
+        self.set_setting(
+            "default_strictness",
+            strictness_key(settings.default_strictness),
+        )?;
         self.set_setting("voice_profile", &settings.voice_profile)?;
         self.set_setting(
             "status_window_enabled",
@@ -320,7 +344,10 @@ impl SessionStorage {
     }
 
     pub fn replace_rules(&self, rules: &[AppRule]) -> Result<(), String> {
-        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM rule", [])
             .map_err(|error| error.to_string())?;
         for rule in rules {
@@ -338,6 +365,60 @@ impl SessionStorage {
         }
         tx.commit().map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    pub fn load_block_suggestions(&self) -> Result<Vec<String>, String> {
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT value FROM setting WHERE key = ?1",
+                [BLOCK_SUGGESTIONS_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let suggestions = match raw {
+            Some(value) => {
+                serde_json::from_str::<Vec<String>>(&value).map_err(|error| error.to_string())?
+            }
+            None => Vec::new(),
+        };
+        Ok(clean_block_suggestions(&suggestions))
+    }
+
+    pub fn save_block_suggestions(&self, suggestions: &[String]) -> Result<Vec<String>, String> {
+        let suggestions = clean_block_suggestions(suggestions);
+        let value = serde_json::to_string(&suggestions).map_err(|error| error.to_string())?;
+        self.set_setting(BLOCK_SUGGESTIONS_KEY, &value)?;
+        Ok(suggestions)
+    }
+
+    pub fn load_phrase_library(&self) -> Result<StoredPhraseLibrary, String> {
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT value FROM setting WHERE key = ?1",
+                [PHRASE_LIBRARY_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let library = match raw {
+            Some(value) => serde_json::from_str::<StoredPhraseLibrary>(&value)
+                .map_err(|error| error.to_string())?,
+            None => StoredPhraseLibrary::default(),
+        };
+        Ok(clean_phrase_library(library))
+    }
+
+    pub fn save_phrase_library(
+        &self,
+        library: StoredPhraseLibrary,
+    ) -> Result<StoredPhraseLibrary, String> {
+        let library = clean_phrase_library(library);
+        let value = serde_json::to_string(&library).map_err(|error| error.to_string())?;
+        self.set_setting(PHRASE_LIBRARY_KEY, &value)?;
+        Ok(library)
     }
 
     pub fn insert_session(
@@ -364,12 +445,7 @@ impl SessionStorage {
         Ok(())
     }
 
-    pub fn close_session(
-        &self,
-        id: u64,
-        ended_at: &str,
-        ended_reason: &str,
-    ) -> Result<(), String> {
+    pub fn close_session(&self, id: u64, ended_at: &str, ended_reason: &str) -> Result<(), String> {
         self.conn
             .execute(
                 "UPDATE session SET ended_at = ?1, ended_reason = ?2 WHERE id = ?3",
@@ -470,10 +546,7 @@ impl SessionStorage {
             }
         }
 
-        let nudge_count = events
-            .iter()
-            .filter(|event| event.kind == "nudge")
-            .count() as u64;
+        let nudge_count = events.iter().filter(|event| event.kind == "nudge").count() as u64;
 
         let drift_count = count_drifts(&spans);
         let stretches = focused_stretches(&spans);
@@ -528,16 +601,34 @@ impl SessionStorage {
                 let distracted_seconds: i64 = row.get(5)?;
                 let idle_seconds: i64 = row.get(6)?;
                 let nudges: i64 = row.get(7)?;
-                Ok((id, goal, started_at, planned_seconds, focused_seconds, distracted_seconds, idle_seconds, nudges))
+                Ok((
+                    id,
+                    goal,
+                    started_at,
+                    planned_seconds,
+                    focused_seconds,
+                    distracted_seconds,
+                    idle_seconds,
+                    nudges,
+                ))
             })
             .map_err(|error| error.to_string())?;
 
         let mut summaries = Vec::new();
         for row in rows {
-            let (id, goal, started_at, planned_seconds, focused_seconds, distracted_seconds, idle_seconds, nudges) =
-                row.map_err(|error| error.to_string())?;
+            let (
+                id,
+                goal,
+                started_at,
+                planned_seconds,
+                focused_seconds,
+                distracted_seconds,
+                idle_seconds,
+                nudges,
+            ) = row.map_err(|error| error.to_string())?;
             let top_hints = self.top_hints_for_session(id as u64)?;
-            let duration_seconds = self.session_duration_seconds(id as u64, planned_seconds as u64)?;
+            let duration_seconds =
+                self.session_duration_seconds(id as u64, planned_seconds as u64)?;
             summaries.push(SessionSummary {
                 id: id as u64,
                 goal,
@@ -553,7 +644,11 @@ impl SessionStorage {
         Ok(summaries)
     }
 
-    fn session_duration_seconds(&self, session_id: u64, planned_seconds: u64) -> Result<u64, String> {
+    fn session_duration_seconds(
+        &self,
+        session_id: u64,
+        planned_seconds: u64,
+    ) -> Result<u64, String> {
         let span_total: i64 = self
             .conn
             .query_row(
@@ -856,7 +951,9 @@ pub fn span_category(
     }
 
     let app_lower = app.to_lowercase();
-    let context_lower = context.map(|value| value.to_lowercase()).unwrap_or_default();
+    let context_lower = context
+        .map(|value| value.to_lowercase())
+        .unwrap_or_default();
     let combined = format!("{app_lower} {context_lower}");
 
     if is_media_signal(&combined) {
@@ -913,15 +1010,7 @@ fn is_media_signal(combined: &str) -> bool {
 
 fn is_comms_app(app_lower: &str) -> bool {
     const MARKERS: &[&str] = &[
-        "slack",
-        "discord",
-        "teams",
-        "zoom",
-        "outlook",
-        "mail",
-        "messages",
-        "telegram",
-        "whatsapp",
+        "slack", "discord", "teams", "zoom", "outlook", "mail", "messages", "telegram", "whatsapp",
     ];
     MARKERS.iter().any(|marker| app_lower.contains(marker))
 }
@@ -948,13 +1037,7 @@ fn is_work_app(app_lower: &str) -> bool {
 
 fn is_browser_app(app_lower: &str) -> bool {
     const MARKERS: &[&str] = &[
-        "chrome",
-        "firefox",
-        "edge",
-        "brave",
-        "safari",
-        "opera",
-        "arc",
+        "chrome", "firefox", "edge", "brave", "safari", "opera", "arc",
     ];
     MARKERS.iter().any(|marker| app_lower.contains(marker))
 }
@@ -1026,7 +1109,11 @@ fn category_totals_from_spans(spans: &[ReportSpan]) -> Vec<CategoryTotal> {
         .into_iter()
         .map(|(category, seconds)| CategoryTotal { category, seconds })
         .collect();
-    rows.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.category.cmp(&b.category)));
+    rows.sort_by(|a, b| {
+        b.seconds
+            .cmp(&a.seconds)
+            .then_with(|| a.category.cmp(&b.category))
+    });
     rows
 }
 
@@ -1113,6 +1200,60 @@ fn rule_source_label(rule: &AppRule) -> &'static str {
     }
 }
 
+fn clean_block_suggestions(suggestions: &[String]) -> Vec<String> {
+    let mut cleaned = Vec::new();
+    for suggestion in suggestions {
+        let value: String = suggestion.trim().chars().take(160).collect();
+        if !value.is_empty()
+            && !cleaned
+                .iter()
+                .any(|item: &String| item.eq_ignore_ascii_case(&value))
+        {
+            cleaned.push(value);
+        }
+        if cleaned.len() == 100 {
+            break;
+        }
+    }
+    cleaned
+}
+
+fn clean_phrase_library(library: StoredPhraseLibrary) -> StoredPhraseLibrary {
+    StoredPhraseLibrary {
+        custom_tones: clean_block_suggestions(&library.custom_tones),
+        custom_phrases: clean_stored_phrases(library.custom_phrases),
+        phrase_overrides: clean_stored_phrases(library.phrase_overrides),
+    }
+}
+
+fn clean_stored_phrases(phrases: Vec<StoredPhrase>) -> Vec<StoredPhrase> {
+    let mut cleaned = Vec::new();
+    for phrase in phrases {
+        let id: String = phrase
+            .id
+            .trim()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            .take(80)
+            .collect();
+        let tone: String = phrase.tone.trim().chars().take(80).collect();
+        let text: String = phrase.text.trim().chars().take(140).collect();
+        if !id.is_empty()
+            && !tone.is_empty()
+            && !text.is_empty()
+            && !cleaned
+                .iter()
+                .any(|item: &StoredPhrase| item.id.eq_ignore_ascii_case(&id))
+        {
+            cleaned.push(StoredPhrase { id, tone, text });
+        }
+        if cleaned.len() == 100 {
+            break;
+        }
+    }
+    cleaned
+}
+
 fn utc_now_rfc3339() -> Result<String, String> {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -1157,7 +1298,13 @@ mod tests {
     fn recompute_session_metrics_matches_fixture() {
         let storage = SessionStorage::open_in_memory().expect("open db");
         storage
-            .insert_session(1, "Ship storage", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
+            .insert_session(
+                1,
+                "Ship storage",
+                Strictness::Normal,
+                "2026-09-22T12:00:00Z",
+                3600,
+            )
             .expect("insert session");
         for span in fixture_spans() {
             storage
@@ -1191,17 +1338,21 @@ mod tests {
 
     #[test]
     fn metrics_survive_close_and_reopen() {
-        let dir = std::env::temp_dir().join(format!(
-            "supervisor-storage-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("supervisor-storage-test-{}", std::process::id()));
         let path = dir.join("sessions.db");
         let _ = std::fs::remove_dir_all(&dir);
 
         {
             let storage = SessionStorage::open(&path).expect("open db");
             storage
-                .insert_session(1, "Persist", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
+                .insert_session(
+                    1,
+                    "Persist",
+                    Strictness::Normal,
+                    "2026-09-22T12:00:00Z",
+                    600,
+                )
                 .expect("insert session");
             for span in fixture_spans() {
                 storage
@@ -1235,15 +1386,7 @@ mod tests {
             .insert_session(7, "Crash", Strictness::Strict, "2026-09-22T08:00:00Z", 1500)
             .expect("insert session");
         storage
-            .insert_span(
-                7,
-                "Code",
-                Some("lib.rs"),
-                "work",
-                "focused",
-                0,
-                90,
-            )
+            .insert_span(7, "Code", Some("lib.rs"), "work", "focused", 0, 90)
             .expect("insert span");
 
         storage.recover_orphans().expect("recover");
@@ -1257,7 +1400,12 @@ mod tests {
     #[test]
     fn span_category_mapping_is_deterministic() {
         assert_eq!(
-            span_category("Code", Some("main.rs"), "focused", RuleClassification::Focused),
+            span_category(
+                "Code",
+                Some("main.rs"),
+                "focused",
+                RuleClassification::Focused
+            ),
             "work"
         );
         assert_eq!(
@@ -1296,6 +1444,42 @@ mod tests {
         storage.replace_rules(&rules).expect("save rules");
         let loaded_rules = storage.load_rules().expect("load rules");
         assert_eq!(loaded_rules, rules);
+
+        let suggestions = vec![
+            " Discord ".to_string(),
+            "discord".to_string(),
+            "news.example".to_string(),
+        ];
+        let saved = storage
+            .save_block_suggestions(&suggestions)
+            .expect("save block suggestions");
+        assert_eq!(saved, vec!["Discord", "news.example"]);
+        assert_eq!(
+            storage
+                .load_block_suggestions()
+                .expect("load block suggestions"),
+            saved
+        );
+
+        let library = StoredPhraseLibrary {
+            custom_tones: vec!["Coach".to_string()],
+            custom_phrases: vec![StoredPhrase {
+                id: "custom_coach_reset".to_string(),
+                tone: "Coach".to_string(),
+                text: "Back to the next step.".to_string(),
+            }],
+            phrase_overrides: Vec::new(),
+        };
+        let saved_library = storage
+            .save_phrase_library(library)
+            .expect("save phrase library");
+        let loaded_library = storage.load_phrase_library().expect("load phrase library");
+        assert_eq!(loaded_library.custom_tones, vec!["Coach"]);
+        assert_eq!(loaded_library.custom_phrases.len(), 1);
+        assert_eq!(
+            loaded_library.custom_phrases[0].tone,
+            saved_library.custom_phrases[0].tone
+        );
     }
 
     #[test]

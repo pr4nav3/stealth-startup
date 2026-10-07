@@ -2006,7 +2006,11 @@ struct ProcessMemoryCountersEx {
 #[link(name = "Kernel32")]
 unsafe extern "system" {
     fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
-    fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+    fn OpenProcess(
+        desired_access: u32,
+        inherit_handle: i32,
+        process_id: u32,
+    ) -> *mut std::ffi::c_void;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn K32GetProcessMemoryInfo(
         process: *mut std::ffi::c_void,
@@ -2139,10 +2143,7 @@ mod tests {
     #[test]
     fn generation_ram_gate_uses_free_ram_and_measured_peak() {
         assert_eq!(required_free_ram_bytes(None), DEFAULT_MIN_FREE_RAM_BYTES);
-        assert_eq!(
-            required_free_ram_bytes(Some(5 * GIBIBYTE)),
-            6 * GIBIBYTE
-        );
+        assert_eq!(required_free_ram_bytes(Some(5 * GIBIBYTE)), 6 * GIBIBYTE);
         assert_eq!(
             required_free_ram_bytes(Some(2 * GIBIBYTE)),
             MIN_FREE_RAM_AFTER_MEASURE_BYTES
