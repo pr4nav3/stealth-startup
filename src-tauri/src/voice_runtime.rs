@@ -16,6 +16,7 @@ pub const WORKER_API_VERSION: u32 = 1;
 const RUNTIME_DIR: &str = "runtime";
 const CURRENT_DIR: &str = "current";
 const STAGING_DIR: &str = "staging";
+const PREVIOUS_DIR: &str = "previous";
 const INSTALL_FILE: &str = "install.json";
 const DOWNLOAD_FILE: &str = "runtime.download.zip";
 const DOWNLOAD_CANCELLED: &str = "download cancelled";
@@ -154,81 +155,36 @@ pub fn install_runtime(
     }
 
     let manifest = fetch_manifest()?;
-    if manifest.worker_api != WORKER_API_VERSION {
-        return Err(format!(
-            "voice runtime manifest API {} is not supported by this app",
-            manifest.worker_api
-        ));
-    }
-
     let target = runtime_target();
-    let asset = manifest
-        .runtimes
-        .iter()
-        .find(|runtime| runtime.target == target)
-        .ok_or_else(|| format!("no voice runtime is published for {target}"))?
-        .clone();
+    let asset = select_runtime_asset(&manifest, &target)?;
 
     fs::create_dir_all(runtime_root(root)).map_err(|error| error.to_string())?;
     let archive_path = runtime_root(root).join(DOWNLOAD_FILE);
-    download_asset(&asset, &archive_path, Arc::clone(&cancel), |downloaded| {
+    let download = download_asset(&asset, &archive_path, Arc::clone(&cancel), |downloaded| {
         progress(VoiceRuntimeDownloadProgress {
             downloaded_bytes: downloaded,
             total_bytes: asset.bytes,
             current_file: Some(format!("voice runtime {}", asset.target)),
         });
-    })?;
+    });
+    if let Err(error) = download {
+        let _ = fs::remove_file(&archive_path);
+        return Err(error);
+    }
 
     if cancel.load(Ordering::SeqCst) {
         let _ = fs::remove_file(&archive_path);
         return Err(DOWNLOAD_CANCELLED.to_string());
     }
 
-    let hash = sha256_file(&archive_path)?;
-    if hash != asset.sha256 {
-        let _ = fs::remove_file(&archive_path);
-        return Err("downloaded voice runtime checksum mismatch".to_string());
-    }
-    if cancel.load(Ordering::SeqCst) {
-        let _ = fs::remove_file(&archive_path);
-        return Err(DOWNLOAD_CANCELLED.to_string());
-    }
-
-    let staging = runtime_root(root).join(STAGING_DIR);
-    let current = current_runtime_dir(root);
-    if staging.exists() {
-        fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
-    }
-    fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
-    extract_zip(&archive_path, &staging)?;
-    if cancel.load(Ordering::SeqCst) {
-        let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_file(&archive_path);
-        return Err(DOWNLOAD_CANCELLED.to_string());
-    }
-
-    let executable = asset.executable.unwrap_or_else(default_executable);
-    let executable_path = staging.join(&executable);
-    if !executable_path.is_file() {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!("voice runtime is missing executable: {executable}"));
-    }
-    make_executable(&executable_path)?;
-
-    if current.exists() {
-        fs::remove_dir_all(&current).map_err(|error| error.to_string())?;
-    }
-    fs::rename(&staging, &current).map_err(|error| error.to_string())?;
-    let install = RuntimeInstall {
-        version: manifest.version,
-        target,
-        worker_api: WORKER_API_VERSION,
-        executable,
-        archive_sha256: asset.sha256,
-        archive_bytes: asset.bytes,
-    };
-    write_json(&runtime_root(root).join(INSTALL_FILE), &install)?;
-    let _ = fs::remove_file(&archive_path);
+    install_archive(
+        root,
+        &archive_path,
+        &manifest.version,
+        &target,
+        &asset,
+        &cancel,
+    )?;
 
     Ok(status(root))
 }
@@ -284,6 +240,54 @@ fn fetch_manifest() -> Result<VoicePackManifest, String> {
     serde_json::from_str::<VoicePackManifest>(&body).map_err(|error| error.to_string())
 }
 
+fn select_runtime_asset(
+    manifest: &VoicePackManifest,
+    target: &str,
+) -> Result<RuntimeAsset, String> {
+    if manifest.worker_api != WORKER_API_VERSION {
+        return Err(format!(
+            "voice runtime manifest API {} is not supported by this app",
+            manifest.worker_api
+        ));
+    }
+
+    let mut matches = manifest
+        .runtimes
+        .iter()
+        .filter(|runtime| runtime.target == target);
+    let asset = matches
+        .next()
+        .ok_or_else(|| format!("no voice runtime is published for {target}"))?;
+    if matches.next().is_some() {
+        return Err(format!(
+            "voice runtime manifest contains duplicate target {target}"
+        ));
+    }
+    if asset.bytes == 0 {
+        return Err(format!("voice runtime {target} has an invalid byte count"));
+    }
+    if asset.sha256.len() != 64 || !asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("voice runtime {target} has an invalid checksum"));
+    }
+    if !asset.url.starts_with("https://") {
+        return Err(format!("voice runtime {target} must use HTTPS"));
+    }
+    let executable = asset.executable.as_deref().unwrap_or_else(|| {
+        if target.starts_with("windows-") {
+            "supervisor-voice-worker.exe"
+        } else {
+            "supervisor-voice-worker"
+        }
+    });
+    if safe_relative_path(executable).is_none() {
+        return Err(format!(
+            "voice runtime {target} has an unsafe executable path"
+        ));
+    }
+
+    Ok(asset.clone())
+}
+
 fn manifest_url() -> Option<String> {
     std::env::var("SUPERVISOR_VOICE_PACK_MANIFEST_URL")
         .ok()
@@ -293,6 +297,115 @@ fn manifest_url() -> Option<String> {
                 .map(str::to_string)
                 .filter(|url| !url.trim().is_empty())
         })
+}
+
+fn install_archive(
+    root: &Path,
+    archive_path: &Path,
+    version: &str,
+    target: &str,
+    asset: &RuntimeAsset,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let staging = runtime_root(root).join(STAGING_DIR);
+    let result = (|| {
+        let bytes = fs::metadata(archive_path)
+            .map_err(|error| error.to_string())?
+            .len();
+        if bytes != asset.bytes {
+            return Err(format!(
+                "downloaded wrong voice runtime byte count: expected {}, got {}",
+                asset.bytes, bytes
+            ));
+        }
+        if sha256_file(archive_path)? != asset.sha256 {
+            return Err("downloaded voice runtime checksum mismatch".to_string());
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(DOWNLOAD_CANCELLED.to_string());
+        }
+
+        if staging.exists() {
+            fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
+        }
+        fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+        if let Err(error) = extract_zip(archive_path, &staging) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        if cancel.load(Ordering::SeqCst) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(DOWNLOAD_CANCELLED.to_string());
+        }
+
+        let executable = asset.executable.clone().unwrap_or_else(default_executable);
+        let executable_path = staging.join(&executable);
+        if !executable_path.is_file() {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("voice runtime is missing executable: {executable}"));
+        }
+        make_executable(&executable_path)?;
+
+        let had_previous = replace_runtime_dir(root, &staging)?;
+        if let Err(error) = write_json(
+            &runtime_root(root).join(INSTALL_FILE),
+            &RuntimeInstall {
+                version: version.to_string(),
+                target: target.to_string(),
+                worker_api: WORKER_API_VERSION,
+                executable,
+                archive_sha256: asset.sha256.clone(),
+                archive_bytes: asset.bytes,
+            },
+        ) {
+            restore_previous_runtime(root, had_previous);
+            return Err(error);
+        }
+        remove_previous_runtime(root);
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    let _ = fs::remove_file(archive_path);
+    result
+}
+
+fn replace_runtime_dir(root: &Path, staging: &Path) -> Result<bool, String> {
+    let current = current_runtime_dir(root);
+    let previous = runtime_root(root).join(PREVIOUS_DIR);
+    if previous.exists() {
+        fs::remove_dir_all(&previous).map_err(|error| error.to_string())?;
+    }
+    let had_previous = current.exists();
+    if had_previous {
+        fs::rename(&current, &previous).map_err(|error| error.to_string())?;
+    }
+
+    if let Err(error) = fs::rename(staging, &current) {
+        if previous.exists() {
+            let _ = fs::rename(&previous, &current);
+        }
+        return Err(error.to_string());
+    }
+    Ok(had_previous)
+}
+
+fn restore_previous_runtime(root: &Path, had_previous: bool) {
+    let current = current_runtime_dir(root);
+    let previous = runtime_root(root).join(PREVIOUS_DIR);
+    let _ = fs::remove_dir_all(&current);
+    if had_previous {
+        let _ = fs::rename(previous, current);
+    }
+}
+
+fn remove_previous_runtime(root: &Path) {
+    let previous = runtime_root(root).join(PREVIOUS_DIR);
+    if previous.exists() {
+        let _ = fs::remove_dir_all(previous);
+    }
 }
 
 fn download_asset(
@@ -602,6 +715,7 @@ fn dir_size(path: &Path) -> io::Result<u64> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use zip::write::SimpleFileOptions;
 
     #[test]
     fn target_uses_release_arch_names() {
@@ -619,6 +733,101 @@ mod tests {
         );
         assert!(safe_relative_path("../escape").is_none());
         assert!(safe_relative_path("/tmp/escape").is_none());
+    }
+
+    #[test]
+    fn manifest_rejects_unsafe_or_ambiguous_runtime_assets() {
+        let target = runtime_target();
+        let mut manifest = manifest_for(&target);
+        assert!(select_runtime_asset(&manifest, &target).is_ok());
+
+        manifest.runtimes.push(manifest.runtimes[0].clone());
+        assert!(select_runtime_asset(&manifest, &target)
+            .unwrap_err()
+            .contains("duplicate target"));
+
+        manifest.runtimes.pop();
+        manifest.runtimes[0].executable = Some("../worker".to_string());
+        assert!(select_runtime_asset(&manifest, &target)
+            .unwrap_err()
+            .contains("unsafe executable"));
+    }
+
+    #[test]
+    fn installs_synthetic_runtime_archive_without_launching_worker() {
+        let root = test_dir("archive-install");
+        let archive = root.join("runtime.zip");
+        fs::create_dir_all(&root).unwrap();
+        write_test_archive(&archive, &default_executable());
+        let asset = asset_for_archive(&archive);
+
+        install_archive(
+            &root,
+            &archive,
+            "test-version",
+            &runtime_target(),
+            &asset,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let (install, executable) = installed_runtime(&root).unwrap().unwrap();
+        assert_eq!(install.version, "test-version");
+        assert!(executable.is_file());
+        assert!(!archive.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_archive_does_not_replace_existing_runtime() {
+        let root = test_dir("archive-preserve");
+        let current = current_runtime_dir(&root);
+        let archive = root.join("runtime.zip");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(current.join("keep.txt"), b"keep").unwrap();
+        write_test_archive(&archive, "wrong-worker");
+        let asset = asset_for_archive(&archive);
+
+        let error = install_archive(
+            &root,
+            &archive,
+            "test-version",
+            &runtime_target(),
+            &asset,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("missing executable"));
+        assert_eq!(fs::read(current.join("keep.txt")).unwrap(), b"keep");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn metadata_write_failure_restores_existing_runtime() {
+        let root = test_dir("metadata-rollback");
+        let current = current_runtime_dir(&root);
+        let archive = root.join("runtime.zip");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(current.join("keep.txt"), b"keep").unwrap();
+        fs::create_dir(runtime_root(&root).join(INSTALL_FILE)).unwrap();
+        write_test_archive(&archive, &default_executable());
+        let asset = asset_for_archive(&archive);
+
+        assert!(install_archive(
+            &root,
+            &archive,
+            "test-version",
+            &runtime_target(),
+            &asset,
+            &AtomicBool::new(false),
+        )
+        .is_err());
+        assert_eq!(fs::read(current.join("keep.txt")).unwrap(), b"keep");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -645,6 +854,40 @@ mod tests {
     #[test]
     fn missing_dev_worker_is_not_reported_available() {
         assert!(worker_launch_from_paths(test_dir("missing").join("worker.py"), None).is_none());
+    }
+
+    fn manifest_for(target: &str) -> VoicePackManifest {
+        VoicePackManifest {
+            version: "test-version".to_string(),
+            worker_api: WORKER_API_VERSION,
+            runtimes: vec![RuntimeAsset {
+                target: target.to_string(),
+                url: "https://example.invalid/runtime.zip".to_string(),
+                sha256: "0".repeat(64),
+                bytes: 1,
+                executable: Some(default_executable()),
+            }],
+        }
+    }
+
+    fn asset_for_archive(path: &Path) -> RuntimeAsset {
+        RuntimeAsset {
+            target: runtime_target(),
+            url: "https://example.invalid/runtime.zip".to_string(),
+            sha256: sha256_file(path).unwrap(),
+            bytes: fs::metadata(path).unwrap().len(),
+            executable: Some(default_executable()),
+        }
+    }
+
+    fn write_test_archive(path: &Path, executable: &str) {
+        let file = File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(executable, SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"synthetic worker").unwrap();
+        archive.finish().unwrap();
     }
 
     #[cfg(debug_assertions)]
