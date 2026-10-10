@@ -178,6 +178,7 @@ pub struct TrendSession {
 pub struct DailyFocus {
     pub date: String,
     pub focus_percent: u64,
+    pub focus_seconds: u64,
     pub session_count: u64,
 }
 
@@ -912,6 +913,7 @@ impl SessionStorage {
             daily_focus.push(DailyFocus {
                 date,
                 focus_percent,
+                focus_seconds: focus_sum as u64,
                 session_count: session_count as u64,
             });
         }
@@ -1462,6 +1464,7 @@ mod tests {
         let trends = storage.get_trends().expect("trends");
         assert_eq!(trends.daily_focus.len(), 1);
         assert_eq!(trends.daily_focus[0].focus_percent, 83);
+        assert_eq!(trends.daily_focus[0].focus_seconds, 1500);
         assert_eq!(trends.sessions[0].focus_percent, 83);
     }
 

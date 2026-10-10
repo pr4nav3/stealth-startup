@@ -1,9 +1,10 @@
 # Webcam Tracking
 
-Last updated: 2026-09-27
+Last updated: 2026-10-07
 
-Ship this as a small, optional session feature. Bake off the detector in a
-script first, then wire it. Tracker item: `plans/STATUS.md` §7.
+The tracker runs as a Settings preview. Phone and away time are not written
+during a real session yet. That wiring, and how strictness changes a voice
+nudge, is the webcam branch in `plans/STATUS.md`.
 
 ## Signals
 
@@ -53,5 +54,5 @@ Session-only worker in Python; kill on stop.
 
 ## Out of scope
 
-Gaze-to-pixel, walked-away nudges (without a toggle), GPU, cloud models,
-frame storage, MediaPipe runtime wheels.
+Gaze-to-pixel, walked-away nudges (without a toggle), cloud models,
+frame storage, MediaPipe runtime wheels. A GPU toggle exists for the preview.

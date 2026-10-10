@@ -238,15 +238,12 @@ impl AppRule {
         if value.is_empty() {
             return false;
         }
-
-        match self.target {
-            RuleTarget::AppName => sample.app_name.eq_ignore_ascii_case(value),
-            RuleTarget::ProcessPath => contains_ignore_case(&sample.process_path, value),
-            RuleTarget::WindowTitle => sample
+        // One name covers the program and the window title. File paths are not a rule.
+        sample.app_name.eq_ignore_ascii_case(value)
+            || sample
                 .window_title
                 .as_ref()
-                .is_some_and(|title| contains_ignore_case(title, value)),
-        }
+                .is_some_and(|title| contains_ignore_case(title, value))
     }
 }
 
@@ -303,7 +300,32 @@ mod tests {
 
         assert_eq!(snapshot.state, FocusState::Focused);
         assert_eq!(snapshot.classification, RuleClassification::Focused);
-        assert_eq!(snapshot.matched_rule.unwrap().target, RuleTarget::AppName);
+        assert_eq!(snapshot.matched_rule.unwrap().value, "Code");
+    }
+
+    #[test]
+    fn rule_name_matches_the_app_or_the_window_title() {
+        let mut by_title = test_engine(vec![AppRule::app_name(
+            "Spotify",
+            RuleClassification::Distracting,
+        )]);
+        assert_eq!(
+            by_title
+                .record_sample(&sample("Chrome", "Spotify - Liked Songs", 0.0), seconds(0))
+                .classification,
+            RuleClassification::Distracting
+        );
+
+        let mut by_app = test_engine(vec![AppRule::title_contains(
+            "YouTube",
+            RuleClassification::Distracting,
+        )]);
+        assert_eq!(
+            by_app
+                .record_sample(&sample("YouTube", "Home", 0.0), seconds(0))
+                .classification,
+            RuleClassification::Distracting
+        );
     }
 
     #[test]

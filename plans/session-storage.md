@@ -1,14 +1,10 @@
 # Session Storage and Reports
 
-Last updated: 2026-09-22
+Last updated: 2026-10-07
 
-Local SQLite for session history, settings, and rules, plus the report and
-trend screens that make the data worth keeping. Tracker item:
-`plans/STATUS.md` §4 (and the two-thirds of §5 that these screens replace).
-
-Nothing persists today. `SessionManager` keeps history in a `Vec`, settings and
-rules are in-memory, and a restart loses all of it. Only voice files survive,
-on disk.
+This design is built. Sessions, rules, and settings persist in local SQLite.
+The report and trends screens are in the app. Later history work (what we
+track, a monthly PDF, a weekly recap) is the history branch in `plans/STATUS.md`.
 
 ## Scope
 

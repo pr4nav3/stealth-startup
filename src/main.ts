@@ -172,6 +172,7 @@ interface TrendSession {
 interface DailyFocus {
   date: string;
   focus_percent: number;
+  focus_seconds: number;
   session_count: number;
 }
 
@@ -353,6 +354,25 @@ interface VoiceRecordingSnapshot {
 const app = getAppRoot();
 const appView: AppView = new URLSearchParams(window.location.search).get("view") === "overlay" ? "overlay" : "main";
 document.body.classList.toggle("overlay-view", appView === "overlay");
+
+let theme: "light" | "dark" = localStorage.getItem("supervisor-theme") === "dark" ? "dark" : "light";
+
+function applyTheme(): void {
+  if (theme === "dark") {
+    document.documentElement.dataset.theme = "dark";
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+applyTheme();
+window.addEventListener("storage", (event) => {
+  if (event.key !== "supervisor-theme") {
+    return;
+  }
+  theme = event.newValue === "dark" ? "dark" : "light";
+  applyTheme();
+});
 
 const starterRules: AppRule[] = ["YouTube", "Netflix", "TikTok", "Instagram", "Reddit"].map((value) => ({
   target: "window_title",
@@ -705,7 +725,10 @@ function render(): void {
         <div>
           <h1>Supervisor</h1>
         </div>
-        <div class="status-chip" aria-label="Session status">${escapeHtml(current ? statusChip(current) : "READY")}</div>
+        <div class="topbar-status">
+          <div class="status-chip" aria-label="Session status">${escapeHtml(current ? statusChip(current) : "READY")}</div>
+          <button class="theme-toggle" type="button" data-action="toggle-theme">${theme === "dark" ? "Dark" : "Light"}</button>
+        </div>
       </header>
 
       <nav class="tabs" aria-label="Supervisor sections">
@@ -752,13 +775,23 @@ function renderSession(current: CurrentSession | null): string {
               <p>Everything stays on this device.</p>
             </article>
             <article class="panel week-card">
-              <span class="week-mark" aria-hidden="true">+</span>
               <p class="eyebrow">This week</p>
-              <p class="week-total">${escapeHtml(week.total)}</p>
+              <p class="week-total">${escapeHtml(week.total)} focused</p>
               <p class="week-caption">${escapeHtml(week.caption)}</p>
-              <div class="week-bars" role="img" aria-label="Focus time this week">
-                ${week.bars
-                  .map((bar) => `<span class="${bar > 0 ? "is-on" : ""}" style="height: ${barHeight(bar, week.max)}%"></span>`)
+              <div class="week-bars">
+                ${week.days
+                  .map(
+                    (day) => `
+                      <button type="button" class="week-col" aria-label="${attr(day.name)}, ${Math.max(0, Math.round(day.seconds / 60))}m focused">
+                        <span class="week-bar-track">
+                          <span class="week-bar ${day.seconds > 0 ? "is-on" : ""}" style="height: ${barHeight(day.seconds, week.max)}%">
+                            <span class="week-tip">${Math.max(0, Math.round(day.seconds / 60))}m</span>
+                          </span>
+                        </span>
+                        <span class="week-letter">${escapeHtml(day.letter)}</span>
+                      </button>
+                    `,
+                  )
                   .join("")}
               </div>
             </article>
@@ -794,7 +827,7 @@ function renderSession(current: CurrentSession | null): string {
 
         <aside class="panel session-rules-card">
           <p class="eyebrow">This session</p>
-          <h2>What counts</h2>
+          <p class="eyebrow">What counts</p>
           ${renderSessionRuleSummary(current.rules)}
           <button type="button" data-action="open-session-rules">Edit session rules</button>
         </aside>
@@ -822,15 +855,18 @@ function renderSessionRuleSet(
   classification: RuleClassification,
   rules: AppRule[],
 ): string {
+  const shown = rules.slice().reverse().slice(0, 4);
+  const chips = shown.map((rule) => `<span>${escapeHtml(rule.value)}</span>`);
+  if (rules.length > shown.length && chips.length) {
+    const last = chips.pop();
+    chips.push(`<span class="session-rule-tail">${last}<span class="session-rule-more">...</span></span>`);
+  }
+  const body = chips.length ? chips.join("") : `<span class="no-session-rules">None yet</span>`;
   return `
     <section class="session-rule-set">
       <h3><i class="rule-dot rule-${classification}" aria-hidden="true"></i>${escapeHtml(title)}</h3>
       <div>
-        ${
-          rules.length
-            ? rules.map((rule) => `<span>${escapeHtml(rule.value)}</span>`).join("")
-            : `<span class="no-session-rules">None yet</span>`
-        }
+        ${body}
       </div>
     </section>
   `;
@@ -1125,18 +1161,14 @@ function renderSettings(): string {
         <div class="defaults-grid">
           <label class="default-control">
             <strong>Strictness</strong>
-            <small>Default intervention level.</small>
-          <select id="default-strictness">
-            ${strictnessOptions(settings.default_strictness)}
-          </select>
+            <select id="default-strictness">
+              ${strictnessOptions(settings.default_strictness)}
+            </select>
           </label>
-          <label class="default-control default-toggle">
-            <span>
-              <strong>Enable side window</strong>
-              <small>Show the timer during sessions.</small>
-            </span>
+          <label class="default-control">
+            <strong>Show session timer</strong>
             <span class="toggle-field">
-              <input id="status-window-enabled" class="toggle-input" type="checkbox" ${settings.status_window_enabled ? "checked" : ""} aria-label="Enable side window" />
+              <input id="status-window-enabled" class="toggle-input" type="checkbox" ${settings.status_window_enabled ? "checked" : ""} aria-label="Show session timer" />
               <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
             </span>
           </label>
@@ -1148,7 +1180,7 @@ function renderSettings(): string {
           <p class="eyebrow">Voice</p>
         <div class="voice-summary">
           <strong>${escapeHtml(selectedVoice().name)}</strong>
-          <span>${starterVoices.length} starter voices / ${phraseBank.length} bundled phrases</span>
+          <span class="explain">Clone anyone's voice. Phrases play when you get distracted.</span>
           <button type="button" data-action="open-voice-settings">Customize</button>
         </div>
         </section>
@@ -1157,7 +1189,7 @@ function renderSettings(): string {
           <p class="eyebrow">Webcam</p>
           <div class="voice-summary">
             <strong>Live camera check</strong>
-            <span>Face, gaze, phone. Local only.</span>
+            <span class="explain">Local-only models monitor face and phone use.</span>
             <button type="button" data-action="open-webcam-settings">Open</button>
           </div>
         </section>
@@ -1198,39 +1230,30 @@ function renderWebcamSettings(): string {
           <p id="webcam-live-error" class="webcam-live-error"${webcamError ? "" : " hidden"}>${escapeHtml(webcamError)}</p>
         </section>
 
-        <section class="panel signal-panel">
-          <h2>Phone checks</h2>
-          <label class="setting-row toggle-row">
-            <span>Watch phone use</span>
-            <span class="toggle-field">
-              <input id="webcam-phone-use" class="toggle-input" type="checkbox" ${webcamSettings.phoneUse ? "checked" : ""} aria-label="Watch phone use" />
-              <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
-            </span>
-          </label>
-          <div class="setting-row">
-            <span>Strictness</span>
-            <select id="webcam-strictness" ${webcamSettings.phoneUse ? "" : "disabled"}>
-              <option value="off" ${webcamSettings.strict ? "" : "selected"}>Not strict</option>
-              <option value="on" ${webcamSettings.strict ? "selected" : ""}>Strict</option>
-            </select>
-          </div>
-          <label class="setting-row toggle-row">
-            <span>Run on GPU</span>
-            <span class="toggle-field">
-              <input id="webcam-gpu" class="toggle-input" type="checkbox" ${settings.webcam_gpu ? "checked" : ""} aria-label="Run on GPU" />
-              <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
-            </span>
-          </label>
-          <div class="setting-row">
-            <span>When it fires</span>
-            <select id="webcam-reaction" ${webcamSettings.phoneUse ? "" : "disabled"}>
-              <option value="alarm" ${webcamSettings.reaction === "alarm" ? "selected" : ""}>Alarm</option>
-              <option value="voice" ${webcamSettings.reaction === "voice" ? "selected" : ""}>Voice clip</option>
-            </select>
-          </div>
-          ${renderWebcamMetrics(frame)}
-          <p class="quiet">Frames stay on this PC. Nothing is stored. At-phone only if a phone is in the camera.</p>
-        </section>
+        <div class="webcam-side">
+          <section class="panel">
+            <p class="eyebrow">Settings</p>
+            <label class="setting-row toggle-row">
+              <span>Turn on webcam monitoring</span>
+              <span class="toggle-field">
+                <input id="webcam-phone-use" class="toggle-input" type="checkbox" ${webcamSettings.phoneUse ? "checked" : ""} aria-label="Turn on webcam monitoring" />
+                <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+              </span>
+            </label>
+            <label class="setting-row toggle-row">
+              <span>Run on GPU</span>
+              <span class="toggle-field">
+                <input id="webcam-gpu" class="toggle-input" type="checkbox" ${settings.webcam_gpu ? "checked" : ""} aria-label="Run on GPU" />
+                <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+              </span>
+            </label>
+          </section>
+          <section class="panel webcam-test-panel">
+            <p class="eyebrow">Camera test</p>
+            ${renderWebcamMetrics(frame)}
+            <p class="quiet">No images saved. Vision models run locally, and correct you in real time. You get a reminder if you leave your desk or if a phone is in view.</p>
+          </section>
+        </div>
       </section>
     </section>
   `;
@@ -1240,10 +1263,7 @@ function renderWebcamMetrics(frame: WebcamFrame | null): string {
   return `
     <div class="metric-grid webcam-metrics">
       ${metric("Face", frame?.face_in_frame ? "IN" : "OUT")}
-      ${metric("Present", webcamPresentLabel(frame))}
       ${metric("Phone", frame?.phone_in_frame ? "IN FRAME" : "NO")}
-      ${metric("Runs on", webcamDeviceLabel(frame))}
-      ${metric("Alert", webcamWouldAlert(frame) ? "YES" : "NO")}
     </div>
   `;
 }
@@ -1252,7 +1272,7 @@ function renderRuleManager(rules: AppRule[], scope: RuleScope, title: string): s
   const activeEditor = ruleEditor?.scope === scope ? ruleEditor : null;
   const helper =
     scope === "settings"
-      ? "Used as the starting point for every session."
+      ? "Used as the starting point for every session"
       : "These rules are temporary. They apply to this session only.";
   const applyPermanently =
     scope === "preflight"
@@ -1260,11 +1280,13 @@ function renderRuleManager(rules: AppRule[], scope: RuleScope, title: string): s
       : "";
   return `
     <div class="rule-manager permanent-rule-manager">
+      <p class="eyebrow">${escapeHtml(title)}</p>
       <div class="rule-toolbar">
-        <div>
-          <p class="eyebrow">${escapeHtml(title)}</p>
-          <p class="rule-helper">${escapeHtml(helper)}</p>
-        </div>
+        ${
+          scope === "settings"
+            ? `<strong>${escapeHtml(helper)}</strong>`
+            : `<p class="explain">${escapeHtml(helper)}</p>`
+        }
         <div class="rule-toolbar-actions">
           <button class="primary add-rule-button" type="button" data-rule-action="add" data-rule-scope="${scope}">+ Add rule</button>
           ${applyPermanently}
@@ -1288,10 +1310,11 @@ function renderRuleGroup(
 ): string {
   const items = rules
     .map((rule, index) => ({ rule, index }))
-    .filter((item) => item.rule.classification === classification);
+    .filter((item) => item.rule.classification === classification)
+    .reverse();
   return `
     <div class="rule-group">
-      <div class="rule-group-label">
+      <div class="rule-group-label eyebrow">
         <i class="rule-dot rule-${classification}" aria-hidden="true"></i>
         <span>${escapeHtml(title)}</span>
       </div>
@@ -1305,7 +1328,7 @@ function renderRuleGroup(
             `,
           )
           .join("")}
-        <button class="add-target-button" type="button" data-rule-action="add" data-rule-scope="${scope}" data-rule-classification="${classification}">+ Add target</button>
+        <button class="add-target-button" type="button" data-rule-action="add" data-rule-scope="${scope}" data-rule-classification="${classification}">+ Add</button>
       </div>
     </div>
   `;
@@ -1315,16 +1338,12 @@ function renderRuleEditor(editor: RuleEditor): string {
   return `
     <form class="rule-editor" data-rule-form="${editor.scope}">
       <label>
-        <span>Target</span>
-        <select name="target">${ruleTargetOptions(editor.target)}</select>
-      </label>
-      <label>
         <span>Mode</span>
         <select name="classification">${ruleClassificationOptions(editor.classification)}</select>
       </label>
       <label>
-        <span>Match text</span>
-        <input name="value" maxlength="120" value="${attr(editor.value)}" placeholder="YouTube API docs" />
+        <span>App/website name</span>
+        <input name="value" maxlength="120" value="${attr(editor.value)}" placeholder="YouTube" />
       </label>
       <div class="rule-editor-actions">
         <button class="primary" type="submit">Save</button>
@@ -1353,20 +1372,20 @@ function renderVoiceSettings(): string {
 
       <section class="voice-grid">
         <section class="panel voice-roster-panel">
-          <h2>Voices</h2>
+          <p class="eyebrow">Voices</p>
           <div class="voice-list">
             ${voices.map(renderVoiceCard).join("")}
           </div>
         </section>
 
         <section class="panel clone-panel">
-          <h2>Local clone</h2>
+          <p class="eyebrow">Clone a voice</p>
           ${renderClonePanel()}
         </section>
 
         <section class="panel phrase-panel">
           <div class="rule-toolbar">
-            <h2>Phrase bank</h2>
+            <p class="eyebrow">Phrase bank</p>
             <button type="button" data-action="open-phrase-editor" ${canEditPhrases() ? "" : "disabled"}>Add phrase</button>
           </div>
           ${phraseEditor ? renderPhraseEditor() : ""}
@@ -1387,16 +1406,17 @@ function renderVoiceCard(voice: VoiceOption): string {
   const actionLabel = needsGeneration ? "Generate audio" : selected ? "Selected" : "Use";
   const disabled = needsGeneration ? !canGenerate : !canUse || selected;
 
+  const inner = voice.source === "starter" ? "Included · Ready to use" : `${voice.kind} · ${voice.coverage}`;
   return `
     <article class="voice-card ${selected ? "selected" : ""}">
       <div class="voice-card-main">
         <strong>${escapeHtml(voice.name)}</strong>
-        <span>${escapeHtml(voice.kind)} / ${escapeHtml(voice.coverage)}</span>
-        <p>${escapeHtml(voice.detail)}</p>
+        <p class="voice-card-copy">${escapeHtml(inner)}</p>
         ${profile && profile.clip_count > 0 ? renderClipPreview(profile) : ""}
       </div>
       <div class="voice-actions">
         <button class="${needsGeneration ? "compact-action" : ""}" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" data-profile-id="${escapeHtml(profile?.profile_id ?? "")}" ${disabled ? "disabled" : ""} title="${needsGeneration && ramGenerationLocked() ? attr(ramLockMessage()) : ""}">${needsGeneration && ramGenerationLocked() ? "Clone locked" : actionLabel}</button>
+        <button type="button" data-action="preview-voice" data-voice-id="${escapeHtml(voice.id)}">Preview</button>
         ${
           profile
             ? `<button class="danger" type="button" data-action="confirm-delete-voice" data-profile-id="${escapeHtml(profile.profile_id)}">Delete</button>`
@@ -1409,9 +1429,6 @@ function renderVoiceCard(voice: VoiceOption): string {
 
 function renderClonePanel(): string {
   const installed = modelInstalled();
-  const status = voiceBackend?.model;
-  const runtime = voiceBackend?.runtime;
-  const system = voiceBackend?.system;
   const downloading = voiceDownload?.phase === "downloading" || voiceDownload?.phase === "cancelling";
   const busy = voiceBusy !== null || downloading;
   const downloadLabel =
@@ -1425,19 +1442,14 @@ function renderClonePanel(): string {
     <div class="clone-overview">
       <div class="clone-status">
         <p class="eyebrow">Status</p>
-        <strong>${installed ? "Voice pack ready" : "Voice pack not downloaded"}</strong>
-        <p>Cloning is a short-lived local job. Focus sessions only play saved clips. Clone only your own voice or a voice you have permission to use.</p>
-        <div class="model-facts">
-          <span>${voiceBackend ? `${voiceBackend.profiles.length} custom voices` : "Checking voices"}</span>
-          <span>${runtime?.installed ? "Runtime ready" : "Runtime missing"}</span>
-          <span>${status ? `${formatBytes(status.installed_bytes)} model` : "No model status"}</span>
-          <span>${status ? `${formatBytes(status.recommended_free_bytes)} disk` : "Disk ?"}</span>
-        </div>
+        <strong>${installed ? "Voice model installed." : "Voice pack not downloaded"}</strong>
+        <p>Record a voice sample to create your own reminders. Everything stays on this device.</p>
+        <p>Use your own voice, or one you have permission to use.</p>
       </div>
       ${renderRamLock()}
     </div>
     <div class="clone-actions">
-      <button class="primary" type="button" data-action="download-model-pack" ${installed || busy ? "disabled" : ""}>${downloadLabel}</button>
+      <button class="primary" type="button" data-action="download-model-pack" ${installed || busy ? "disabled" : ""}>${installed ? "Model installed" : downloadLabel}</button>
       <button type="button" data-action="record-voice" ${!installed || busy ? "disabled" : ""}>Record voice</button>
       <button type="button" data-action="delete-model-files" ${!installed || busy ? "disabled" : ""}>Delete model files, keep voices</button>
     </div>
@@ -1452,23 +1464,34 @@ function renderRamLock(): string {
   const peak = system?.last_peak_ram_bytes ?? null;
   const fill = need > 0 && free !== null ? Math.max(4, Math.min(100, Math.round((free / need) * 100))) : 0;
   const copy = locked
-    ? `This PC does not have enough free RAM for a clone job. Need about ${formatBytes(need)} free. Close browsers and other heavy apps, then come back. Recording a voice is cheap; generating clips is the heavy step.`
+    ? "Using the voice model to generate cloned voice clips is a memory-heavy task. Close every other app, then try again."
     : peak
       ? `Clone is allowed. Last job peaked at ${formatBytes(peak)}. Supervisor will refuse again if free RAM drops below ${formatBytes(need)}.`
       : `Clone is allowed, using a conservative ${formatBytes(need)} free-RAM floor until a real peak is measured on this PC.`;
 
   return `
     <aside class="ram-lock ${locked ? "is-locked" : "is-clear"}" role="status" aria-live="polite">
-      <div class="ram-lock-stamp">${locked ? "CLONE LOCKED" : "CLONE CLEAR"}</div>
-      <p>${escapeHtml(copy)}</p>
-      <div class="ram-tank" aria-label="Free RAM versus clone budget">
-        <span class="ram-tank-fill" style="width: ${fill}%"></span>
+      <div class="ram-lock-head">
+        <div class="ram-lock-stamp">${locked ? "CLONE LOCKED" : "CLONE CLEAR"}</div>
+        ${locked ? `<button type="button" data-action="check-ram">Check again</button>` : ""}
       </div>
+      <div class="ram-lock-copy">
+        <p>${escapeHtml(copy)}</p>
+        ${locked ? "<p>This is a one-time step for each voice. Saved clips play during sessions.</p>" : ""}
+      </div>
+      ${
+        locked
+          ? ""
+          : `<div class="ram-tank" aria-label="Free RAM versus clone budget">
+        <span class="ram-tank-fill" style="width: ${fill}%"></span>
+      </div>`
+      }
       <div class="ram-lock-meta">
-        <span>Free ${free === null ? "?" : formatBytes(free)}</span>
-        <span>Need ${need ? formatBytes(need) : "?"}</span>
-        <span>Peak ${peak === null ? "unmeasured" : formatBytes(peak)}</span>
-        <span>Machine ${system?.total_ram_bytes ? formatBytes(system.total_ram_bytes) : "?"}</span>
+        ${locked ? `<span>Need: ${need ? `${Math.round(need / 1024 ** 3)} GB` : "?"}</span>` : ""}
+        <span>${locked ? "Currently" : "Free"}: ${free === null ? "?" : formatBytes(free)}${locked ? " free" : ""}</span>
+        ${locked ? "" : `<span>Need: ${need ? formatBytes(need) : "?"}</span>`}
+        ${locked ? "" : `<span>Peak: ${peak === null ? "unmeasured" : formatBytes(peak)}</span>`}
+        <span>Machine: ${system?.total_ram_bytes ? formatBytes(system.total_ram_bytes) : "?"}</span>
       </div>
     </aside>
   `;
@@ -2156,16 +2179,6 @@ function bindEvents(): void {
     render();
   });
 
-  document.getElementById("webcam-strictness")?.addEventListener("change", (event) => {
-    webcamSettings.strict = (event.target as HTMLSelectElement).value === "on";
-    webcamHitStreak = 0;
-    paintWebcamDom();
-  });
-
-  document.getElementById("webcam-reaction")?.addEventListener("change", (event) => {
-    webcamSettings.reaction = (event.target as HTMLSelectElement).value as WebcamReaction;
-  });
-
   document.getElementById("webcam-gpu")?.addEventListener("change", (event) => {
     void setWebcamGpu((event.target as HTMLInputElement).checked);
   });
@@ -2195,6 +2208,14 @@ async function startSession(): Promise<void> {
 }
 
 async function runAction(action: string, source?: HTMLElement): Promise<void> {
+  if (action === "toggle-theme") {
+    theme = theme === "dark" ? "light" : "dark";
+    localStorage.setItem("supervisor-theme", theme);
+    applyTheme();
+    render();
+    return;
+  }
+
   if (action === "dismiss-distraction") {
     const live = snapshot?.current;
     if (live) {
@@ -2338,6 +2359,15 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     if (leavingWebcam) {
       await stopWebcamPreview();
     }
+    return;
+  }
+
+  if (action === "preview-voice") {
+    return;
+  }
+
+  if (action === "check-ram") {
+    await refreshVoiceStatus(true);
     return;
   }
 
@@ -2523,10 +2553,10 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  const markTarget = action.startsWith("mark-") ? markTargetLabel(snapshot?.current ?? null) : "";
   const ok = await invokeSnapshot(command);
   if (ok && action.startsWith("mark-")) {
-    showFeedback(`${action === "mark-relevant" ? "Relevant" : "Distracting"}: ${markTarget}`);
+    const name = snapshot?.current?.rules[0]?.value ?? "last window";
+    showFeedback(`${action === "mark-relevant" ? "Relevant" : "Distracting"}: ${name}`);
   }
   if (ok && action === "stop" && history[0]) {
     await openHistoryReport(history[0].id);
@@ -2595,13 +2625,13 @@ async function saveRuleForm(form: HTMLFormElement): Promise<void> {
   }
 
   const rule: AppRule = {
-    target: formValue(form, "target") as RuleTarget,
+    target: "window_title",
     classification: formValue(form, "classification") as RuleClassification,
     value: formValue(form, "value").trim(),
   };
 
   if (!rule.value) {
-    showFeedback("Rule needs text");
+    showFeedback("Enter an app or website name");
     return;
   }
 
@@ -2771,7 +2801,7 @@ async function updateDefaultStrictness(default_strictness: Strictness): Promise<
 
 async function updateStatusWindowEnabled(enabled: boolean): Promise<void> {
   if (await invokeSnapshot("set_status_window_enabled", { enabled })) {
-    showFeedback(enabled ? "Side window enabled" : "Side window disabled");
+    showFeedback(enabled ? "Show session timer" : "Session timer hidden");
   }
 }
 
@@ -3173,17 +3203,6 @@ function showFeedback(message: string): void {
   }, 1400);
 }
 
-function webcamDeviceLabel(frame: WebcamFrame | null): string {
-  const provider = frame?.provider ?? "";
-  if (provider.startsWith("Dml") || provider.startsWith("CoreML")) {
-    return "GPU";
-  }
-  if (provider.startsWith("CPU")) {
-    return "CPU";
-  }
-  return settings.webcam_gpu ? "GPU" : "CPU";
-}
-
 async function setWebcamGpu(enabled: boolean): Promise<void> {
   try {
     settings = await invoke<SessionSettings>("update_settings", {
@@ -3365,7 +3384,7 @@ function webcamTitle(frame: WebcamFrame | null, alerting: boolean): string {
 
 function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
   if (!webcamSettings.phoneUse) {
-    return "Preview only. Turn on phone checks to fire an alarm or clip.";
+    return "Turn on webcam monitoring to get reminded to put down your phone.";
   }
   if (alerting) {
     return webcamSettings.strict ? "Phone is in frame." : "Looking at a phone in the camera.";
@@ -3380,16 +3399,6 @@ function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
     return "Phone is visible. Looking at the PC, so this is not a phone hit yet.";
   }
   return "Looking away. No phone in the camera.";
-}
-
-function webcamPresentLabel(frame: WebcamFrame | null): string {
-  if (frame?.present) {
-    return "YES";
-  }
-  if (frame?.face_in_frame || frame?.person_in_frame) {
-    return "RAW";
-  }
-  return "NO";
 }
 
 async function fireWebcamAlert(): Promise<void> {
@@ -3562,17 +3571,6 @@ function selectedNudgeClip(nudgeCount: number): VoiceClipSummary | null {
   return clips[(Math.max(1, nudgeCount) - 1) % clips.length];
 }
 
-function ruleTargetLabel(target: RuleTarget): string {
-  switch (target) {
-    case "app_name":
-      return "App";
-    case "window_title":
-      return "Title / site";
-    case "process_path":
-      return "Path";
-  }
-}
-
 function ruleClassificationLabel(classification: RuleClassification): string {
   switch (classification) {
     case "focused":
@@ -3596,12 +3594,6 @@ function voiceOptions(selected: string): string {
       (voice) =>
         `<option value="${voice.id}" ${voice.id === selected ? "selected" : ""} ${voice.selectable ? "" : "disabled"}>${escapeHtml(voice.name)}</option>`,
     )
-    .join("");
-}
-
-function ruleTargetOptions(selected: RuleTarget): string {
-  return (["app_name", "window_title", "process_path"] as RuleTarget[])
-    .map((target) => `<option value="${target}" ${target === selected ? "selected" : ""}>${ruleTargetLabel(target)}</option>`)
     .join("");
 }
 
@@ -3870,15 +3862,6 @@ function formatBytes(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function markTargetLabel(current: CurrentSession | null): string {
-  const sample = current?.focus?.sample;
-  if (!sample) {
-    return "last window";
-  }
-
-  return sample.window_title?.trim() || sample.app_name || "last window";
-}
-
 function toneLabel(tone: VoiceTone): string {
   switch (tone) {
     case "gentle":
@@ -4066,28 +4049,33 @@ function quoteFit(text: string): string {
   return "quote-short";
 }
 
-function weekSummary(): { total: string; caption: string; bars: number[]; max: number } {
-  const days = Array.from({ length: 7 }, (_, index) => {
-    const day = new Date();
-    day.setHours(0, 0, 0, 0);
-    day.setDate(day.getDate() - (6 - index));
-    return dayKey(day);
+const WEEK_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
+const WEEK_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function weekSummary(): {
+  total: string;
+  caption: string;
+  days: { letter: string; name: string; seconds: number }[];
+  max: number;
+} {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+  const byDate = new Map(trends.daily_focus.map((day) => [day.date, day]));
+  const days = WEEK_LETTERS.map((letter, index) => {
+    const date = new Date(monday);
+    date.setDate(monday.getDate() + index);
+    const match = byDate.get(dayKey(date));
+    return { letter, name: WEEK_NAMES[index], seconds: match?.focus_seconds ?? 0, sessions: match?.session_count ?? 0 };
   });
-  const bars = days.map((day) =>
-    history
-      .filter((item) => sessionDay(item.started_at) === day)
-      .reduce((sum, item) => sum + item.duration_seconds, 0),
-  );
-  const seconds = bars.reduce((sum, value) => sum + value, 0);
-  const count = days.reduce(
-    (sum, day) => sum + history.filter((item) => sessionDay(item.started_at) === day).length,
-    0,
-  );
+  const seconds = days.reduce((sum, day) => sum + day.seconds, 0);
+  const count = days.reduce((sum, day) => sum + day.sessions, 0);
   return {
     total: formatHours(seconds),
     caption: `across ${count} session${count === 1 ? "" : "s"}`,
-    bars,
-    max: Math.max(...bars, 1),
+    days,
+    max: Math.max(...days.map((day) => day.seconds), 1),
   };
 }
 
@@ -4097,16 +4085,12 @@ function dayKey(date: Date): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
-function sessionDay(startedAt: string): string {
-  const date = new Date(startedAt);
-  return Number.isNaN(date.getTime()) ? startedAt.slice(0, 10) : dayKey(date);
-}
-
 function barHeight(value: number, max: number): number {
-  if (value <= 0) {
-    return 18;
+  const floor = 16;
+  if (value <= 0 || max <= 0) {
+    return floor;
   }
-  return Math.max(28, Math.round((value / max) * 100));
+  return Math.round(floor + (value / max) * (100 - floor));
 }
 
 function formatHours(totalSeconds: number): string {

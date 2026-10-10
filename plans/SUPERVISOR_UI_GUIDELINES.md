@@ -80,7 +80,7 @@ The selected tonal option is the original light cream Supervisor palette.
 | Yellow | `#FFCF31` | Attention, active navigation, focus state, quote tile |
 | Coral | `#FF684F` | Stop, warning, intervention, destructive action |
 | Soft white | `#FFF7DF` | Neutral control fill when needed |
-| Grid line | `rgba(16, 16, 16, 0.045)` | Light-mode canvas grid |
+| Grid line | `rgba(16, 16, 16, 0.1)` | Light-mode canvas grid |
 
 ### Dark mode
 
@@ -133,7 +133,7 @@ Never select a color because a card “needs variety.”
   --sv-coral: #ff684f;
   --sv-colored-ink: #141410;
   --sv-soft-white: #fff7df;
-  --sv-grid-line: rgba(16, 16, 16, 0.045);
+  --sv-grid-line: rgba(16, 16, 16, 0.1);
 }
 
 [data-theme="dark"] {

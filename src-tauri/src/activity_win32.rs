@@ -15,8 +15,9 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GUITHREADINFO,
+    EnumChildWindows, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindow,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GA_PARENT, GW_OWNER, GUITHREADINFO,
 };
 
 /// Longest path Windows can return (the extended-length path limit).
@@ -50,8 +51,15 @@ pub fn capture_current(
         return Err("foreground window has no process".to_string());
     }
 
-    let (process_id, process_path, exe_name) =
+    let (mut process_id, mut process_path, mut exe_name) =
         resolve_process_identity(hwnd, process_id, &window_class);
+    if belongs_to_this_process(hwnd) {
+        process_id = std::process::id();
+        if let Ok(path) = std::env::current_exe() {
+            process_path = path.to_string_lossy().into_owned();
+            exe_name = file_name_from_path(&process_path);
+        }
+    }
 
     let disposition = classify_foreground_surface(&RawForegroundIdentity {
         exe_name: exe_name.clone(),
@@ -206,6 +214,31 @@ fn find_core_window_child(parent: HWND) -> Option<HWND> {
         )
     };
     found
+}
+
+fn belongs_to_this_process(hwnd: HWND) -> bool {
+    // WebView popups (menus, dropdowns) are a different process, owned by our window.
+    let self_pid = std::process::id();
+    let mut current = hwnd;
+    for _ in 0..8 {
+        if current.0.is_null() {
+            return false;
+        }
+        if window_process_id(current) == self_pid {
+            return true;
+        }
+        let owner = unsafe { GetWindow(current, GW_OWNER) }.unwrap_or_default();
+        let parent = unsafe { GetAncestor(current, GA_PARENT) };
+        let next = if !owner.0.is_null() && owner != current {
+            owner
+        } else if !parent.0.is_null() && parent != current {
+            parent
+        } else {
+            return false;
+        };
+        current = next;
+    }
+    false
 }
 
 fn window_process_id(hwnd: HWND) -> u32 {
