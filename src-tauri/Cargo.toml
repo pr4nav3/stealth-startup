@@ -23,7 +23,7 @@ serde_json = "1"
 sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "image-ico"] }
 tauri-plugin-single-instance = "~2.4"
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing", "local-offset"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Keep in step with the version Tauri uses, so the crate is compiled once, not twice.

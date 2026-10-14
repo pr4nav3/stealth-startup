@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: i32 = 2;
+const STRETCH_WEEK_COUNT: usize = 5;
 const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
 
 /// How long a `session` row's timer actually ran. Sessions that never closed cleanly have no
@@ -183,9 +184,73 @@ pub struct DailyFocus {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct WeeklyStretch {
+    pub week_start: String,
+    pub median_stretch_seconds: u64,
+    pub session_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FocusRecap {
+    pub start: String,
+    pub end: String,
+    pub focus_seconds: u64,
+    pub session_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct TrendsData {
     pub sessions: Vec<TrendSession>,
     pub daily_focus: Vec<DailyFocus>,
+    pub weekly_stretch: Vec<WeeklyStretch>,
+    pub week_recap: FocusRecap,
+    pub month_recap: FocusRecap,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HistoryWeek {
+    pub week_start: String,
+    pub sessions: Vec<SessionSummary>,
+    pub oldest_day: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RecapBucket {
+    pub label: String,
+    pub focus_seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RecapApp {
+    pub group: String,
+    pub label: String,
+    pub seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PeriodRecap {
+    pub kind: String,
+    pub start: String,
+    pub end: String,
+    pub focus_seconds: u64,
+    pub session_count: u64,
+    pub buckets: Vec<RecapBucket>,
+    pub median_stretch_seconds: u64,
+    pub longest_stretch_seconds: u64,
+    pub stretch_range_low: Option<u64>,
+    pub stretch_range_high: Option<u64>,
+    pub first_half_focus_percent: Option<u64>,
+    pub second_half_focus_percent: Option<u64>,
+    pub apps: Vec<RecapApp>,
+}
+
+struct RecapSession {
+    id: u64,
+    day: String,
+    focused_seconds: u64,
+    longest_stretch_seconds: u64,
+    median_stretch_seconds: u64,
+    duration_seconds: u64,
 }
 
 impl SessionStorage {
@@ -688,19 +753,15 @@ impl SessionStorage {
         for row in rows {
             let (id, goal, started_at, focused_seconds, distracted_seconds, idle_seconds, nudges) =
                 row.map_err(|error| error.to_string())?;
-            let top_hints = self.top_hints_for_session(id as u64)?;
-            let duration_seconds = self.session_duration_seconds(id as u64)?;
-            summaries.push(SessionSummary {
-                id: id as u64,
+            summaries.push(self.summary_from_row(
+                id,
                 goal,
                 started_at,
-                duration_seconds,
-                focus_seconds: focused_seconds as u64,
-                distracted_seconds: distracted_seconds as u64,
-                idle_seconds: idle_seconds as u64,
-                nudges: nudges as u64,
-                top_hints,
-            });
+                focused_seconds,
+                distracted_seconds,
+                idle_seconds,
+                nudges,
+            )?);
         }
         Ok(summaries)
     }
@@ -876,19 +937,11 @@ impl SessionStorage {
 
         let mut daily_stmt = self
             .conn
-            .prepare(
-                &format!(
-                    "SELECT substr(started_at, 1, 10) AS day,
-                            SUM(focused_seconds) AS focus_sum,
-                            SUM({RUN_SECONDS_SQL}) AS run_seconds,
-                            COUNT(*) AS session_count
-                     FROM session
-                     WHERE ended_at IS NOT NULL
-                     GROUP BY day
-                     ORDER BY day DESC
-                     LIMIT 14"
-                ),
-            )
+            .prepare(&format!(
+                "SELECT started_at, focused_seconds, {RUN_SECONDS_SQL}
+                 FROM session
+                 WHERE ended_at IS NOT NULL"
+            ))
             .map_err(|error| error.to_string())?;
         let daily_rows = daily_stmt
             .query_map([], |row| {
@@ -896,33 +949,401 @@ impl SessionStorage {
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
 
-        let mut daily_focus = Vec::new();
+        let mut by_day = std::collections::HashMap::<String, (u64, u64, u64)>::new();
         for row in daily_rows {
-            let (date, focus_sum, run_seconds, session_count) =
-                row.map_err(|error| error.to_string())?;
-            let focus_percent = if run_seconds == 0 {
-                0
-            } else {
-                (focus_sum as u64 * 100) / run_seconds as u64
-            };
-            daily_focus.push(DailyFocus {
-                date,
-                focus_percent,
-                focus_seconds: focus_sum as u64,
-                session_count: session_count as u64,
-            });
+            let (started_at, focus_seconds, run_seconds) = row.map_err(|error| error.to_string())?;
+            let entry = by_day.entry(local_day(&started_at)).or_insert((0, 0, 0));
+            entry.0 += focus_seconds as u64;
+            entry.1 += run_seconds.max(0) as u64;
+            entry.2 += 1;
         }
-        daily_focus.reverse();
+        let mut days: Vec<_> = by_day.into_iter().collect();
+        days.sort_by(|left, right| left.0.cmp(&right.0));
+        if days.len() > 14 {
+            days = days.split_off(days.len() - 14);
+        }
+        let daily_focus = days
+            .into_iter()
+            .map(|(date, (focus_seconds, run_seconds, session_count))| {
+                let focus_percent = if run_seconds == 0 {
+                    0
+                } else {
+                    (focus_seconds * 100) / run_seconds
+                };
+                DailyFocus {
+                    date,
+                    focus_percent,
+                    focus_seconds,
+                    session_count,
+                }
+            })
+            .collect();
 
+        let monday = this_monday();
+        let today = local_today();
         Ok(TrendsData {
             sessions,
             daily_focus,
+            weekly_stretch: self.weekly_stretch(monday)?,
+            week_recap: self.focus_recap(
+                monday,
+                monday.saturating_add(time::Duration::days(7)),
+            )?,
+            month_recap: self.focus_recap(first_of_month(today), next_month_start(today))?,
         })
+    }
+
+    pub fn get_history_week(&self, week_start: &str) -> Result<HistoryWeek, String> {
+        let start = monday_on_or_before(parse_day(week_start)?);
+        let end = start.saturating_add(time::Duration::days(7));
+        Ok(HistoryWeek {
+            week_start: format_day(start),
+            sessions: self.list_history_between(&format_day(start), &format_day(end))?,
+            oldest_day: self.oldest_session_day()?,
+        })
+    }
+
+    pub fn get_period_recap(&self, period: &str, start: &str) -> Result<PeriodRecap, String> {
+        let day = parse_day(start)?;
+        match period {
+            "week" => {
+                let monday = monday_on_or_before(day);
+                self.build_period_recap(
+                    "week",
+                    monday,
+                    monday.saturating_add(time::Duration::days(7)),
+                )
+            }
+            "month" => {
+                let month_start = first_of_month(day);
+                self.build_period_recap("month", month_start, next_month_start(month_start))
+            }
+            _ => Err("period must be week or month".into()),
+        }
+    }
+
+    fn build_period_recap(
+        &self,
+        kind: &str,
+        start: time::Date,
+        end_exclusive: time::Date,
+    ) -> Result<PeriodRecap, String> {
+        let sessions = self.recap_sessions(&format_day(start), &format_day(end_exclusive))?;
+        let mut by_day = std::collections::HashMap::<String, u64>::new();
+        let mut stretch_samples = Vec::new();
+        let mut longest_stretch_seconds = 0u64;
+        let mut focus_seconds = 0u64;
+        let mut first_focus = 0u64;
+        let mut first_total = 0u64;
+        let mut second_focus = 0u64;
+        let mut second_total = 0u64;
+        let mut app_totals = std::collections::HashMap::<(String, String), u64>::new();
+        let rules = self.load_rules().unwrap_or_default();
+
+        for session in &sessions {
+            focus_seconds += session.focused_seconds;
+            longest_stretch_seconds = longest_stretch_seconds.max(session.longest_stretch_seconds);
+            if session.median_stretch_seconds > 0 {
+                stretch_samples.push(session.median_stretch_seconds);
+            }
+            *by_day.entry(session.day.clone()).or_insert(0) += session.focused_seconds;
+            let spans = self.load_spans_for_session(session.id)?;
+            let halves = half_focus(&spans, session.duration_seconds);
+            first_focus += halves.0;
+            first_total += halves.1;
+            second_focus += halves.2;
+            second_total += halves.3;
+            for span in spans {
+                let group = recap_app_group(&rules, &span.app, span.context.as_deref());
+                let label = recap_activity_label(&span.app, span.context.as_deref());
+                *app_totals
+                    .entry((group.to_string(), label))
+                    .or_insert(0) += span.seconds;
+            }
+        }
+
+        const GROUP_ORDER: [&str; 4] = ["Focus", "Neutral", "Distracting", "Miscellaneous"];
+        let mut apps: Vec<RecapApp> = app_totals
+            .into_iter()
+            .map(|((group, label), seconds)| RecapApp {
+                group,
+                label,
+                seconds,
+            })
+            .collect();
+        apps.sort_by(|a, b| {
+            let left = GROUP_ORDER.iter().position(|group| *group == a.group).unwrap_or(9);
+            let right = GROUP_ORDER.iter().position(|group| *group == b.group).unwrap_or(9);
+            left.cmp(&right)
+                .then_with(|| b.seconds.cmp(&a.seconds))
+                .then_with(|| a.label.cmp(&b.label))
+        });
+
+        let (stretch_range_low, stretch_range_high) = if kind == "month" {
+            full_week_stretch_range(start, end_exclusive, &sessions)
+        } else {
+            (None, None)
+        };
+
+        Ok(PeriodRecap {
+            kind: kind.to_string(),
+            start: format_day(start),
+            end: format_day(end_exclusive.saturating_sub(time::Duration::days(1))),
+            focus_seconds,
+            session_count: sessions.len() as u64,
+            buckets: recap_buckets(kind, start, end_exclusive, &by_day),
+            median_stretch_seconds: median(&stretch_samples),
+            longest_stretch_seconds,
+            stretch_range_low,
+            stretch_range_high,
+            first_half_focus_percent: percent(first_focus, first_total),
+            second_half_focus_percent: percent(second_focus, second_total),
+            apps,
+        })
+    }
+
+    fn recap_sessions(
+        &self,
+        start_day: &str,
+        end_day: &str,
+    ) -> Result<Vec<RecapSession>, String> {
+        let (from, to) = padded_day_bounds(start_day, end_day);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, started_at, focused_seconds, longest_stretch_seconds, median_stretch_seconds
+                 FROM session
+                 WHERE ended_at IS NOT NULL
+                   AND substr(started_at, 1, 10) >= ?1
+                   AND substr(started_at, 1, 10) < ?2
+                 ORDER BY started_at ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![from, to], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (id, started_at, focused_seconds, longest, median_stretch) =
+                row.map_err(|error| error.to_string())?;
+            let Some(day) = local_day_in(&started_at, start_day, end_day) else {
+                continue;
+            };
+            let duration_seconds = self.session_duration_seconds(id as u64)?;
+            sessions.push(RecapSession {
+                id: id as u64,
+                day,
+                focused_seconds: focused_seconds as u64,
+                longest_stretch_seconds: longest as u64,
+                median_stretch_seconds: median_stretch as u64,
+                duration_seconds,
+            });
+        }
+        Ok(sessions)
+    }
+
+    fn list_history_between(&self, start_day: &str, end_day: &str) -> Result<Vec<SessionSummary>, String> {
+        let (from, to) = padded_day_bounds(start_day, end_day);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, goal, started_at, focused_seconds, distracted_seconds,
+                        idle_seconds, nudge_count
+                 FROM session
+                 WHERE ended_at IS NOT NULL
+                   AND substr(started_at, 1, 10) >= ?1
+                   AND substr(started_at, 1, 10) < ?2
+                 ORDER BY started_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![from, to], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut summaries = Vec::new();
+        for row in rows {
+            let (id, goal, started_at, focused_seconds, distracted_seconds, idle_seconds, nudges) =
+                row.map_err(|error| error.to_string())?;
+            if local_day_in(&started_at, start_day, end_day).is_none() {
+                continue;
+            }
+            summaries.push(self.summary_from_row(
+                id,
+                goal,
+                started_at,
+                focused_seconds,
+                distracted_seconds,
+                idle_seconds,
+                nudges,
+            )?);
+        }
+        Ok(summaries)
+    }
+
+    fn summary_from_row(
+        &self,
+        id: i64,
+        goal: String,
+        started_at: String,
+        focused_seconds: i64,
+        distracted_seconds: i64,
+        idle_seconds: i64,
+        nudges: i64,
+    ) -> Result<SessionSummary, String> {
+        let top_hints = self.top_hints_for_session(id as u64)?;
+        let duration_seconds = self.session_duration_seconds(id as u64)?;
+        Ok(SessionSummary {
+            id: id as u64,
+            goal,
+            started_at,
+            duration_seconds,
+            focus_seconds: focused_seconds as u64,
+            distracted_seconds: distracted_seconds as u64,
+            idle_seconds: idle_seconds as u64,
+            nudges: nudges as u64,
+            top_hints,
+        })
+    }
+
+    fn oldest_session_day(&self) -> Result<Option<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT started_at FROM session WHERE ended_at IS NOT NULL")
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut oldest: Option<String> = None;
+        for row in rows {
+            let day = local_day(&row.map_err(|error| error.to_string())?);
+            if oldest.as_ref().is_none_or(|current| day < *current) {
+                oldest = Some(day);
+            }
+        }
+        Ok(oldest)
+    }
+
+    fn weekly_stretch(&self, monday: time::Date) -> Result<Vec<WeeklyStretch>, String> {
+        let oldest = monday.saturating_sub(time::Duration::days(
+            ((STRETCH_WEEK_COUNT - 1) * 7) as i64,
+        ));
+        let range_start = format_day(oldest);
+        let range_end = format_day(monday.saturating_add(time::Duration::days(7)));
+        let (from, to) = padded_day_bounds(&range_start, &range_end);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT started_at, median_stretch_seconds
+                 FROM session
+                 WHERE ended_at IS NOT NULL
+                   AND substr(started_at, 1, 10) >= ?1
+                   AND substr(started_at, 1, 10) < ?2",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([from, to], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut buckets = vec![Vec::<u64>::new(); STRETCH_WEEK_COUNT];
+        for row in rows {
+            let (started_at, stretch) = row.map_err(|error| error.to_string())?;
+            if stretch <= 0 {
+                continue;
+            }
+            let Some(day) = local_day_in(&started_at, &range_start, &range_end) else {
+                continue;
+            };
+            let date = parse_day(&day)?;
+            let days_from_oldest = (date - oldest).whole_days();
+            if days_from_oldest < 0 {
+                continue;
+            }
+            let index = (days_from_oldest / 7) as usize;
+            if let Some(bucket) = buckets.get_mut(index) {
+                bucket.push(stretch as u64);
+            }
+        }
+
+        Ok((0..STRETCH_WEEK_COUNT)
+            .map(|index| {
+                let week_start = oldest.saturating_add(time::Duration::days(index as i64 * 7));
+                WeeklyStretch {
+                    week_start: format_day(week_start),
+                    median_stretch_seconds: median(&buckets[index]),
+                    session_count: buckets[index].len() as u64,
+                }
+            })
+            .collect())
+    }
+
+    fn focus_recap(
+        &self,
+        start: time::Date,
+        end_exclusive: time::Date,
+    ) -> Result<FocusRecap, String> {
+        let (focus_seconds, session_count) =
+            self.sum_focus(&format_day(start), &format_day(end_exclusive))?;
+        Ok(FocusRecap {
+            start: format_day(start),
+            end: format_day(end_exclusive.saturating_sub(time::Duration::days(1))),
+            focus_seconds,
+            session_count,
+        })
+    }
+
+    fn sum_focus(&self, start_day: &str, end_day_exclusive: &str) -> Result<(u64, u64), String> {
+        let (from, to) = padded_day_bounds(start_day, end_day_exclusive);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT started_at, focused_seconds
+                 FROM session
+                 WHERE ended_at IS NOT NULL
+                   AND substr(started_at, 1, 10) >= ?1
+                   AND substr(started_at, 1, 10) < ?2",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![from, to], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut seconds = 0u64;
+        let mut count = 0u64;
+        for row in rows {
+            let (started_at, focused_seconds) = row.map_err(|error| error.to_string())?;
+            if local_day_in(&started_at, start_day, end_day_exclusive).is_none() {
+                continue;
+            }
+            seconds += focused_seconds as u64;
+            count += 1;
+        }
+        Ok((seconds, count))
     }
 
     pub fn delete_session(&self, id: u64) -> Result<(), String> {
@@ -1132,6 +1553,158 @@ fn hint_label(app: &str, context: Option<&str>) -> String {
         .unwrap_or_else(|| app.to_string())
 }
 
+fn recap_activity_label(app: &str, context: Option<&str>) -> String {
+    if is_browser_app(&app.to_lowercase()) {
+        context
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|title| title.to_string())
+            .unwrap_or_else(|| "Browser · site unknown".to_string())
+    } else {
+        app.to_string()
+    }
+}
+
+fn recap_app_group(rules: &[AppRule], app: &str, context: Option<&str>) -> &'static str {
+    match rules
+        .iter()
+        .find(|rule| rule.matches_app(app, context))
+        .map(|rule| rule.classification)
+    {
+        Some(RuleClassification::Focused) => "Focus",
+        Some(RuleClassification::Neutral) => "Neutral",
+        Some(RuleClassification::Distracting) => "Distracting",
+        None => "Miscellaneous",
+    }
+}
+
+fn percent(part: u64, total: u64) -> Option<u64> {
+    if total == 0 {
+        None
+    } else {
+        Some((part * 100) / total)
+    }
+}
+
+fn overlap(start: u64, end: u64, window_start: u64, window_end: u64) -> u64 {
+    end.min(window_end).saturating_sub(start.max(window_start))
+}
+
+fn half_focus(spans: &[ReportSpan], duration: u64) -> (u64, u64, u64, u64) {
+    if duration == 0 {
+        return (0, 0, 0, 0);
+    }
+    let mid = duration / 2;
+    let mut first_focus = 0u64;
+    let mut first_total = 0u64;
+    let mut second_focus = 0u64;
+    let mut second_total = 0u64;
+    for span in spans {
+        let start = span.started_offset_seconds;
+        let end = start + span.seconds;
+        let first = overlap(start, end, 0, mid);
+        let second = overlap(start, end, mid, duration);
+        first_total += first;
+        second_total += second;
+        if matches!(span.state.as_str(), "focused" | "neutral") {
+            first_focus += first;
+            second_focus += second;
+        }
+    }
+    (first_focus, first_total, second_focus, second_total)
+}
+
+fn recap_buckets(
+    kind: &str,
+    start: time::Date,
+    end_exclusive: time::Date,
+    by_day: &std::collections::HashMap<String, u64>,
+) -> Vec<RecapBucket> {
+    if kind == "week" {
+        const LETTERS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
+        return (0i64..7)
+            .map(|index| {
+                let day = start.saturating_add(time::Duration::days(index));
+                RecapBucket {
+                    label: LETTERS[index as usize].to_string(),
+                    focus_seconds: *by_day.get(&format_day(day)).unwrap_or(&0),
+                }
+            })
+            .collect();
+    }
+
+    let last_day = end_exclusive
+        .saturating_sub(time::Duration::days(1))
+        .day();
+    let ranges = [
+        (1u8, 7u8),
+        (8, 14),
+        (15, 21),
+        (22, 28),
+        (29, last_day.max(29)),
+    ];
+    ranges
+        .into_iter()
+        .filter(|(from, _)| *from <= last_day)
+        .map(|(from, to)| {
+            let to = to.min(last_day);
+            let mut focus_seconds = 0u64;
+            let mut cursor = start.replace_day(from).unwrap_or(start);
+            let stop = start.replace_day(to).unwrap_or(start);
+            loop {
+                focus_seconds += by_day.get(&format_day(cursor)).copied().unwrap_or(0);
+                if cursor >= stop {
+                    break;
+                }
+                cursor = cursor.saturating_add(time::Duration::days(1));
+            }
+            RecapBucket {
+                label: format!("{from}–{to}"),
+                focus_seconds,
+            }
+        })
+        .collect()
+}
+
+fn full_week_stretch_range(
+    start: time::Date,
+    end_exclusive: time::Date,
+    sessions: &[RecapSession],
+) -> (Option<u64>, Option<u64>) {
+    let mut cursor = start;
+    while cursor < end_exclusive && cursor.weekday() != time::Weekday::Monday {
+        cursor = cursor.saturating_add(time::Duration::days(1));
+    }
+    let mut week_medians = Vec::new();
+    while cursor.saturating_add(time::Duration::days(7)) <= end_exclusive {
+        let week_end = format_day(cursor.saturating_add(time::Duration::days(7)));
+        let week_start = format_day(cursor);
+        let samples: Vec<u64> = sessions
+            .iter()
+            .filter(|session| session.day >= week_start && session.day < week_end)
+            .map(|session| session.median_stretch_seconds)
+            .filter(|value| *value > 0)
+            .collect();
+        if !samples.is_empty() {
+            week_medians.push(median(&samples));
+        }
+        cursor = cursor.saturating_add(time::Duration::days(7));
+    }
+    let low = week_medians.iter().copied().min();
+    let high = week_medians.iter().copied().max();
+    if low == high {
+        (None, None)
+    } else {
+        (low, high)
+    }
+}
+
+fn monday_on_or_before(date: time::Date) -> time::Date {
+    date.saturating_sub(time::Duration::days(i64::from(
+        date.weekday().number_days_from_monday(),
+    )))
+}
+
 fn count_drifts(spans: &[ReportSpan]) -> u64 {
     let mut count = 0u64;
     let mut in_focus_track = false;
@@ -1167,6 +1740,88 @@ fn focused_stretches(spans: &[ReportSpan]) -> Vec<u64> {
         stretches.push(current);
     }
     stretches
+}
+
+fn parse_day(value: &str) -> Result<time::Date, String> {
+    if value.len() != 10 || value.as_bytes().get(4) != Some(&b'-') || value.as_bytes().get(7) != Some(&b'-') {
+        return Err("date must be YYYY-MM-DD".into());
+    }
+    let year: i32 = value[0..4]
+        .parse()
+        .map_err(|_| "date must be YYYY-MM-DD".to_string())?;
+    let month: u8 = value[5..7]
+        .parse()
+        .map_err(|_| "date must be YYYY-MM-DD".to_string())?;
+    let day: u8 = value[8..10]
+        .parse()
+        .map_err(|_| "date must be YYYY-MM-DD".to_string())?;
+    let month = time::Month::try_from(month).map_err(|error| error.to_string())?;
+    time::Date::from_calendar_date(year, month, day).map_err(|error| error.to_string())
+}
+
+fn format_day(date: time::Date) -> String {
+    format!("{:04}-{:02}-{:02}", date.year(), u8::from(date.month()), date.day())
+}
+
+fn local_today() -> time::Date {
+    time::OffsetDateTime::now_local()
+        .map(|now| now.date())
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc().date())
+}
+
+fn this_monday() -> time::Date {
+    monday_on_or_before(local_today())
+}
+
+fn calendar_day(instant: time::OffsetDateTime, offset: time::UtcOffset) -> String {
+    format_day(instant.to_offset(offset).date())
+}
+
+fn local_day(started_at: &str) -> String {
+    let prefix = started_at.get(..10).unwrap_or(started_at).to_string();
+    let Ok(instant) = time::OffsetDateTime::parse(
+        started_at,
+        &time::format_description::well_known::Rfc3339,
+    ) else {
+        return prefix;
+    };
+    let offset = time::UtcOffset::local_offset_at(instant).unwrap_or(time::UtcOffset::UTC);
+    calendar_day(instant, offset)
+}
+
+fn local_day_in(started_at: &str, start: &str, end_exclusive: &str) -> Option<String> {
+    let day = local_day(started_at);
+    if day.as_str() >= start && day.as_str() < end_exclusive {
+        Some(day)
+    } else {
+        None
+    }
+}
+
+// ponytail: ±1 UTC day covers every real zone. Widen this if a zone ever exceeds 24 hours.
+fn padded_day_bounds(start: &str, end_exclusive: &str) -> (String, String) {
+    let from = parse_day(start)
+        .map(|day| format_day(day.saturating_sub(time::Duration::days(1))))
+        .unwrap_or_else(|_| start.to_string());
+    let to = parse_day(end_exclusive)
+        .map(|day| format_day(day.saturating_add(time::Duration::days(1))))
+        .unwrap_or_else(|_| end_exclusive.to_string());
+    (from, to)
+}
+
+fn first_of_month(date: time::Date) -> time::Date {
+    date.replace_day(1).expect("month has a first day")
+}
+
+fn next_month_start(date: time::Date) -> time::Date {
+    let start = first_of_month(date);
+    if start.month() == time::Month::December {
+        time::Date::from_calendar_date(start.year() + 1, time::Month::January, 1)
+            .expect("january 1")
+    } else {
+        let month = time::Month::try_from(u8::from(start.month()) + 1).expect("next month");
+        time::Date::from_calendar_date(start.year(), month, 1).expect("month start")
+    }
 }
 
 fn median(values: &[u64]) -> u64 {
@@ -1466,6 +2121,254 @@ mod tests {
         assert_eq!(trends.daily_focus[0].focus_percent, 83);
         assert_eq!(trends.daily_focus[0].focus_seconds, 1500);
         assert_eq!(trends.sessions[0].focus_percent, 83);
+        assert_eq!(trends.weekly_stretch.len(), 5);
+        let (seconds, count) = storage
+            .sum_focus("2026-09-22", "2026-09-23")
+            .expect("sum");
+        assert_eq!(count, 1);
+        assert_eq!(seconds, 1500);
+        let (empty_seconds, empty_count) = storage
+            .sum_focus("2026-09-23", "2026-09-24")
+            .expect("empty sum");
+        assert_eq!(empty_count, 0);
+        assert_eq!(empty_seconds, 0);
+    }
+
+    #[test]
+    fn recap_uses_inclusive_start_and_exclusive_end() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let first = storage
+            .insert_session("First", Strictness::Normal, "2026-09-01T08:00:00Z", 1800)
+            .expect("insert first");
+        storage
+            .insert_span(first, "Code", None, "work", "focused", 0, 600)
+            .expect("span");
+        storage
+            .close_session(first, "2026-09-01T08:10:00Z", "stopped", 600)
+            .expect("close");
+        let second = storage
+            .insert_session("Second", Strictness::Normal, "2026-09-30T08:00:00Z", 1800)
+            .expect("insert second");
+        storage
+            .insert_span(second, "Code", None, "work", "focused", 0, 900)
+            .expect("span");
+        storage
+            .close_session(second, "2026-09-30T08:15:00Z", "stopped", 900)
+            .expect("close");
+        let october = storage
+            .insert_session("October", Strictness::Normal, "2026-10-01T08:00:00Z", 1800)
+            .expect("insert october");
+        storage
+            .insert_span(october, "Code", None, "work", "focused", 0, 120)
+            .expect("span");
+        storage
+            .close_session(october, "2026-10-01T08:02:00Z", "stopped", 120)
+            .expect("close");
+
+        let september = storage
+            .focus_recap(
+                parse_day("2026-09-01").expect("sep 1"),
+                parse_day("2026-10-01").expect("oct 1"),
+            )
+            .expect("september recap");
+        assert_eq!(september.start, "2026-09-01");
+        assert_eq!(september.end, "2026-09-30");
+        assert_eq!(september.session_count, 2);
+        assert_eq!(september.focus_seconds, 1500);
+
+        let week = storage
+            .focus_recap(
+                parse_day("2026-09-28").expect("week start"),
+                parse_day("2026-10-05").expect("week end"),
+            )
+            .expect("week recap");
+        assert_eq!(week.session_count, 2);
+        assert_eq!(week.focus_seconds, 1020);
+    }
+
+    #[test]
+    fn period_recap_splits_week_days_and_session_halves() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage
+            .insert_session("Split", Strictness::Normal, "2026-09-23T12:00:00Z", 1200)
+            .expect("insert");
+        storage
+            .insert_span(id, "Cursor", None, "work", "focused", 0, 600)
+            .expect("first half");
+        storage
+            .insert_span(id, "Chrome", None, "browse", "distracted", 600, 600)
+            .expect("second half");
+        storage
+            .close_session(id, "2026-09-23T12:20:00Z", "stopped", 1200)
+            .expect("close");
+
+        let recap = storage
+            .get_period_recap("week", "2026-09-23")
+            .expect("week recap");
+        assert_eq!(recap.kind, "week");
+        assert_eq!(recap.start, "2026-09-21");
+        assert_eq!(recap.end, "2026-09-27");
+        assert_eq!(recap.session_count, 1);
+        assert_eq!(recap.focus_seconds, 600);
+        assert_eq!(recap.buckets.len(), 7);
+        assert_eq!(recap.buckets[2].label, "W");
+        assert_eq!(recap.buckets[2].focus_seconds, 600);
+        assert_eq!(recap.buckets[0].focus_seconds, 0);
+        assert_eq!(recap.first_half_focus_percent, Some(100));
+        assert_eq!(recap.second_half_focus_percent, Some(0));
+        assert_eq!(
+            recap
+                .apps
+                .iter()
+                .map(|app| (app.group.as_str(), app.label.as_str(), app.seconds))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Miscellaneous", "Browser · site unknown", 600),
+                ("Miscellaneous", "Cursor", 600),
+            ]
+        );
+
+        let month = storage
+            .get_period_recap("month", "2026-09-23")
+            .expect("month recap");
+        assert_eq!(month.start, "2026-09-01");
+        assert_eq!(month.end, "2026-09-30");
+        assert_eq!(month.buckets.len(), 5);
+        assert_eq!(month.buckets[3].label, "22–28");
+        assert_eq!(month.buckets[3].focus_seconds, 600);
+        assert!(storage.get_period_recap("year", "2026-09-01").is_err());
+    }
+
+    #[test]
+    fn period_recap_groups_apps_by_current_rules() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        storage
+            .replace_rules(&[
+                AppRule::app_name("Cursor", RuleClassification::Focused),
+                AppRule::app_name("Slack", RuleClassification::Neutral),
+                AppRule::title_contains("YouTube", RuleClassification::Distracting),
+            ])
+            .expect("rules");
+        let id = storage
+            .insert_session("Grouped", Strictness::Normal, "2026-09-23T12:00:00Z", 250)
+            .expect("insert");
+        storage
+            .insert_span(id, "Cursor", None, "work", "focused", 0, 100)
+            .expect("focus");
+        storage
+            .insert_span(id, "Slack", None, "comms", "neutral", 100, 50)
+            .expect("neutral");
+        storage
+            .insert_span(
+                id,
+                "Chrome",
+                Some("YouTube - Home"),
+                "browse",
+                "distracted",
+                150,
+                80,
+            )
+            .expect("distract");
+        storage
+            .insert_span(id, "Notepad", None, "browse", "neutral", 230, 20)
+            .expect("misc");
+        storage
+            .close_session(id, "2026-09-23T12:04:10Z", "stopped", 250)
+            .expect("close");
+
+        let recap = storage
+            .get_period_recap("week", "2026-09-23")
+            .expect("week recap");
+        assert_eq!(
+            recap
+                .apps
+                .iter()
+                .map(|app| (app.group.as_str(), app.label.as_str(), app.seconds))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Focus", "Cursor", 100),
+                ("Neutral", "Slack", 50),
+                ("Distracting", "YouTube - Home", 80),
+                ("Miscellaneous", "Notepad", 20),
+            ]
+        );
+    }
+
+    #[test]
+    fn month_bounds_roll_to_january() {
+        let december = parse_day("2026-12-09").expect("december");
+        assert_eq!(format_day(first_of_month(december)), "2026-12-01");
+        assert_eq!(format_day(next_month_start(december)), "2027-01-01");
+        let march = parse_day("2026-03-31").expect("march");
+        assert_eq!(format_day(next_month_start(march)), "2026-04-01");
+    }
+
+    #[test]
+    fn history_week_keeps_sessions_on_that_monday_week() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let in_week = storage
+            .insert_session("In week", Strictness::Normal, "2026-09-22T12:00:00Z", 1800)
+            .expect("insert in week");
+        storage
+            .insert_span(in_week, "Code", None, "work", "focused", 0, 600)
+            .expect("span");
+        storage
+            .close_session(in_week, "2026-09-22T12:10:00Z", "stopped", 600)
+            .expect("close");
+        let later = storage
+            .insert_session("Later", Strictness::Normal, "2026-10-06T12:00:00Z", 1800)
+            .expect("insert later");
+        storage
+            .insert_span(later, "Code", None, "work", "focused", 0, 300)
+            .expect("span");
+        storage
+            .close_session(later, "2026-10-06T12:05:00Z", "stopped", 300)
+            .expect("close");
+
+        let week = storage
+            .get_history_week("2026-09-21")
+            .expect("history week");
+        assert_eq!(week.week_start, "2026-09-21");
+        assert_eq!(week.sessions.len(), 1);
+        assert_eq!(week.sessions[0].goal, "In week");
+        assert_eq!(week.oldest_day.as_deref(), Some("2026-09-22"));
+
+        let empty = storage
+            .get_history_week("2026-09-07")
+            .expect("empty week");
+        assert!(empty.sessions.is_empty());
+        assert!(storage.get_history_week("09-21-2026").is_err());
+    }
+
+    #[test]
+    fn sunday_stays_in_the_week_already_underway() {
+        let sunday = parse_day("2026-10-11").expect("sunday");
+        assert_eq!(format_day(monday_on_or_before(sunday)), "2026-10-05");
+
+        let instant = time::OffsetDateTime::parse(
+            "2026-10-12T03:26:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("parse");
+        let central = time::UtcOffset::from_hms(-5, 0, 0).expect("offset");
+        assert_eq!(calendar_day(instant, central), "2026-10-11");
+
+        let today = local_today();
+        let monday = this_monday();
+        assert_eq!(monday.weekday(), time::Weekday::Monday);
+        assert!(today >= monday);
+        assert!(today < monday.saturating_add(time::Duration::days(7)));
+
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let recap = storage
+            .get_period_recap("week", "2026-10-11")
+            .expect("week of sunday");
+        assert_eq!(recap.start, "2026-10-05");
+        assert_eq!(recap.end, "2026-10-11");
+        let history = storage
+            .get_history_week("2026-10-11")
+            .expect("history week");
+        assert_eq!(history.week_start, "2026-10-05");
     }
 
     #[test]

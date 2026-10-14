@@ -233,17 +233,18 @@ pub enum RuleClassification {
 }
 
 impl AppRule {
-    fn matches(&self, sample: &ActivitySample) -> bool {
+    pub fn matches_app(&self, app: &str, title: Option<&str>) -> bool {
         let value = self.value.trim();
         if value.is_empty() {
             return false;
         }
         // One name covers the program and the window title. File paths are not a rule.
-        sample.app_name.eq_ignore_ascii_case(value)
-            || sample
-                .window_title
-                .as_ref()
-                .is_some_and(|title| contains_ignore_case(title, value))
+        app.eq_ignore_ascii_case(value)
+            || title.is_some_and(|title| contains_ignore_case(title, value))
+    }
+
+    fn matches(&self, sample: &ActivitySample) -> bool {
+        self.matches_app(&sample.app_name, sample.window_title.as_deref())
     }
 }
 

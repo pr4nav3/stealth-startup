@@ -14,7 +14,7 @@ use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
-use storage::{SessionReport, StoredPhraseLibrary, TrendsData};
+use storage::{HistoryWeek, PeriodRecap, SessionReport, StoredPhraseLibrary, TrendsData};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -152,6 +152,20 @@ fn get_session_report(id: u64, state: State<'_, AppState>) -> Result<SessionRepo
 #[tauri::command]
 fn get_trends(state: State<'_, AppState>) -> Result<TrendsData, String> {
     lock_sessions(&state)?.trends()
+}
+
+#[tauri::command]
+fn get_history_week(week_start: String, state: State<'_, AppState>) -> Result<HistoryWeek, String> {
+    lock_sessions(&state)?.history_week(week_start)
+}
+
+#[tauri::command]
+fn get_period_recap(
+    period: String,
+    start: String,
+    state: State<'_, AppState>,
+) -> Result<PeriodRecap, String> {
+    lock_sessions(&state)?.period_recap(period, start)
 }
 
 #[tauri::command]
@@ -446,6 +460,8 @@ pub fn run() {
             mark_current_distracting,
             update_session_rules,
             get_history,
+            get_history_week,
+            get_period_recap,
             get_session_report,
             get_trends,
             delete_session,
