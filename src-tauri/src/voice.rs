@@ -20,8 +20,16 @@ const MODEL_REPO: &str = "ResembleAI/chatterbox-nano";
 const MODEL_REVISION: &str = "71ccd1d0081b430592cea481f4307e764e07bc64";
 const GIBIBYTE: u64 = 1024 * 1024 * 1024;
 const MIN_REQUIRED_RAM_BYTES: u64 = 8 * GIBIBYTE;
-const DEFAULT_MIN_FREE_RAM_BYTES: u64 = 6 * GIBIBYTE;
-const MIN_FREE_RAM_AFTER_MEASURE_BYTES: u64 = 4 * GIBIBYTE;
+// ponytail: 5 GB is 3.3 GB measured worker peak plus headroom, rounded up. Provisional until generation_log.jsonl has more runs.
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_MIN_AVAILABLE_RAM_BYTES: u64 = 5 * GIBIBYTE;
+// macOS "available" includes inactive cache pages, so 5 GB is not the same as Windows ullAvailPhys.
+#[cfg(target_os = "macos")]
+const DEFAULT_MIN_AVAILABLE_RAM_BYTES: u64 = 6 * GIBIBYTE;
+#[cfg(not(target_os = "macos"))]
+const MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES: u64 = 4 * GIBIBYTE;
+#[cfg(target_os = "macos")]
+const MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES: u64 = 5 * GIBIBYTE;
 const GENERATION_PEAK_HEADROOM_BYTES: u64 = GIBIBYTE;
 const EXTRA_DOWNLOAD_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REFERENCE_AUDIO_BYTES: usize = 60 * 1024 * 1024;
@@ -30,6 +38,10 @@ const MAX_VOICE_GENERATION: Duration = Duration::from_secs(30 * 60);
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const STARTER_PROFILES: &[(&str, &str, &str)] = &[
+    ("derek", "Starter Male", "derek.wav"),
+    ("elise", "Starter Female", "elise.wav"),
+];
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -190,6 +202,30 @@ struct GenerationRamBudget {
     generation_count: u64,
 }
 
+#[derive(Serialize)]
+struct GenerationLogRow {
+    at_ms: u64,
+    os: &'static str,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    profile: String,
+    phrases: usize,
+    merge: bool,
+    need: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    available_before: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    available_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker_peak: Option<u64>,
+    duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pressure: Option<u32>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct GenerateVoiceClipsInput {
     pub profile_id: String,
@@ -197,6 +233,7 @@ pub struct GenerateVoiceClipsInput {
     pub reference_audio_path: String,
     pub phrases: Option<Vec<VoicePhraseInput>>,
     pub delete_reference_after_generation: Option<bool>,
+    pub merge_clips: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -220,6 +257,7 @@ pub struct VoiceProfileSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VoiceClipSummary {
     pub clip_id: String,
+    pub phrase_id: String,
     pub file_name: String,
     pub path: String,
     pub bytes: u64,
@@ -310,6 +348,7 @@ const MODEL_FILES: &[ModelFile] = &[
 pub fn get_status(app: &AppHandle) -> Result<VoiceBackendStatus, String> {
     let root = voice_root(app)?;
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    seed_starter_profiles(&root, Some(app));
     Ok(status_for_root(&root))
 }
 
@@ -479,6 +518,9 @@ pub fn delete_profile(
 ) -> Result<Vec<VoiceProfileSummary>, String> {
     let root = voice_root(app)?;
     let id = clean_id(&profile_id)?;
+    if is_starter_profile(&id) {
+        return Err("Starter voices stay on this device.".into());
+    }
     let dir = profile_dir(&root, &id);
     if dir.exists() {
         fs::remove_dir_all(dir).map_err(|error| error.to_string())?;
@@ -713,8 +755,42 @@ pub fn generate_clips(
     app: AppHandle,
     input: GenerateVoiceClipsInput,
 ) -> Result<VoiceProfileSummary, String> {
+    let started = Instant::now();
     let root = voice_root(&app)?;
     let root = ensure_voice_root(&root)?;
+    seed_starter_profiles(&root, Some(&app));
+    let mut row = GenerationLogRow {
+        at_ms: unix_millis() as u64,
+        os: std::env::consts::OS,
+        ok: false,
+        error: None,
+        profile: input.profile_id.clone(),
+        phrases: input.phrases.as_ref().map(Vec::len).unwrap_or(0),
+        merge: input.merge_clips.unwrap_or(false),
+        need: required_available_ram_bytes(load_generation_budget(&root).last_peak_ram_bytes),
+        available_before: available_ram_bytes(),
+        available_after: None,
+        total: total_ram_bytes(),
+        worker_peak: None,
+        duration_ms: 0,
+        pressure: macos_pressure_for_log(),
+    };
+    let result = generate_clips_inner(&root, input, &mut row);
+    row.duration_ms = started.elapsed().as_millis() as u64;
+    row.available_after = available_ram_bytes();
+    match &result {
+        Ok(_) => row.ok = true,
+        Err(error) => row.error = Some(truncate_error(error)),
+    }
+    append_generation_log(&root, &row);
+    result
+}
+
+fn generate_clips_inner(
+    root: &Path,
+    input: GenerateVoiceClipsInput,
+    row: &mut GenerationLogRow,
+) -> Result<VoiceProfileSummary, String> {
     let profile_id = clean_id(&input.profile_id)?;
     let display_name = input
         .display_name
@@ -730,6 +806,7 @@ pub fn generate_clips(
     ensure_generation_ram(&root)?;
 
     let phrases = input.phrases.unwrap_or_else(default_phrases);
+    row.phrases = phrases.len();
     validate_phrases(&phrases)?;
 
     let dir = profile_dir(&root, &profile_id);
@@ -764,11 +841,17 @@ pub fn generate_clips(
 
     let output = match run_worker_and_record_peak(&root, command) {
         Ok(output) => output,
-        Err(error) => {
+        Err(fail) => {
+            if fail.peak_ram_bytes > 0 {
+                row.worker_peak = Some(fail.peak_ram_bytes);
+            }
             let _ = fs::remove_dir_all(&staging);
-            return Err(error);
+            return Err(fail.message);
         }
     };
+    if output.peak_ram_bytes > 0 {
+        row.worker_peak = Some(output.peak_ram_bytes);
+    }
     if !output.status.success() {
         let _ = fs::remove_dir_all(&staging);
         return Err(format!(
@@ -777,11 +860,19 @@ pub fn generate_clips(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    if let Err(error) = replace_generated_clips(&dir, &staging) {
+    let merge = input.merge_clips.unwrap_or(false);
+    let install = if merge {
+        merge_generated_clips(&dir, &staging)
+    } else {
+        replace_generated_clips(&dir, &staging)
+    };
+    if let Err(error) = install {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    write_phrase_bank(&dir.join("phrases.json"), &phrases)?;
+    if !merge {
+        write_phrase_bank(&dir.join("phrases.json"), &phrases)?;
+    }
     let _ = fs::remove_dir_all(&staging);
 
     let reference_retained = !input.delete_reference_after_generation.unwrap_or(false);
@@ -1077,6 +1168,49 @@ fn download_model_to_with_progress(
     Ok(())
 }
 
+fn merge_generated_clips(profile_dir: &Path, staging_dir: &Path) -> Result<(), String> {
+    let staged_clips = staging_dir.join("clips");
+    if !staged_clips.is_dir() {
+        return Err("voice worker did not produce clip files".to_string());
+    }
+
+    let clips_dir = profile_dir.join("clips");
+    fs::create_dir_all(&clips_dir).map_err(|error| error.to_string())?;
+    let staged = fs::read_dir(&staged_clips).map_err(|error| error.to_string())?;
+    for entry in staged {
+        let staged_path = entry.map_err(|error| error.to_string())?.path();
+        if !staged_path.is_file() {
+            continue;
+        }
+        let Some(file_name) = staged_path.file_name() else {
+            continue;
+        };
+        let phrase_id = staged_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(clip_phrase_id)
+            .unwrap_or_default();
+        if !phrase_id.is_empty() {
+            let existing = fs::read_dir(&clips_dir).map_err(|error| error.to_string())?;
+            for old in existing {
+                let old_path = old.map_err(|error| error.to_string())?.path();
+                if clip_path_matches(&old_path, phrase_id) {
+                    fs::remove_file(&old_path).map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        fs::copy(&staged_path, clips_dir.join(file_name)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn clip_phrase_id(stem: &str) -> &str {
+    stem.split_once('_')
+        .filter(|(head, _)| !head.is_empty() && head.chars().all(|ch| ch.is_ascii_digit()))
+        .map(|(_, rest)| rest)
+        .unwrap_or(stem)
+}
+
 fn replace_generated_clips(profile_dir: &Path, staging_dir: &Path) -> Result<(), String> {
     let staged_clips = staging_dir.join("clips");
     if !staged_clips.is_dir() {
@@ -1173,6 +1307,8 @@ fn read_profile_metadata(dir: &Path) -> Option<VoiceProfileMetadata> {
     serde_json::from_slice(&bytes).ok()
 }
 
+const MIN_CLIP_BYTES: u64 = 44;
+
 fn clip_summaries(dir: &Path) -> Result<Vec<VoiceClipSummary>, String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok(Vec::new());
@@ -1180,7 +1316,14 @@ fn clip_summaries(dir: &Path) -> Result<Vec<VoiceClipSummary>, String> {
     let mut clips = Vec::new();
     for entry in entries {
         let path = entry.map_err(|error| error.to_string())?.path();
-        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("wav") {
+        if path.extension().and_then(|value| value.to_str()) != Some("wav") {
+            continue;
+        }
+        let bytes = match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => meta.len(),
+            _ => continue,
+        };
+        if bytes < MIN_CLIP_BYTES || !path.exists() {
             continue;
         }
         let Some(file_name) = path
@@ -1194,12 +1337,11 @@ fn clip_summaries(dir: &Path) -> Result<Vec<VoiceClipSummary>, String> {
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| file_name.clone());
         clips.push(VoiceClipSummary {
+            phrase_id: clip_phrase_id(&clip_id).to_string(),
             clip_id,
             file_name,
             path: path.to_string_lossy().into_owned(),
-            bytes: fs::metadata(&path)
-                .map_err(|error| error.to_string())?
-                .len(),
+            bytes,
         });
     }
     clips.sort_by(|left, right| left.file_name.cmp(&right.file_name));
@@ -1593,7 +1735,7 @@ fn system_info(root: &Path, recommended_free_disk_bytes: u64) -> VoiceSystemInfo
     let total_ram_bytes = total_ram_bytes();
     let available_ram_bytes = available_ram_bytes();
     let last_peak_ram_bytes = load_generation_budget(root).last_peak_ram_bytes;
-    let min_free_ram_bytes = required_free_ram_bytes(last_peak_ram_bytes);
+    let min_free_ram_bytes = required_available_ram_bytes(last_peak_ram_bytes);
     let available_disk_bytes = available_disk_bytes(root);
     VoiceSystemInfo {
         os: std::env::consts::OS.to_string(),
@@ -1610,19 +1752,20 @@ fn system_info(root: &Path, recommended_free_disk_bytes: u64) -> VoiceSystemInfo
             available_ram_bytes,
             total_ram_bytes,
             last_peak_ram_bytes,
-        ),
+        )
+        .map(|ok| ok && macos_pressure_allows()),
         available_disk_bytes,
         recommended_free_disk_bytes,
         has_enough_disk: available_disk_bytes.map(|bytes| bytes >= recommended_free_disk_bytes),
     }
 }
 
-fn required_free_ram_bytes(last_peak_ram_bytes: Option<u64>) -> u64 {
+fn required_available_ram_bytes(last_peak_ram_bytes: Option<u64>) -> u64 {
     match last_peak_ram_bytes {
         Some(peak) if peak > 0 => peak
             .saturating_add(GENERATION_PEAK_HEADROOM_BYTES)
-            .max(MIN_FREE_RAM_AFTER_MEASURE_BYTES),
-        _ => DEFAULT_MIN_FREE_RAM_BYTES,
+            .max(MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES),
+        _ => DEFAULT_MIN_AVAILABLE_RAM_BYTES,
     }
 }
 
@@ -1631,30 +1774,61 @@ fn ram_allows_generation(
     total_ram_bytes: Option<u64>,
     last_peak_ram_bytes: Option<u64>,
 ) -> Option<bool> {
-    let need = required_free_ram_bytes(last_peak_ram_bytes);
-    let free_ok = available_ram_bytes.map(|bytes| bytes >= need)?;
+    let need = required_available_ram_bytes(last_peak_ram_bytes);
+    let available_ok = available_ram_bytes.map(|bytes| bytes >= need)?;
     let machine_ok = total_ram_bytes
         .map(|bytes| bytes >= MIN_REQUIRED_RAM_BYTES)
         .unwrap_or(true);
-    Some(free_ok && machine_ok)
+    Some(available_ok && machine_ok)
+}
+
+fn macos_pressure_allows() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // 0 normal, 1 warning, 2 urgent, 3 critical.
+        match crate::macos::memory_pressure_level() {
+            Some(level) if level >= 2 => false,
+            _ => true,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+fn macos_pressure_for_log() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos::memory_pressure_level()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 fn ensure_generation_ram(root: &Path) -> Result<(), String> {
+    if !macos_pressure_allows() {
+        return Err(
+            "macOS is under memory pressure. Close other apps, then try again.".into(),
+        );
+    }
     let available = available_ram_bytes();
     let total = total_ram_bytes();
     let last_peak = load_generation_budget(root).last_peak_ram_bytes;
-    let need = required_free_ram_bytes(last_peak);
+    let need = required_available_ram_bytes(last_peak);
     match ram_allows_generation(available, total, last_peak) {
         Some(true) => Ok(()),
         Some(false) => Err(format!(
-            "Not enough free RAM to clone a voice. Need about {}, this PC has {} free. Close other apps and try again.",
+            "Not enough available RAM to clone a voice. Need about {}, this PC has {} available. Close other apps and try again.",
             format_bytes(need),
             available
                 .map(format_bytes)
                 .unwrap_or_else(|| "unknown".to_string())
         )),
         None if cfg!(target_os = "windows") => Err(
-            "Could not measure free RAM. Refusing to start voice generation on Windows.".to_string(),
+            "Could not measure available RAM. Refusing to start voice generation on Windows.".to_string(),
         ),
         None => Ok(()),
     }
@@ -1672,6 +1846,36 @@ fn format_bytes(bytes: u64) -> String {
 
 fn generation_budget_path(root: &Path) -> PathBuf {
     root.join("generation_ram.json")
+}
+
+fn generation_log_path(root: &Path) -> PathBuf {
+    root.join("generation_log.jsonl")
+}
+
+fn append_generation_log(root: &Path, row: &GenerationLogRow) {
+    let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(generation_log_path(root))
+    else {
+        return;
+    };
+    if serde_json::to_writer(&mut file, row).is_ok() {
+        let _ = file.write_all(b"\n");
+    }
+}
+
+fn truncate_error(error: &str) -> String {
+    const LIMIT: usize = 180;
+    let mut out = String::new();
+    for ch in error.chars() {
+        if out.len() >= LIMIT {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn load_generation_budget(root: &Path) -> GenerationRamBudget {
@@ -1709,17 +1913,26 @@ struct WorkerRun {
     status: std::process::ExitStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    peak_ram_bytes: u64,
 }
 
-fn run_worker_and_record_peak(root: &Path, command: Command) -> Result<WorkerRun, String> {
+struct WorkerFail {
+    message: String,
+    peak_ram_bytes: u64,
+}
+
+fn run_worker_and_record_peak(root: &Path, command: Command) -> Result<WorkerRun, WorkerFail> {
     run_worker_until(root, command, MAX_VOICE_GENERATION)
 }
 
-fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Result<WorkerRun, String> {
+fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Result<WorkerRun, WorkerFail> {
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.stdin(Stdio::null());
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut child = command.spawn().map_err(|error| WorkerFail {
+        message: error.to_string(),
+        peak_ram_bytes: 0,
+    })?;
     let _job = bind_worker_lifetime(&child);
     let pid = child.id();
     let stdout = child.stdout.take();
@@ -1747,7 +1960,10 @@ fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Res
             let _ = child.kill();
             let _ = child.wait();
             finish_generation_peak(root, peak);
-            return Err("voice generation timed out".to_string());
+            return Err(WorkerFail {
+                message: "voice generation timed out".to_string(),
+                peak_ram_bytes: peak,
+            });
         }
         if let Some(used) = process_ram_bytes(pid) {
             if used > peak {
@@ -1761,7 +1977,10 @@ fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Res
             Err(error) => {
                 let _ = child.kill();
                 finish_generation_peak(root, peak);
-                return Err(error.to_string());
+                return Err(WorkerFail {
+                    message: error.to_string(),
+                    peak_ram_bytes: peak,
+                });
             }
         }
     };
@@ -1777,6 +1996,7 @@ fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Res
         status,
         stdout,
         stderr,
+        peak_ram_bytes: peak,
     })
 }
 
@@ -1966,6 +2186,7 @@ fn total_ram_bytes() -> Option<u64> {
 
 #[cfg(target_os = "windows")]
 fn available_ram_bytes() -> Option<u64> {
+    // ullAvailPhys is available physical memory, not unused-only.
     windows_memory_status().map(|status| status.ullAvailPhys)
 }
 
@@ -2033,6 +2254,45 @@ fn supervisor_storage_file(root: &Path, value: &str, purpose: &str) -> Result<Pa
 
 fn model_dir(root: &Path) -> PathBuf {
     root.join("model_packs").join(MODEL_ID)
+}
+
+fn is_starter_profile(id: &str) -> bool {
+    STARTER_PROFILES.iter().any(|(starter, _, _)| *starter == id)
+}
+
+fn starter_wav_src(file: &str, app: Option<&AppHandle>) -> Option<PathBuf> {
+    let crate_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("voices")
+        .join(file);
+    if crate_file.is_file() {
+        return Some(crate_file);
+    }
+    let bundled = app?.path().resource_dir().ok()?.join("voices").join(file);
+    bundled.is_file().then_some(bundled)
+}
+
+fn seed_starter_profiles(root: &Path, app: Option<&AppHandle>) {
+    for (id, name, file) in STARTER_PROFILES {
+        let Some(src) = starter_wav_src(file, app) else {
+            continue;
+        };
+        let dir = profile_dir(root, id);
+        let dest = dir.join("reference.wav");
+        if fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        if !dest.exists() && fs::copy(src, &dest).is_err() {
+            continue;
+        }
+        let _ = write_json(
+            &dir.join("profile.json"),
+            &VoiceProfileMetadata {
+                profile_id: (*id).to_string(),
+                display_name: (*name).to_string(),
+                reference_retained: true,
+            },
+        );
+    }
 }
 
 fn profiles_dir(root: &Path) -> PathBuf {
@@ -2115,23 +2375,34 @@ mod tests {
     }
 
     #[test]
-    fn generation_ram_gate_uses_free_ram_and_measured_peak() {
-        assert_eq!(required_free_ram_bytes(None), DEFAULT_MIN_FREE_RAM_BYTES);
+    fn generation_ram_gate_uses_available_ram_and_measured_peak() {
         assert_eq!(
-            required_free_ram_bytes(Some(5 * GIBIBYTE)),
+            required_available_ram_bytes(None),
+            DEFAULT_MIN_AVAILABLE_RAM_BYTES
+        );
+        assert_eq!(
+            required_available_ram_bytes(Some(5 * GIBIBYTE)),
             6 * GIBIBYTE
         );
         assert_eq!(
-            required_free_ram_bytes(Some(2 * GIBIBYTE)),
-            MIN_FREE_RAM_AFTER_MEASURE_BYTES
+            required_available_ram_bytes(Some(2 * GIBIBYTE)),
+            MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES
         );
 
         assert_eq!(
-            ram_allows_generation(Some(7 * GIBIBYTE), Some(16 * GIBIBYTE), None),
+            ram_allows_generation(
+                Some(DEFAULT_MIN_AVAILABLE_RAM_BYTES),
+                Some(16 * GIBIBYTE),
+                None
+            ),
             Some(true)
         );
         assert_eq!(
-            ram_allows_generation(Some(3 * GIBIBYTE), Some(16 * GIBIBYTE), None),
+            ram_allows_generation(
+                Some(DEFAULT_MIN_AVAILABLE_RAM_BYTES.saturating_sub(GIBIBYTE)),
+                Some(16 * GIBIBYTE),
+                None
+            ),
             Some(false)
         );
         assert_eq!(
@@ -2139,6 +2410,57 @@ mod tests {
             Some(false)
         );
         assert_eq!(ram_allows_generation(None, Some(16 * GIBIBYTE), None), None);
+    }
+
+    #[test]
+    fn generation_log_writes_one_json_line() {
+        let root = test_dir("gen-log");
+        fs::create_dir_all(&root).unwrap();
+        append_generation_log(
+            &root,
+            &GenerationLogRow {
+                at_ms: 1,
+                os: "windows",
+                ok: false,
+                error: Some("Not enough available RAM".into()),
+                profile: "derek".into(),
+                phrases: 4,
+                merge: true,
+                need: 5 * GIBIBYTE,
+                available_before: Some(3 * GIBIBYTE),
+                available_after: Some(3 * GIBIBYTE),
+                total: Some(16 * GIBIBYTE),
+                worker_peak: None,
+                duration_ms: 12,
+                pressure: None,
+            },
+        );
+        let text = fs::read_to_string(generation_log_path(&root)).unwrap();
+        assert!(text.starts_with('{'));
+        assert!(text.contains("\"ok\":false"));
+        assert!(text.contains("\"profile\":\"derek\""));
+        assert!(text.contains("\"phrases\":4"));
+        assert!(!text.contains("pressure"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clip_summaries_only_keep_real_wavs_and_phrase_ids() {
+        let root = test_dir("clip-summaries");
+        let clips = root.join("clips");
+        fs::create_dir_all(&clips).unwrap();
+        fs::write(clips.join("01_hello.wav"), vec![0u8; 80]).unwrap();
+        fs::write(clips.join("empty.wav"), []).unwrap();
+        fs::write(clips.join("note.txt"), b"not a clip").unwrap();
+        fs::write(clips.join("plain.wav"), vec![1u8; 60]).unwrap();
+
+        let found = clip_summaries(&clips).unwrap();
+        let ids: Vec<_> = found.iter().map(|clip| clip.phrase_id.as_str()).collect();
+        assert_eq!(ids, ["hello", "plain"]);
+        assert!(found.iter().all(|clip| clip.bytes >= 44));
+        assert!(found.iter().all(|clip| Path::new(&clip.path).is_file()));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2211,7 +2533,7 @@ mod tests {
             command.creation_flags(0x0800_0000);
         }
         let error = match run_worker_until(&root, command, Duration::from_millis(200)) {
-            Err(error) => error,
+            Err(fail) => fail.message,
             Ok(_) => panic!("worker should time out"),
         };
         assert!(error.contains("timed out"), "{error}");
@@ -2258,6 +2580,27 @@ mod tests {
     }
 
     #[test]
+    fn merging_generated_clips_replaces_matching_phrase_only() {
+        let root = test_dir("merge-clips");
+        let profile = root.join("profile");
+        let clips = profile.join("clips");
+        let staging = profile.join(".generation-test");
+        fs::create_dir_all(&clips).unwrap();
+        fs::create_dir_all(staging.join("clips")).unwrap();
+        fs::write(clips.join("03_hello.wav"), b"old-hello").unwrap();
+        fs::write(clips.join("04_other.wav"), b"keep").unwrap();
+        fs::write(staging.join("clips").join("01_hello.wav"), b"new-hello").unwrap();
+
+        merge_generated_clips(&profile, &staging).unwrap();
+
+        assert!(!clips.join("03_hello.wav").exists());
+        assert_eq!(fs::read(clips.join("01_hello.wav")).unwrap(), b"new-hello");
+        assert_eq!(fs::read(clips.join("04_other.wav")).unwrap(), b"keep");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn replacing_generated_clips_keeps_only_staged_clips() {
         let root = test_dir("replace-clips");
         let profile = root.join("profile");
@@ -2273,6 +2616,23 @@ mod tests {
         assert!(!clips.join("old.wav").exists());
         assert_eq!(fs::read(clips.join("new.wav")).unwrap(), b"new");
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seed_starter_profiles_copies_derek_and_elise_references() {
+        let root = test_dir("starter-seed");
+        seed_starter_profiles(&root, None);
+        let derek = profile_dir(&root, "derek").join("reference.wav");
+        let elise = profile_dir(&root, "elise").join("reference.wav");
+        assert!(derek.is_file(), "missing {derek:?}");
+        assert!(elise.is_file(), "missing {elise:?}");
+        assert!(derek.metadata().unwrap().len() > MIN_CLIP_BYTES);
+        assert!(elise.metadata().unwrap().len() > MIN_CLIP_BYTES);
+        seed_starter_profiles(&root, None);
+        let first = derek.metadata().unwrap().len();
+        seed_starter_profiles(&root, None);
+        assert_eq!(derek.metadata().unwrap().len(), first);
         let _ = fs::remove_dir_all(root);
     }
 

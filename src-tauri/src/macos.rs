@@ -43,8 +43,13 @@ pub fn total_ram_bytes() -> Option<u64> {
     sysctl_u64("hw.memsize")
 }
 
+/// 0 normal, 1 warning, 2 urgent, 3 critical. None if the kernel does not report it.
+pub fn memory_pressure_level() -> Option<u32> {
+    sysctl_u32("kern.memorystatus_vm_pressure_level")
+}
+
 /// Memory macOS can hand out without swapping: free plus inactive (reclaimable cache) pages,
-/// minus speculative pages, which are already counted as free.
+/// minus speculative pages, which are already counted as free. This is not Windows ullAvailPhys.
 pub fn available_ram_bytes() -> Option<u64> {
     let stats = vm_statistics()?;
     let page_size = sysctl_u64("hw.pagesize")?;
@@ -90,6 +95,22 @@ pub fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let status = unsafe { libc::statvfs(path.as_ptr(), &mut stat) };
     (status == 0).then(|| u64::from(stat.f_bavail).saturating_mul(stat.f_frsize))
+}
+
+fn sysctl_u32(name: &str) -> Option<u32> {
+    let name = CString::new(name).ok()?;
+    let mut value = 0u32;
+    let mut len = std::mem::size_of::<u32>();
+    let status = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&mut value as *mut u32).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0 && len == std::mem::size_of::<u32>()).then_some(value)
 }
 
 fn sysctl_u64(name: &str) -> Option<u64> {

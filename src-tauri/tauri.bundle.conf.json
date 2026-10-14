@@ -3,7 +3,8 @@
     "active": true,
     "targets": ["nsis", "app", "dmg"],
     "resources": {
-      "../build/webcam/": "webcam/"
+      "../build/webcam/": "webcam/",
+      "voices/": "voices/"
     },
     "macOS": {
       "minimumSystemVersion": "14.0",
