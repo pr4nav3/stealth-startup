@@ -723,6 +723,11 @@ async function init(): Promise<void> {
     await listen<WebcamFrame>("webcam-frame", (event) => {
       applyWebcamFrame(event.payload);
     });
+    // Play a nudge the moment it is due. The once-a-second poll still catches it as a fallback,
+    // and the played-count check keeps it from playing twice.
+    await listen("session-nudge", () => {
+      void refreshSnapshot();
+    });
   }
   await refreshSnapshot();
   historyHydrated = true;

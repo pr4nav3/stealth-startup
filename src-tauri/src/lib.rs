@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };
 
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -826,8 +826,28 @@ fn start_voice_worker_ticker(app: AppHandle) {
     });
 }
 
+/// Tells the main window the moment a nudge is due. Its own poll is a webview timer, which the
+/// OS throttles while the window is minimized or hidden (up to a minute late); this thread isn't.
+const NUDGE_EVENT: &str = "session-nudge";
+
+/// Whether the snapshot has a nudge the main window hasn't been told about. `seen` is the last
+/// announced (session id, nudge count).
+fn new_nudge(seen: &mut (u64, u64), snapshot: &SessionSnapshot) -> bool {
+    let Some(current) = snapshot.current.as_ref() else {
+        return false;
+    };
+    counted_new_nudge(seen, current.id, current.metrics.nudges)
+}
+
+fn counted_new_nudge(seen: &mut (u64, u64), id: u64, nudges: u64) -> bool {
+    let before = if seen.0 == id { seen.1 } else { 0 };
+    *seen = (id, nudges);
+    nudges > before
+}
+
 fn start_session_ticker(app: AppHandle) {
     let mut last_loop = app.state::<AppState>().started_at.elapsed();
+    let mut nudges_seen = (0, 0);
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
 
@@ -844,6 +864,10 @@ fn start_session_ticker(app: AppHandle) {
             last_loop = now;
             let had_current = sessions.has_current();
             let snapshot = sessions.tick(now);
+            // A phone nudge can come from a webcam frame or this tick; both show up here.
+            if new_nudge(&mut nudges_seen, &snapshot) {
+                let _ = app.emit(NUDGE_EVENT, ());
+            }
             (
                 had_current && matches!(snapshot.status, session::SessionStatus::Idle),
                 sessions.should_poll_activity(),
@@ -884,6 +908,9 @@ fn start_session_ticker(app: AppHandle) {
             };
             let was_polling = sessions.should_poll_activity();
             let snapshot = sessions.record_sample(sample, now, &identity);
+            if new_nudge(&mut nudges_seen, &snapshot) {
+                let _ = app.emit(NUDGE_EVENT, ());
+            }
             was_polling && matches!(snapshot.status, session::SessionStatus::Idle)
         };
 
@@ -915,4 +942,21 @@ fn with_sessions(
     if let Ok(mut sessions) = state.sessions.lock() {
         action(&mut sessions, now);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::counted_new_nudge;
+
+    #[test]
+    fn each_nudge_is_announced_once_per_session() {
+        let mut seen = (0, 0);
+        assert!(!counted_new_nudge(&mut seen, 1, 0));
+        assert!(counted_new_nudge(&mut seen, 1, 1));
+        assert!(!counted_new_nudge(&mut seen, 1, 1));
+        assert!(counted_new_nudge(&mut seen, 1, 2));
+        // A new session starts counting from zero, even if the old one had more.
+        assert!(!counted_new_nudge(&mut seen, 2, 0));
+        assert!(counted_new_nudge(&mut seen, 2, 1));
+    }
 }
