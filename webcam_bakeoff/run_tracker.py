@@ -42,14 +42,19 @@ CAMERA_HELP = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--fps", type=float, default=2.0)
+    parser.add_argument("--fps", type=float, default=2.0, help="watch rate while no phone is suspected")
+    parser.add_argument(
+        "--burst-fps", type=float, default=5.0, help="rate from the first frame that looks like a phone until it clears"
+    )
     parser.add_argument("--preview", action="store_true", help="include a jpeg in every line for the app")
     parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
     parser.add_argument("--self-test", action="store_true", help="load models, run one blank frame, exit")
     parser.add_argument("--face-score", type=float, default=0.55)
     parser.add_argument("--phone-score", type=float, default=DEFAULT_PHONE_SCORE)
     parser.add_argument("--person-score", type=float, default=DEFAULT_PERSON_SCORE)
-    parser.add_argument("--threads", type=int, default=4)
+    # Two threads: a frame takes ~40% longer than with four, but the worker never ties up
+    # every core of a slower laptop for a whole session.
+    parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--models", type=Path, default=MODELS_DIR)
     return parser.parse_args()
 
@@ -118,7 +123,7 @@ def fail(device: str, message: str) -> int:
 
 def main() -> int:
     args = parse_args()
-    if args.fps <= 0:
+    if args.fps <= 0 or args.burst_fps <= 0:
         return fail(args.device, "fps must be positive")
 
     try:
@@ -157,8 +162,9 @@ def main() -> int:
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         return fail(args.device, f"Could not open camera {args.camera}. {CAMERA_HELP.get(sys.platform, '')}".strip())
+    # Read the newest frame, not one queued while the last frame was being checked.
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    interval = 1.0 / args.fps
     last_size = None
     tracker_state = TrackerState.default()
     try:
@@ -168,10 +174,14 @@ def main() -> int:
             if not ok:
                 return fail(args.device, "The camera stopped sending frames.")
 
-            face, last_size = detect_face(face_detector, frame, last_size)
             detections = object_detector.detect(frame)
             phones = [b for b in detections if b.class_id == CELL_PHONE_CLASS]
             persons = [b for b in detections if b.class_id == PERSON_CLASS]
+            # Present means a face or a person. A person already answers it, so the face pass
+            # only runs when nobody was found, or for the Settings preview that draws it.
+            face = None
+            if args.preview or not persons:
+                face, last_size = detect_face(face_detector, frame, last_size)
             labels = compose_frame(
                 tracker_state,
                 face_in_frame=face is not None,
@@ -186,7 +196,10 @@ def main() -> int:
                 row["jpeg"] = encode_preview(frame)
             emit(row)
 
-            leftover = interval - (time.monotonic() - started)
+            # Watch slowly; check fast while any recent frame looked like a phone, so it is
+            # confirmed or cleared in about a second without paying the fast rate all session.
+            fps = args.burst_fps if tracker_state.phone.recent_hit() else args.fps
+            leftover = 1.0 / fps - (time.monotonic() - started)
             if leftover > 0:
                 time.sleep(leftover)
     except KeyboardInterrupt:

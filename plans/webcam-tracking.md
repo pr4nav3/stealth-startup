@@ -7,7 +7,7 @@ every session (see Sessions below).
 
 ## Signals
 
-Local only. **~8 fps target, 4 fps floor.** Frames are never stored or uploaded.
+Local only. **2 fps watching, 5 fps from the first frame that looks like a phone until it clears** (a phone confirms in about a second). Frames are never stored or uploaded.
 
 1. **Phone in frame** — visible cell phone in the camera (any pose/lighting).
 2. **User present** — face (YuNet) **or** person (YOLO COCO), smoothed.

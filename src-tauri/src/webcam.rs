@@ -11,8 +11,14 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const WORKER_EVENT: &str = "webcam-frame";
-/// The plan's floor. With the worker's 3-of-5 smoothing a phone shows up in under a second.
-const WORKER_FPS: &str = "4";
+/// Watch rate during a session. The worker jumps to its burst rate (5) from the first frame that
+/// looks like a phone, so with 3-of-5 smoothing a phone still shows up in about a second.
+const SESSION_FPS: &str = "2";
+/// The Settings preview is a picture the user watches; keep it smooth.
+const PREVIEW_FPS: &str = "4";
+/// A worker that was sending frames and then goes this long without one is stuck (frozen camera
+/// driver). Frames come at least twice a second, so this is never just a slow frame.
+const STALL_AFTER: Duration = Duration::from_secs(15);
 /// After the worker fails (no camera, camera denied), sessions wait this long to try again.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 #[cfg(not(debug_assertions))]
@@ -79,6 +85,9 @@ pub struct WebcamPreview {
     /// The running worker sends preview JPEGs.
     preview: AtomicBool,
     failed_at: Arc<Mutex<Option<Instant>>>,
+    /// When the running worker last sent a line; `None` until its first, so a slow start (model
+    /// load, camera open, a virus scan of the first launch) is never mistaken for a hang.
+    last_line_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Default for WebcamPreview {
@@ -89,6 +98,7 @@ impl Default for WebcamPreview {
             child: Mutex::new(None),
             preview: AtomicBool::new(false),
             failed_at: Arc::new(Mutex::new(None)),
+            last_line_at: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -106,6 +116,12 @@ impl WebcamPreview {
 
     pub fn is_starting(&self) -> bool {
         self.starting.try_lock().is_err()
+    }
+
+    /// Running but silent too long: a hung worker that would otherwise never be restarted.
+    pub fn is_stalled(&self) -> bool {
+        let quiet = self.last_line_at.lock().ok().and_then(|at| *at).map(|at| at.elapsed());
+        quiet.is_some_and(|quiet| quiet >= STALL_AFTER) && self.is_running()
     }
 
     /// Whether a session should leave the camera alone for now after a failure.
@@ -204,7 +220,7 @@ fn spawn_worker(
     }
     command
         .arg("--fps")
-        .arg(WORKER_FPS)
+        .arg(if preview { PREVIEW_FPS } else { SESSION_FPS })
         .arg("--device")
         .arg(if gpu { "gpu" } else { "cpu" })
         .stdout(Stdio::piped())
@@ -231,9 +247,13 @@ fn spawn_worker(
     if let Ok(mut at) = state.failed_at.lock() {
         *at = None;
     }
+    if let Ok(mut at) = state.last_line_at.lock() {
+        *at = None;
+    }
 
     let failed_at = Arc::clone(&state.failed_at);
-    std::thread::spawn(move || read_worker(app, stdout, stop, on_frame, failed_at));
+    let last_line_at = Arc::clone(&state.last_line_at);
+    std::thread::spawn(move || read_worker(app, stdout, stop, on_frame, failed_at, last_line_at));
     Ok(())
 }
 
@@ -253,11 +273,15 @@ fn read_worker<R: std::io::Read>(
     stop: Arc<AtomicBool>,
     on_frame: FrameObserver,
     failed_at: Arc<Mutex<Option<Instant>>>,
+    last_line_at: Arc<Mutex<Option<Instant>>>,
 ) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         if stop.load(Ordering::SeqCst) {
             return;
+        }
+        if let Ok(mut at) = last_line_at.lock() {
+            *at = Some(Instant::now());
         }
         let Ok(line) = line else {
             break;

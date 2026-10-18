@@ -297,7 +297,8 @@ impl SessionManager {
         self.snapshot(now)
     }
 
-    /// One webcam reading (about four a second). Ignored unless the user turned the webcam on.
+    /// One webcam reading (two a second, five while a phone may be in view). Ignored unless the
+    /// user turned the webcam on.
     pub fn record_webcam(&mut self, phone: bool, present: bool, now: Duration) {
         if !self.settings.webcam_enabled {
             return;

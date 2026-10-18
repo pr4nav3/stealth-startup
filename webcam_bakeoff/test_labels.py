@@ -66,5 +66,17 @@ class PhoneAlertTests(unittest.TestCase):
         self.assertFalse(phone_alert(True, False, True, False))
 
 
+class BurstTests(unittest.TestCase):
+    def test_burst_lasts_until_a_hit_leaves_the_window(self):
+        phone = TrackerState.default().phone
+        self.assertFalse(phone.recent_hit())
+        phone.update(True)
+        for _ in range(4):
+            phone.update(False)
+            self.assertTrue(phone.recent_hit())
+        phone.update(False)
+        self.assertFalse(phone.recent_hit())
+
+
 if __name__ == "__main__":
     unittest.main()

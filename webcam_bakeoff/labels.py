@@ -39,6 +39,10 @@ class Hysteresis:
             self._clear_streak = 0
         return self._state
 
+    def recent_hit(self) -> bool:
+        """Any raw hit still in the window: a phone may be about to switch on."""
+        return any(self._history)
+
     def reset(self) -> None:
         self._history.clear()
         self._state = False

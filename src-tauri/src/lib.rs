@@ -472,6 +472,12 @@ fn sync_session_webcam(app: &AppHandle) {
         return;
     };
     let webcam = &state.webcam;
+    if wants && webcam.is_stalled() {
+        // Frozen, not crashed: kill it so the next tick starts a fresh one.
+        eprintln!("webcam: worker sent nothing for a while; restarting it");
+        webcam::stop_preview(webcam);
+        return;
+    }
     if wants {
         if !webcam.is_running() && !webcam.is_starting() && !webcam.recently_failed() {
             let app = app.clone();
