@@ -11,7 +11,7 @@ future retention design: `plans/window-history-audit.md`. The older statements
 below about writing only on close and needing no future aggregate tables are
 historical design notes, not constraints on that retention work.
 
-SQLite persistence, the report, trends, and week/month recap screens are already in the app. PDF export is unimplemented; its empty control was removed. Live tracker: `plans/STATUS.md`.
+SQLite persistence, the report, the weekly recap, and Trends are already in the app. PDF export is unimplemented; its empty control was removed. Live tracker: `plans/STATUS.md`.
 
 ## Scope
 

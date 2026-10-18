@@ -232,8 +232,7 @@ pub struct RecapApp {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct PeriodRecap {
-    pub kind: String,
+pub struct WeekRecap {
     pub start: String,
     pub end: String,
     pub focus_seconds: u64,
@@ -246,7 +245,7 @@ pub struct PeriodRecap {
     pub recovery_count: u64,
     /// Drifts still going when their session ended.
     pub unrecovered_count: u64,
-    /// The same figure for the period before, so the page can say faster or slower.
+    /// The same figure for the week before, so the page can say faster or slower.
     pub previous_recovery_median_seconds: Option<u64>,
     pub apps: Vec<RecapApp>,
 }
@@ -1576,32 +1575,11 @@ impl SessionStorage {
         })
     }
 
-    pub fn get_period_recap(&self, period: &str, start: &str) -> Result<PeriodRecap, String> {
+    /// The Monday-to-Sunday week containing `day`.
+    pub fn get_week_recap(&self, day: &str) -> Result<WeekRecap, String> {
         self.refresh_native_app_names()?;
-        let day = parse_day(start)?;
-        match period {
-            "week" => {
-                let monday = monday_on_or_before(day);
-                self.build_period_recap(
-                    "week",
-                    monday,
-                    monday.saturating_add(time::Duration::days(7)),
-                )
-            }
-            "month" => {
-                let month_start = first_of_month(day);
-                self.build_period_recap("month", month_start, next_month_start(month_start))
-            }
-            _ => Err("period must be week or month".into()),
-        }
-    }
-
-    fn build_period_recap(
-        &self,
-        kind: &str,
-        start: time::Date,
-        end_exclusive: time::Date,
-    ) -> Result<PeriodRecap, String> {
+        let start = monday_on_or_before(parse_day(day)?);
+        let end_exclusive = start.saturating_add(time::Duration::days(7));
         let sessions = self.recap_sessions(&format_day(start), &format_day(end_exclusive))?;
         let mut by_day = std::collections::HashMap::<String, u64>::new();
         let mut stats = SpanStats::default();
@@ -1621,16 +1599,14 @@ impl SessionStorage {
         let mut apps = apps_from_spans(&all_spans);
         self.attach_ratings(&mut apps, &rules);
 
-        let length = end_exclusive - start;
-        let previous = self.span_stats(start.saturating_sub(length), start, &rules)?;
+        let previous = self.span_stats(start.saturating_sub(time::Duration::days(7)), start, &rules)?;
 
-        Ok(PeriodRecap {
-            kind: kind.to_string(),
+        Ok(WeekRecap {
             start: format_day(start),
             end: format_day(end_exclusive.saturating_sub(time::Duration::days(1))),
             focus_seconds,
             session_count: sessions.len() as u64,
-            buckets: recap_buckets(kind, start, end_exclusive, &by_day),
+            buckets: day_buckets(start, &by_day),
             median_stretch_seconds: median(&stats.stretches),
             longest_stretch_seconds,
             recovery_median_seconds: stats.recovery_median(),
@@ -2015,53 +1991,14 @@ fn rounded_percent(part: u64, total: u64) -> u64 {
     }
 }
 
-fn recap_buckets(
-    kind: &str,
-    start: time::Date,
-    end_exclusive: time::Date,
-    by_day: &std::collections::HashMap<String, u64>,
-) -> Vec<RecapBucket> {
-    if kind == "week" {
-        const LETTERS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
-        return (0i64..7)
-            .map(|index| {
-                let day = start.saturating_add(time::Duration::days(index));
-                RecapBucket {
-                    label: LETTERS[index as usize].to_string(),
-                    focus_seconds: *by_day.get(&format_day(day)).unwrap_or(&0),
-                }
-            })
-            .collect();
-    }
-
-    let last_day = end_exclusive
-        .saturating_sub(time::Duration::days(1))
-        .day();
-    let ranges = [
-        (1u8, 7u8),
-        (8, 14),
-        (15, 21),
-        (22, 28),
-        (29, last_day.max(29)),
-    ];
-    ranges
-        .into_iter()
-        .filter(|(from, _)| *from <= last_day)
-        .map(|(from, to)| {
-            let to = to.min(last_day);
-            let mut focus_seconds = 0u64;
-            let mut cursor = start.replace_day(from).unwrap_or(start);
-            let stop = start.replace_day(to).unwrap_or(start);
-            loop {
-                focus_seconds += by_day.get(&format_day(cursor)).copied().unwrap_or(0);
-                if cursor >= stop {
-                    break;
-                }
-                cursor = cursor.saturating_add(time::Duration::days(1));
-            }
+fn day_buckets(monday: time::Date, by_day: &std::collections::HashMap<String, u64>) -> Vec<RecapBucket> {
+    const LETTERS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
+    (0i64..7)
+        .map(|index| {
+            let day = monday.saturating_add(time::Duration::days(index));
             RecapBucket {
-                label: format!("{from}–{to}"),
-                focus_seconds,
+                label: LETTERS[index as usize].to_string(),
+                focus_seconds: *by_day.get(&format_day(day)).unwrap_or(&0),
             }
         })
         .collect()
@@ -2236,21 +2173,6 @@ fn padded_day_bounds(start: &str, end_exclusive: &str) -> (String, String) {
         .map(|day| format_day(day.saturating_add(time::Duration::days(1))))
         .unwrap_or_else(|_| end_exclusive.to_string());
     (from, to)
-}
-
-fn first_of_month(date: time::Date) -> time::Date {
-    date.replace_day(1).expect("month has a first day")
-}
-
-fn next_month_start(date: time::Date) -> time::Date {
-    let start = first_of_month(date);
-    if start.month() == time::Month::December {
-        time::Date::from_calendar_date(start.year() + 1, time::Month::January, 1)
-            .expect("january 1")
-    } else {
-        let month = time::Month::try_from(u8::from(start.month()) + 1).expect("next month");
-        time::Date::from_calendar_date(start.year(), month, 1).expect("month start")
-    }
 }
 
 fn median(values: &[u64]) -> u64 {
@@ -2725,7 +2647,7 @@ mod tests {
         storage.insert_span(id, &activity, "focused", 0, 60).unwrap();
         storage.close_session(id, "2026-09-22T12:01:00Z", "stopped", 60).unwrap();
         storage.set_app_name(&activity.key, "Games").unwrap();
-        let recap = storage.get_period_recap("month", "2026-09-01").unwrap();
+        let recap = storage.get_week_recap("2026-09-22").unwrap();
         assert_eq!(recap.apps[0].label, "Games");
         assert_eq!(recap.apps[0].group, "Focus");
     }
@@ -3002,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn period_recap_splits_week_days_and_session_halves() {
+    fn week_recap_splits_days_and_reports_recovery() {
         let storage = SessionStorage::open_in_memory().expect("open db");
         let id = storage
             .insert_session("Split", Strictness::Normal, "2026-09-23T12:00:00Z", 1200)
@@ -3018,9 +2940,8 @@ mod tests {
             .expect("close");
 
         let recap = storage
-            .get_period_recap("week", "2026-09-23")
+            .get_week_recap("2026-09-23")
             .expect("week recap");
-        assert_eq!(recap.kind, "week");
         assert_eq!(recap.start, "2026-09-21");
         assert_eq!(recap.end, "2026-09-27");
         assert_eq!(recap.session_count, 1);
@@ -3042,20 +2963,10 @@ mod tests {
                 ("Distracting", "example.com", 600),
             ]
         );
-
-        let month = storage
-            .get_period_recap("month", "2026-09-23")
-            .expect("month recap");
-        assert_eq!(month.start, "2026-09-01");
-        assert_eq!(month.end, "2026-09-30");
-        assert_eq!(month.buckets.len(), 5);
-        assert_eq!(month.buckets[3].label, "22–28");
-        assert_eq!(month.buckets[3].focus_seconds, 600);
-        assert!(storage.get_period_recap("year", "2026-09-01").is_err());
     }
 
     #[test]
-    fn period_recap_groups_apps_like_their_scores() {
+    fn week_recap_groups_apps_like_their_scores() {
         let storage = SessionStorage::open_in_memory().expect("open db");
         storage
             .replace_rules(&[
@@ -3084,7 +2995,7 @@ mod tests {
             .expect("close");
 
         let recap = storage
-            .get_period_recap("week", "2026-09-23")
+            .get_week_recap("2026-09-23")
             .expect("week recap");
         assert_eq!(
             recap
@@ -3099,15 +3010,6 @@ mod tests {
                 ("Unclassified", "Notepad", 20),
             ]
         );
-    }
-
-    #[test]
-    fn month_bounds_roll_to_january() {
-        let december = parse_day("2026-12-09").expect("december");
-        assert_eq!(format_day(first_of_month(december)), "2026-12-01");
-        assert_eq!(format_day(next_month_start(december)), "2027-01-01");
-        let march = parse_day("2026-03-31").expect("march");
-        assert_eq!(format_day(next_month_start(march)), "2026-04-01");
     }
 
     #[test]
@@ -3168,7 +3070,7 @@ mod tests {
 
         let storage = SessionStorage::open_in_memory().expect("open db");
         let recap = storage
-            .get_period_recap("week", "2026-10-11")
+            .get_week_recap("2026-10-11")
             .expect("week of sunday");
         assert_eq!(recap.start, "2026-10-05");
         assert_eq!(recap.end, "2026-10-11");
@@ -3367,7 +3269,7 @@ mod tests {
         storage.insert_span(id, &app("Code"), "focused", 0, 300).unwrap();
         storage.insert_span(id, &app("Code"), "idle", 300, 600).unwrap();
         storage.close_session(id, "2026-09-22T12:15:00Z", "stopped", 900).unwrap();
-        let apps = storage.get_period_recap("month", "2026-09-01").unwrap().apps;
+        let apps = storage.get_week_recap("2026-09-22").unwrap().apps;
         let group = |name: &str| apps.iter().filter(|app| app.group == name).map(|app| app.seconds).sum::<u64>();
 
         assert_eq!(group("Focus"), 300);

@@ -242,8 +242,7 @@ interface RecapApp {
   rating: RuleClassification | null;
 }
 
-interface PeriodRecap {
-  kind: "week";
+interface WeekRecap {
   start: string;
   end: string;
   focus_seconds: number;
@@ -586,7 +585,7 @@ let trends: TrendsData = {
 let historyWeekStart = "";
 let historyWeek: HistoryWeek | null = null;
 let sessionReport: SessionReport | null = null;
-let periodRecap: PeriodRecap | null = null;
+let weekRecap: WeekRecap | null = null;
 let historyView: HistoryView = "list";
 let historyConfirm: HistoryConfirm | null = null;
 let historyHydrated = false;
@@ -667,8 +666,6 @@ let feedbackTimer: number | null = null;
 let pollId: number | null = null;
 let downloadPollId: number | null = null;
 let nudgeAudio: HTMLAudioElement | null = null;
-const playedNudgesBySession = new Map<number, number>();
-const pendingNudgesBySession = new Map<number, number>();
 const webcamSettings = {
   phoneUse: false,
   strict: false,
@@ -723,10 +720,11 @@ async function init(): Promise<void> {
     await listen<WebcamFrame>("webcam-frame", (event) => {
       applyWebcamFrame(event.payload);
     });
-    // Play a nudge the moment it is due. The once-a-second poll still catches it as a fallback,
-    // and the played-count check keeps it from playing twice.
-    await listen("session-nudge", () => {
-      void refreshSnapshot();
+    // The backend sends this once per nudge, the moment it is due (a webview timer would be
+    // throttled while the window is minimized).
+    await listen("session-nudge", async () => {
+      await refreshSnapshot();
+      void playNudge(snapshot?.current ?? null);
     });
   }
   await refreshSnapshot();
@@ -803,7 +801,6 @@ async function refreshSnapshot(): Promise<void> {
     const newest = noteNewHistory(history);
     if (appView === "main") {
       ensureSelectedVoice();
-      void playNudgeAudioIfNeeded(snapshot.current);
       if (historyHydrated && newest && !snapshot.current) {
         void openHistoryReport(newest);
         return;
@@ -909,7 +906,7 @@ function closeTopLayer(): void {
   if (historyView === "report" || historyView === "recap" || historyView === "trends") {
     historyView = "list";
     sessionReport = null;
-    periodRecap = null;
+    weekRecap = null;
     historyConfirm = null;
     void refreshHistoryWeek();
     return;
@@ -991,8 +988,7 @@ function viewKey(): string {
     activeTab,
     settingsView,
     historyView,
-    periodRecap?.kind ?? "",
-    periodRecap?.start ?? "",
+    weekRecap?.start ?? "",
     // Other tabs show the session only in the status chip (painted in place) and the
     // permission notice, so a focus change doesn't rebuild History or Settings.
     appView === "overlay" || activeTab === "session" ? sessionViewKey(current) : permissionNotice(current),
@@ -2532,8 +2528,8 @@ function renderHistory(): string {
   if (historyView === "report" && sessionReport) {
     return renderSessionReport(sessionReport);
   }
-  if (historyView === "recap" && periodRecap) {
-    return renderPeriodRecap(periodRecap);
+  if (historyView === "recap" && weekRecap) {
+    return renderWeekRecap(weekRecap);
   }
   if (historyView === "trends") {
     return renderTrends();
@@ -2687,7 +2683,7 @@ function completedWeeks(): [TrendWeek | undefined, TrendWeek | undefined] {
   return [done[done.length - 2], done[done.length - 1]];
 }
 
-function renderPeriodRecap(recap: PeriodRecap): string {
+function renderWeekRecap(recap: WeekRecap): string {
   const range = formatWeekRange(recap.start);
   const sessions =
     recap.session_count === 1 ? "1 recorded session" : `${recap.session_count} recorded sessions`;
@@ -2784,7 +2780,7 @@ function ratingSourceApps(): RecapApp[] {
   if (historyView === "report" && sessionReport) {
     return sessionReport.apps;
   }
-  return historyView === "recap" && periodRecap ? periodRecap.apps : [];
+  return historyView === "recap" && weekRecap ? weekRecap.apps : [];
 }
 
 /** One quiet line, only when something is unrated. The rows themselves stay clean. */
@@ -2876,8 +2872,8 @@ function finishRating(): void {
       showFeedback(`${saved} · ${rescoredText(rescored)}`, RESCORE_TOAST_MS);
     }
     // A rating rescores past unrated time: rows move groups and every score can change.
-    if (historyView === "recap" && periodRecap) {
-      void openPeriodRecap("week", periodRecap.start);
+    if (historyView === "recap" && weekRecap) {
+      void openWeekRecap(weekRecap.start);
     } else if (historyView === "report" && sessionReport) {
       void openHistoryReport(sessionReport.id);
     }
@@ -2908,7 +2904,7 @@ async function chooseRating(classification: RuleClassification): Promise<void> {
     showFeedback(errorText(error));
     return;
   }
-  for (const row of [...(sessionReport?.apps ?? []), ...(periodRecap?.apps ?? [])]) {
+  for (const row of [...(sessionReport?.apps ?? []), ...(weekRecap?.apps ?? [])]) {
     if (row.kind === app.kind && row.key === app.key) {
       row.rating = classification;
     }
@@ -2988,13 +2984,13 @@ function renderRecapAppName(app: RecapApp): string {
 function renderHistorySwitch(active: "week" | "trends"): string {
   return `
     <div class="recap-switch">
-      <button type="button" class="${active === "week" ? "active" : ""}" data-action="open-week-recap" data-start="${attr(active === "week" ? periodRecap?.start ?? thisMondayKey() : thisMondayKey())}">Week</button>
+      <button type="button" class="${active === "week" ? "active" : ""}" data-action="open-week-recap" data-start="${attr(active === "week" ? weekRecap?.start ?? thisMondayKey() : thisMondayKey())}">Week</button>
       <button type="button" class="${active === "trends" ? "active" : ""}" data-action="open-trends">Trends</button>
     </div>
   `;
 }
 
-function renderRecoveryCard(recap: PeriodRecap): string {
+function renderRecoveryCard(recap: WeekRecap): string {
   const typical = recap.recovery_median_seconds;
   const stuck = recap.unrecovered_count;
   const stuckNote = stuck === 0 ? "" : `${stuck} drift${stuck === 1 ? "" : "s"} lasted until the session ended`;
@@ -3900,13 +3896,13 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "open-week-recap") {
     const start = source?.dataset.start || trends.week_recap.start || thisMondayKey();
-    await openPeriodRecap("week", start);
+    await openWeekRecap(start);
     return;
   }
 
   if (action === "open-trends") {
     historyView = "trends";
-    periodRecap = null;
+    weekRecap = null;
     sessionReport = null;
     editingRecapNames = false;
     historyRename = null;
@@ -3917,7 +3913,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "close-recap") {
     historyView = "list";
-    periodRecap = null;
+    weekRecap = null;
     void refreshTrends();
     editingRecapNames = false;
     historyRename = null;
@@ -4544,7 +4540,7 @@ async function saveHistoryRename(): Promise<void> {
     } else {
       appNames = await invoke<Record<string, string>>("set_app_name", { key: rename.key, name: rename.value });
     }
-    periodRecap?.apps.forEach((app) => {
+    weekRecap?.apps.forEach((app) => {
       if (app.kind === rename.kind && app.key === rename.key) {
         app.label = rename.kind === "website" ? siteName(rename.key) : appNames[rename.key] ?? app.label;
       }
@@ -5619,38 +5615,23 @@ function stateClass(current: CurrentSession | null): string {
   return `state-${current.focus?.state ?? "neutral"}`;
 }
 
-async function playNudgeAudioIfNeeded(current: CurrentSession | null): Promise<void> {
+async function playNudge(current: CurrentSession | null): Promise<void> {
   if (!current || current.status !== "active" || draft.voiceId === "none") {
     return;
   }
-
-  const nudgeCount = current.metrics.nudges;
-  const alreadyPlayed = playedNudgesBySession.get(current.id) ?? 0;
-  const pendingNudge = pendingNudgesBySession.get(current.id) ?? 0;
-  if (nudgeCount <= Math.max(alreadyPlayed, pendingNudge)) {
-    return;
-  }
-
-  const clip = selectedNudgeClip(nudgeCount);
+  const clip = selectedNudgeClip(current.metrics.nudges);
   if (!clip) {
     return;
   }
-
-  pendingNudgesBySession.set(current.id, nudgeCount);
   try {
     nudgeAudio?.pause();
     nudgeAudio = new Audio(clipAssetUrl(clip.path));
     nudgeAudio.preload = "auto";
     await nudgeAudio.play();
-    playedNudgesBySession.set(current.id, nudgeCount);
     voiceError = "";
   } catch (error) {
     voiceError = `Could not play voice clip: ${errorText(error)}`;
     render();
-  } finally {
-    if (pendingNudgesBySession.get(current.id) === nudgeCount) {
-      pendingNudgesBySession.delete(current.id);
-    }
   }
 }
 
@@ -6456,10 +6437,10 @@ function noteNewHistory(items: SessionSummary[]): number | null {
   return newest;
 }
 
-async function openPeriodRecap(period: "week", start: string): Promise<void> {
+async function openWeekRecap(start: string): Promise<void> {
   try {
-    [periodRecap, appNames] = await Promise.all([
-      invoke<PeriodRecap>("get_period_recap", { period, start }),
+    [weekRecap, appNames] = await Promise.all([
+      invoke<WeekRecap>("get_week_recap", { start }),
       invoke<Record<string, string>>("get_app_names"),
     ]);
     historyView = "recap";
@@ -6503,7 +6484,7 @@ async function confirmHistoryAction(): Promise<void> {
     await runHistoryCommand("delete_session", { id: confirm.id }, "Session deleted");
     historyView = "list";
     sessionReport = null;
-    periodRecap = null;
+    weekRecap = null;
     render();
     return;
   }
@@ -6511,7 +6492,7 @@ async function confirmHistoryAction(): Promise<void> {
     await runHistoryCommand("delete_all_history", undefined, "History cleared");
     historyView = "list";
     sessionReport = null;
-    periodRecap = null;
+    weekRecap = null;
     render();
   }
 }

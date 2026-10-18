@@ -67,7 +67,7 @@ unrated time is shown apart and counts once rated. See `plans/window-history-aud
 
 ## Voice
 
-**Starter voices are selectable with no phrase clips.** `derek` / `elise` ship a reference WAV. `starterVoiceCard` sets `selectable: true` and kind `"Bundled"`. Coverage is `0/N`. A session nudge finds no clip and stays silent (`selectedNudgeClip` → `playNudgeAudioIfNeeded` returns).
+**Starter voices are selectable with no phrase clips.** `derek` / `elise` ship a reference WAV. `starterVoiceCard` sets `selectable: true` and kind `"Bundled"`. Coverage is `0/N`. A session nudge finds no clip and stays silent (`selectedNudgeClip` → `playNudge` returns).
 
 **Fallback beep leaks an `AudioContext`.** `playWebcamAlarm` in `src/main.ts` constructs one per call and never closes it. Webcam "voice clip" with no clip falls through here.
 

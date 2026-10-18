@@ -39,7 +39,7 @@ observation quality, stable app identity, and what the focus score actually mean
 - Removed the work/comms/browse/media category guesses. They were a second,
   hard-coded taxonomy beside the user's rules and only fed one report card. The
   session report now lists time per app/site grouped by the recorded decision,
-  using the same rows as the week/month recap. The `span.category` column is
+  using the same rows as the weekly recap. The `span.category` column is
   retired (written empty) so older databases still open.
 - Mute nudges no longer stops recording. Muted time is recorded and judged like
   active time; only nudges and the drift popup are held back. If the user is
