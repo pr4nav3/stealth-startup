@@ -797,7 +797,9 @@ async function refreshSnapshot(): Promise<void> {
   const webcamOpen = appView === "main" && activeTab === "settings" && settingsView === "webcam";
   if (!webcamOpen) {
     const current = snapshot?.current ?? null;
-    if (editorIsOpen() || viewKey() === paintedViewKey) {
+    // While something is being edited or typed into, only paint in place. The rebuild
+    // waits for the next tick after the editor closes or the field loses focus.
+    if (editorIsOpen() || typingInField() || viewKey() === paintedViewKey) {
       paintLive(current);
     } else {
       render();
@@ -915,8 +917,21 @@ function editorIsOpen(): boolean {
     voiceInfoId !== null ||
     clipGenerate !== null ||
     modelDeleteOpen ||
+    rating !== null ||
     voiceBusy !== null
   );
+}
+
+/** A focused text field or dropdown in the main window; a rebuild would drop the caret or close the list. */
+function typingInField(): boolean {
+  const el = document.activeElement;
+  if (appView !== "main" || !el || !app.contains(el)) {
+    return false;
+  }
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+    return true;
+  }
+  return el instanceof HTMLInputElement && !["checkbox", "radio", "range", "button"].includes(el.type);
 }
 
 function sessionViewKey(current: CurrentSession | null): string {
@@ -982,6 +997,14 @@ function paintLive(current: CurrentSession | null): void {
   const chip = document.querySelector<HTMLElement>(".status-chip");
   if (chip) {
     chip.textContent = statusChip(current);
+  }
+  const slab = document.querySelector<HTMLElement>(".active-state-card");
+  if (slab) {
+    slab.className = `state-slab active-state-card ${stateClass(current)}`;
+    const title = slab.querySelector("h2");
+    if (title) {
+      title.textContent = stateTitle(current);
+    }
   }
   const label = formatDuration(current.remaining_seconds);
   const percent = current.duration_seconds
