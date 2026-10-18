@@ -5,7 +5,8 @@ import "./styles.css";
 type PermissionState = "granted" | "missing" | "not_required";
 type RuleClassification = "focused" | "neutral" | "distracting";
 type RuleTarget = "app" | "website";
-type ActivityKind = "app" | "website" | "browser_pages" | "browser_local" | "other_websites";
+/** A browser's own pages (New Tab, settings, files) are "app": the browser itself. */
+type ActivityKind = "app" | "website" | "other_websites";
 type RuleScope = "settings" | "preflight";
 type Strictness = "gentle" | "normal" | "strict";
 type SessionStatus = "idle" | "active" | "paused" | "snoozed" | "complete";
@@ -67,6 +68,8 @@ interface AppRule {
 interface FocusSnapshot {
   sample: ActivitySample;
   activity: Activity;
+  /** A website or a non-browser app: something a rule can name. */
+  markable: boolean;
   state: FocusState;
   classification: RuleClassification;
   matched_rule: AppRule | null;
@@ -244,7 +247,12 @@ interface PeriodRecap {
 interface HistoryConfirm {
   kind: "delete-all" | "delete-session";
   id?: number;
+  /** History's size on disk, for the delete-all prompt. `null` when it couldn't be read. */
+  bytes?: number | null;
 }
+
+/** A few seconds of burst photos on a phone. History is a sliver of that. */
+const PHOTO_BURST_BYTES = 30 * 1024 ** 2;
 
 
 interface SessionSnapshot {
@@ -551,6 +559,9 @@ let history: SessionSummary[] = [];
 const EMPTY_RECAP: FocusRecap = { start: "", end: "", focus_seconds: 0, session_count: 0 };
 /** Order of the groups `apps_from_spans` produces; they sum to the scores. */
 const APP_GROUPS = ["Focus", "Neutral", "Distracting", "Unclassified", "Away"];
+/** How the groups and scores are decided, under every Apps & sites list. */
+const SCORING_CAPTION =
+  "Only Relevant time counts as focus. When you classify an app, its unclassified time in past sessions updates to match; anything already counted as Relevant or Distracting during a session stays as it was.";
 let trends: TrendsData = {
   daily_focus: [],
   weeks: [],
@@ -1540,6 +1551,14 @@ function renderSettings(): string {
       <section class="panel settings-rules-panel">
         ${renderRuleManager(permanentRules, "settings", "Permanent rules")}
       </section>
+
+      <section class="panel settings-data-panel">
+        <p class="eyebrow">Your data</p>
+        <div class="settings-data-row">
+          <span class="explain">Sessions and history stay on this computer. Nothing is uploaded.</span>
+          <button class="danger" type="button" data-action="ask-delete-all">Delete all history</button>
+        </div>
+      </section>
     </section>
   `;
 }
@@ -2102,6 +2121,26 @@ function renderPhraseSetPicker(): string {
   `;
 }
 
+/** Size first (it's tiny), then what deleting costs. */
+function deleteAllCopy(bytes: number | null | undefined): string[] {
+  const cost =
+    "It's also how Supervisor shows you where your time actually goes. Delete it and your attention span, trends and recaps start over from nothing. This can't be undone.";
+  if (!bytes) {
+    return [cost];
+  }
+  const ratio = PHOTO_BURST_BYTES / bytes;
+  const comparison =
+    ratio >= 2
+      ? `so deleting it frees about 1/${Math.round(ratio)} of a single burst`
+      : ratio >= 0.5
+        ? "so it's about one burst"
+        : `so it's about ${Math.round(1 / ratio)} bursts`;
+  return [
+    `All of it takes up ${formatBytes(bytes)}. A quick burst of phone photos is around 30 MB, ${comparison}.`,
+    cost,
+  ];
+}
+
 function renderHistoryConfirm(): string {
   if (!historyConfirm) {
     return "";
@@ -2110,16 +2149,18 @@ function renderHistoryConfirm(): string {
   const copy =
     historyConfirm.kind === "delete-all"
       ? {
-          eyebrow: "HISTORY",
+          eyebrow: "YOUR DATA",
           title: "Delete all history?",
-          body: "Every saved session on this computer will be removed. You cannot undo this.",
-          confirm: "Delete all",
+          body: deleteAllCopy(historyConfirm.bytes),
+          cancel: "Keep my history",
+          confirm: "Delete everything",
           danger: true,
         }
       : {
           eyebrow: "HISTORY",
           title: "Delete this session?",
-          body: "This session will be removed from this computer. You cannot undo this.",
+          body: ["This session will be removed from this computer. You cannot undo this."],
+          cancel: "Cancel",
           confirm: "Delete session",
           danger: true,
         };
@@ -2133,9 +2174,9 @@ function renderHistoryConfirm(): string {
             <h2 id="history-confirm-title">${escapeHtml(copy.title)}</h2>
           </div>
         </div>
-        <p>${escapeHtml(copy.body)}</p>
+        ${copy.body.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
         <div class="modal-actions">
-          <button type="button" data-action="cancel-history-confirm">Cancel</button>
+          <button type="button" data-action="cancel-history-confirm">${escapeHtml(copy.cancel)}</button>
           <button class="${copy.danger ? "danger" : "primary"}" type="button" data-action="confirm-history">${escapeHtml(copy.confirm)}</button>
         </div>
       </section>
@@ -2444,9 +2485,6 @@ function renderHistory(): string {
               <span>${escapeHtml(formatWeekRange(weekStart))}</span>
               <button type="button" data-action="history-week-next" ${nextDisabled ? "disabled" : ""} aria-label="Next week">›</button>
             </div>
-            <div class="history-tools">
-              <button class="danger" type="button" data-action="ask-delete-all">Delete all</button>
-            </div>
           </div>
         </div>
         <div class="history-list">
@@ -2637,7 +2675,7 @@ function renderPeriodRecap(recap: PeriodRecap): string {
       <section class="panel recap-apps">
         <p class="eyebrow">Apps & sites</p>
         <h2>Where session time went</h2>
-        <p class="recap-caption">Only Relevant time counts as focus. Unclassified time follows how you classify it now; decisions made during a session keep.</p>
+        <p class="recap-caption">${escapeHtml(SCORING_CAPTION)}</p>
         ${renderRatePrompt(recap.apps, "this week")}
         ${
           recap.apps.some((item) => item.kind === "app" || item.kind === "website")
@@ -2713,7 +2751,7 @@ function renderRatingModal(): string {
           ${choices
             .map(
               (choice) => `
-                <button type="button" class="rate-choice rate-${choice} ${app.rating === choice ? "is-current" : ""}" data-action="rate-choice" data-choice="${choice}">
+                <button type="button" class="rate-choice rate-${choice} ${app.rating === choice ? "is-current" : ""}" aria-pressed="${app.rating === choice}" data-action="rate-choice" data-choice="${choice}">
                   ${escapeHtml(ratingLabel(choice))}
                 </button>
               `,
@@ -3259,6 +3297,7 @@ function renderMiniTimeline(item: SessionSummary): string {
 function renderSessionReport(report: SessionReport): string {
   const recorded = report.spans.reduce((sum, span) => sum + span.seconds, 0);
   const unrecorded = report.spans.length > 0 && recorded + 1 < timelineSeconds(report);
+  const legend = renderTimelineLegend(report, unrecorded);
   return `
     <section class="history-page">
       <div class="report-toolbar">
@@ -3268,10 +3307,10 @@ function renderSessionReport(report: SessionReport): string {
       <div class="report-stage">
         <section class="state-slab report-slab">
           <h2>${escapeHtml(report.goal)}</h2>
-          <p class="report-headline">${escapeHtml(reportHeadline(report))}</p>
-          <p class="report-started">${escapeHtml(new Date(report.started_at).toLocaleString())} · ${escapeHtml(label(report.strictness))}</p>
+          <p class="report-meta">${escapeHtml(reportSummaryLine(report))}</p>
+          <p class="report-meta report-hint ${report.spans.length ? "" : "is-placeholder"}" ${report.spans.length ? "" : `aria-hidden="true"`}>Hover over a part of the bar to see the app and how long it lasted.</p>
           ${renderReportTimeline(report)}
-          <div class="report-inset">${renderTimelineLegend(report, unrecorded)}</div>
+          ${legend ? `<div class="report-inset">${legend}</div>` : ""}
         </section>
         <aside class="report-stats" aria-label="Session stats">
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds))}
@@ -3282,7 +3321,7 @@ function renderSessionReport(report: SessionReport): string {
       <section class="panel recap-apps">
         <p class="eyebrow">WHERE IT WENT</p>
         <h2>Apps & sites</h2>
-        <p class="recap-caption">Only Relevant time counts as focus. Unclassified time follows how you classify it now; decisions made during a session keep.</p>
+        <p class="recap-caption">${escapeHtml(SCORING_CAPTION)}</p>
         ${renderRatePrompt(report.apps, "this session")}
         ${
           report.apps.length === 0
@@ -3337,7 +3376,14 @@ function renderReportTimeline(report: SessionReport): string {
   const duration = timelineSeconds(report);
   const nudges = report.events.filter((event) => event.kind === "nudge");
   if (report.spans.length === 0) {
-    return `<p class="empty">No timeline for this session.</p>`;
+    // An empty bar where the timeline would be, so the card keeps its layout.
+    return `
+      <div class="timeline-wrap">
+        <div class="timeline-bar timeline-empty" role="img" aria-label="No timeline for this session">
+          <span>No timeline for this session</span>
+        </div>
+      </div>
+    `;
   }
   return `
     <div class="timeline-wrap">
@@ -3361,20 +3407,28 @@ function renderReportTimeline(report: SessionReport): string {
   `;
 }
 
+/** Only the states this session's bar actually shows. */
 function renderTimelineLegend(report: SessionReport, unrecorded: boolean): string {
-  const has = (state: string) => report.spans.some((span) => span.state === state);
+  const present = new Set(report.spans.map((span) => span.state));
   const items = [
-    ["state-focused", "Focused"],
-    ["state-neutral", "Neutral"],
-    ...(has("unrated") ? [["state-unrated", "Unclassified"]] : []),
-    ["state-suspicious", "Slipping"],
-    ["state-distracted", "Distracted"],
+    [["focused"], "state-focused", "Focused"],
+    [["neutral"], "state-neutral", "Neutral"],
+    [["unrated"], "state-unrated", "Unclassified"],
+    [["suspicious"], "state-suspicious", "Slipping"],
+    [["distracted"], "state-distracted", "Distracted"],
     // Idle (no input) and device asleep / unknown are one "Away"; hovering a segment says which.
-    ["state-idle", "Away"],
-    ...(has("paused") ? [["state-paused", "Paused"]] : []),
-    // Only sessions recorded before the gap-free recorder can have these.
-    ...(unrecorded ? [["state-unrecorded", "Not recorded"]] : []),
-  ];
+    [["idle", "unknown"], "state-idle", "Away"],
+    [["paused"], "state-paused", "Paused"],
+  ]
+    .filter(([states]) => (states as string[]).some((state) => present.has(state)))
+    .map(([, cls, name]) => [cls as string, name as string]);
+  // Only sessions recorded before the gap-free recorder can have these.
+  if (unrecorded) {
+    items.push(["state-unrecorded", "Not recorded"]);
+  }
+  if (items.length === 0) {
+    return "";
+  }
   return `
     <ul class="legend-swatches">
       ${items
@@ -3876,7 +3930,8 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "ask-delete-all") {
-    historyConfirm = { kind: "delete-all" };
+    const bytes = await invoke<number>("get_history_size").catch(() => null);
+    historyConfirm = { kind: "delete-all", bytes };
     render();
     return;
   }
@@ -4191,9 +4246,13 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  const markable = snapshot?.current?.focus?.activity;
-  if (action.startsWith("mark-") && markable && markable.kind !== "app" && markable.kind !== "website") {
-    showFeedback(`${markable.label} can't be marked. Mark a website or an app.`);
+  const focus = snapshot?.current?.focus;
+  if (action.startsWith("mark-") && focus && !focus.markable) {
+    showFeedback(
+      focus.activity.kind === "app"
+        ? "Browsers always count as Neutral. Mark the website instead."
+        : `${focus.activity.label} can't be marked. Mark a website or an app.`,
+    );
     return;
   }
   freshRescoreNote = "";
@@ -6375,8 +6434,12 @@ async function runHistoryCommand(
   }
 }
 
-function reportHeadline(report: SessionReport): string {
-  return `Typical attention span · ${formatMinutes(report.median_stretch_seconds)}`;
+/** "18 October 2026, 11:13 AM · Attention span 9 min · Normal" */
+function reportSummaryLine(report: SessionReport): string {
+  const started = new Date(report.started_at);
+  const date = started.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+  const time = started.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return `${date}, ${time} · Attention span ${formatMinutes(report.median_stretch_seconds)} · ${label(report.strictness)}`;
 }
 
 
@@ -6530,8 +6593,15 @@ function groupSessionsByDay(items: SessionSummary[]): { label: string; items: Se
 }
 
 function dayTotalLine(items: SessionSummary[]): string {
-  const focused = items.reduce((sum, item) => sum + item.focus_seconds, 0);
   const sessions = items.length === 1 ? "1 session" : `${items.length} sessions`;
+  // Like the sessions' own scores: a mostly unclassified day has no focus total yet.
+  const scored = items.filter(
+    (item) => !scoreAwaitsClassifying(item.unrated_seconds, item.idle_seconds, item.duration_seconds),
+  );
+  if (scored.length === 0) {
+    return sessions;
+  }
+  const focused = scored.reduce((sum, item) => sum + item.focus_seconds, 0);
   return `${formatHours(focused)} focused · ${sessions}`;
 }
 

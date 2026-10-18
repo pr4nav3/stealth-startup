@@ -1211,8 +1211,18 @@ dt {
 
 .settings-rules-panel,
 .settings-note-panel,
+.settings-data-panel,
 .phrase-panel {
   grid-column: 1 / -1;
+}
+
+.settings-data-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
 }
 
 .setting-row {
@@ -2995,7 +3005,6 @@ audio {
 }
 
 .history-list-head,
-.history-tools,
 .history-head-actions {
   display: flex;
   align-items: center;
@@ -3007,11 +3016,6 @@ audio {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.history-tools {
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .history-week-nav {
@@ -3677,9 +3681,10 @@ button.recap-app-row:focus-visible {
 .rate-neutral { background: #fff7df; }
 .rate-distracting { background: #ff684f; }
 
+/* The current choice is pressed in, like a held button: no extra ring around it. */
 .rate-choice.is-current {
-  outline: 2px solid var(--ink);
-  outline-offset: 2px;
+  transform: translate(2px, 2px);
+  box-shadow: none;
 }
 
 .rate-foot {
@@ -4165,14 +4170,44 @@ button.report-stat-action strong {
   font-size: var(--sv-type-3);
 }
 
-.report-headline {
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-3);
+.confirm-panel p + p {
+  margin-top: 8px;
 }
 
-.report-started {
+/* The summary line carries the card under the title; the hint is a quiet aside.
+   Scoped to the card so `.state-slab p` doesn't win. */
+.report-slab .report-meta {
+  margin-top: 8px;
   color: var(--ink);
-  font-size: var(--sv-type-3);
+  font-size: 1.2rem;
+  font-weight: 550;
+}
+
+.report-slab .report-meta.report-hint {
+  margin-top: 4px;
+  font-size: var(--sv-type-4);
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+/* Holds the hint's line when there is no bar to hover, so the bar sits where it always does. */
+.report-slab .report-hint.is-placeholder {
+  visibility: hidden;
+}
+
+.timeline-empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.timeline-empty span {
+  border-radius: var(--radius-control);
+  padding: 2px 8px;
+  background: var(--white-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  text-transform: uppercase;
 }
 
 .timeline-wrap {
@@ -4380,7 +4415,7 @@ button.report-stat-action strong {
 }
 
 .state-slab,
-.state-slab :is(h2, p, .eyebrow, .report-headline, .report-started):not(.webcam-waiting),
+.state-slab :is(h2, p, .eyebrow, .report-meta):not(.webcam-waiting),
 .preflight-disclosure[open] summary,
 .preflight-disclosure[open] summary span,
 .create-voice-panel[open] summary,

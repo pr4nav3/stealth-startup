@@ -17,12 +17,10 @@ pub const SUPERVISOR_KEY: &str = "supervisor";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityKind {
+    /// An app. A browser's own pages (New Tab, settings, history, files, extensions) are the
+    /// browser app itself, so they share its row, its time, and its rules.
     App,
     Website,
-    /// The browser's own pages (New Tab, History, Settings); key is the browser app id.
-    BrowserPages,
-    /// Files, extension pages, `data:` and similar; key is the browser app id.
-    BrowserLocal,
     OtherWebsites,
 }
 
@@ -113,8 +111,6 @@ impl Activity {
     fn in_browser(kind: ActivityKind, key: &str, app_id: &str, app_label: &str, source: Source) -> Self {
         let label = match kind {
             ActivityKind::Website => website::site_label(key),
-            ActivityKind::BrowserPages => format!("{app_label} pages"),
-            ActivityKind::BrowserLocal => format!("{app_label} local pages"),
             ActivityKind::OtherWebsites => "Other websites".to_string(),
             ActivityKind::App => app_label.to_string(),
         };
@@ -139,8 +135,6 @@ impl ActivityKind {
         match self {
             Self::App => "app",
             Self::Website => "website",
-            Self::BrowserPages => "browser_pages",
-            Self::BrowserLocal => "browser_local",
             Self::OtherWebsites => "other_websites",
         }
     }
@@ -148,8 +142,6 @@ impl ActivityKind {
     pub fn from_key(value: &str) -> Self {
         match value {
             "website" => Self::Website,
-            "browser_pages" => Self::BrowserPages,
-            "browser_local" => Self::BrowserLocal,
             "other_websites" => Self::OtherWebsites,
             _ => Self::App,
         }
@@ -196,10 +188,7 @@ impl Resolver {
         self.last_window = Some(window);
 
         if !website::is_browser(&app_id) {
-            let mut activity = Activity::app(&sample.app_label);
-            activity.key = app_id.clone();
-            activity.app_id = app_id;
-            return activity;
+            return own_app(sample, &app_id, Source::App);
         }
 
         let read = sample.browser.clone().unwrap_or_default();
@@ -207,19 +196,22 @@ impl Resolver {
             Activity::in_browser(kind, key, &app_id, &sample.app_label, source)
         };
 
-        if !read.editing {
-            let committed = match read.address.as_deref().map(str::trim) {
-                // An empty bar is only a New Tab when the title says so too.
-                Some("") => title
-                    .filter(|title| website::is_new_tab_title(title))
-                    .map(|_| in_browser(ActivityKind::BrowserPages, "", Source::Address)),
-                Some(address) => match website::classify_address(address) {
+        let address = read.address.as_deref().map(str::trim);
+        // An empty or unread bar is a New Tab only when the title says so too. It counts even
+        // while the cursor waits in the bar, since nothing is typed yet.
+        let new_tab = matches!(address, None | Some("")) && title.is_some_and(website::is_new_tab_title);
+        if !read.editing || new_tab {
+            let committed = match address {
+                _ if new_tab => {
+                    let source = if address.is_some() { Source::Address } else { Source::Title };
+                    Some(own_app(sample, &app_id, source))
+                }
+                Some(address) if !address.is_empty() => match website::classify_address(address) {
                     Address::Website(key) => Some(in_browser(ActivityKind::Website, &key, Source::Address)),
-                    Address::BrowserPage => Some(in_browser(ActivityKind::BrowserPages, "", Source::Address)),
-                    Address::Local => Some(in_browser(ActivityKind::BrowserLocal, "", Source::Address)),
+                    Address::BrowserPage | Address::Local => Some(own_app(sample, &app_id, Source::Address)),
                     Address::NotAddress => None,
                 },
-                None => None,
+                _ => None,
             };
             if let Some(activity) = committed {
                 self.confirmed = Some(Confirmed {
@@ -252,6 +244,15 @@ impl Resolver {
         }
         in_browser(ActivityKind::OtherWebsites, "", Source::None)
     }
+}
+
+/// The app in front as itself, under its app id.
+fn own_app(sample: &ActivitySample, app_id: &str, source: Source) -> Activity {
+    let mut activity = Activity::app(&sample.app_label);
+    activity.key = app_id.to_string();
+    activity.app_id = app_id.to_string();
+    activity.source = source;
+    activity
 }
 
 #[cfg(test)]
@@ -316,13 +317,23 @@ mod tests {
     }
 
     #[test]
-    fn browser_pages_collapse_and_drop_the_page_name() {
+    fn browser_pages_are_the_browser_itself() {
         let mut resolver = Resolver::default();
         let history = resolver.resolve(&chrome("History", Some("chrome://history")), at(0));
         let new_tab = resolver.resolve(&chrome("New Tab", Some("")), at(1000));
-        assert_eq!(history.kind, ActivityKind::BrowserPages);
+        assert_eq!((history.kind, history.key.as_str()), (ActivityKind::App, "chrome"));
         assert!(history.same_place(&new_tab));
-        assert_eq!(history.label, "Google Chrome pages");
+        assert_eq!(history.label, "Google Chrome");
+    }
+
+    #[test]
+    fn a_new_tab_waiting_for_an_address_is_the_browser() {
+        let mut resolver = Resolver::default();
+        let waiting = resolver.resolve(&sample("chrome", "1", "New Tab", Some(""), true), at(0));
+        assert_eq!((waiting.kind, waiting.key.as_str()), (ActivityKind::App, "chrome"));
+        // Without the address (macOS until its reader exists), the title alone says so.
+        let unread = resolver.resolve(&chrome("New Tab", None), at(1000));
+        assert_eq!((unread.kind, unread.source), (ActivityKind::App, Source::Title));
     }
 
     #[test]
@@ -336,7 +347,7 @@ mod tests {
     fn local_files_stay_under_the_browser() {
         let mut resolver = Resolver::default();
         let file = resolver.resolve(&chrome("notes.html", Some("file:///C:/notes.html")), at(0));
-        assert_eq!((file.kind, file.key.as_str()), (ActivityKind::BrowserLocal, "chrome"));
+        assert_eq!((file.kind, file.key.as_str()), (ActivityKind::App, "chrome"));
     }
 
     #[test]

@@ -189,6 +189,7 @@ impl FocusEngine {
         FocusSnapshot {
             sample: sample.clone(),
             activity: activity.clone(),
+            markable: is_markable(activity),
             state,
             classification,
             matched_rule,
@@ -220,6 +221,8 @@ impl Default for FocusConfig {
 pub struct FocusSnapshot {
     pub sample: ActivitySample,
     pub activity: Activity,
+    /// Whether "mark current" can name exactly this (see `is_markable`).
+    pub markable: bool,
     pub state: FocusState,
     pub classification: RuleClassification,
     pub matched_rule: Option<AppRule>,
@@ -310,7 +313,12 @@ impl AppRule {
         Self::from_input(text, classification)
     }
 
-    /// An app rule also covers that browser's pages that are not an identified website.
+    /// Browsers are always Neutral, so no rule names one: sites are judged one by one, and a
+    /// browser's own pages and unidentified sites stay Neutral.
+    pub fn names_a_browser(&self) -> bool {
+        self.target == RuleTarget::App && website::is_browser(&self.value.trim().to_lowercase())
+    }
+
     pub fn matches(&self, activity: &Activity) -> bool {
         let value = self.value.as_str();
         match self.target {
@@ -319,10 +327,21 @@ impl AppRule {
             }
             RuleTarget::App => {
                 activity.kind != ActivityKind::Website
+                    && !website::is_browser(&activity.app_id)
                     && (activity.app_id.eq_ignore_ascii_case(value)
                         || activity.app_label.eq_ignore_ascii_case(value))
             }
         }
+    }
+}
+
+/// A website, or an app that isn't a browser. Browser pages and unidentified sites have no
+/// rule that would mean only them.
+pub fn is_markable(activity: &Activity) -> bool {
+    match activity.kind {
+        ActivityKind::Website => true,
+        ActivityKind::App => !website::is_browser(&activity.app_id),
+        ActivityKind::OtherWebsites => false,
     }
 }
 
@@ -387,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn website_rules_beat_app_rules_on_the_browser() {
+    fn browser_rules_never_apply_only_site_rules_do() {
         let rules = vec![
             AppRule::app("Google Chrome", RuleClassification::Focused),
             AppRule::website("youtube.com", RuleClassification::Distracting),
@@ -403,13 +422,17 @@ mod tests {
         github.app_label = "Google Chrome".to_string();
         assert_eq!(matching_rule(&rules, &github), None);
 
+        // Browsers are always Neutral: the Chrome rule reaches neither its pages nor
+        // unidentified sites.
         let mut other = github.clone();
         other.kind = ActivityKind::OtherWebsites;
         other.key = "other-websites".to_string();
-        assert_eq!(
-            matching_rule(&rules, &other).map(|rule| rule.classification),
-            Some(RuleClassification::Focused)
-        );
+        assert_eq!(matching_rule(&rules, &other), None);
+        let mut pages = github.clone();
+        pages.kind = ActivityKind::App;
+        pages.key = "chrome".to_string();
+        assert_eq!(matching_rule(&rules, &pages), None);
+        assert!(rules[0].names_a_browser());
     }
 
     #[test]

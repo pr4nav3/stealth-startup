@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 10;
 /// Weeks of history the Trends page and the attention-span chart can draw.
 const TREND_WEEK_COUNT: usize = 8;
 const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
@@ -618,6 +618,28 @@ impl SessionStorage {
             tx.execute_batch("PRAGMA user_version = 8;").map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
         }
+        if version < 9 {
+            // A browser's own pages ("Google Chrome pages") are the browser app now: same row,
+            // same rules. Their key and app were already the browser's app id.
+            let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            tx.execute_batch(
+                "UPDATE span SET kind = 'app', label = CASE
+                     WHEN label LIKE '% local pages' THEN substr(label, 1, length(label) - 12)
+                     WHEN label LIKE '% pages' THEN substr(label, 1, length(label) - 6)
+                     ELSE label END
+                 WHERE kind IN ('browser_pages', 'browser_local');",
+            ).map_err(|error| error.to_string())?;
+            self.rescore_history(&self.scoring_rules()?)?;
+            tx.execute_batch("PRAGMA user_version = 9;").map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+        }
+        if version < 10 {
+            // Browsers became always Neutral: their unrated time is Neutral now (see `ratable`).
+            let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            self.rescore_history(&self.scoring_rules()?)?;
+            tx.execute_batch("PRAGMA user_version = 10;").map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 
@@ -1046,8 +1068,7 @@ impl SessionStorage {
 
     fn attach_ratings(&self, apps: &mut [RecapApp], rules: &[AppRule]) {
         for app in apps {
-            app.ratable = matches!(app.kind.as_str(), "app" | "website")
-                && ![SUPERVISOR_KEY, UNKNOWN_KEY, PAUSED_KEY].contains(&app.key.as_str());
+            app.ratable = ratable(&app.kind, &app.key);
             if !app.ratable {
                 continue;
             }
@@ -1639,6 +1660,19 @@ impl SessionStorage {
         }
     }
 
+    /// Bytes the database uses; pages freed by deletes don't count, so this drops at once.
+    pub fn history_bytes(&self) -> Result<u64, String> {
+        self.conn
+            .query_row(
+                "SELECT (page_count - freelist_count) * page_size
+                 FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|bytes| bytes.max(0) as u64)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn delete_all_history(&self) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM session WHERE ended_at IS NOT NULL", [])
@@ -1760,11 +1794,21 @@ fn rated_state(rules: &[AppRule], kind: &str, key: &str, label: &str, app: &str,
         Some(RuleClassification::Focused) => "focused",
         Some(RuleClassification::Distracting) => "distracted",
         Some(RuleClassification::Neutral) => "neutral",
-        // Browser pages and Other websites can't be rated on their own.
-        None if matches!(kind, "app" | "website") => "unrated",
+        None if ratable(kind, key) => "unrated",
+        // Browsers and Other websites are always Neutral.
         None => "neutral",
     }
     .to_string()
+}
+
+/// Whether a rule can name exactly this row: a website, or an app that isn't a browser or one
+/// of Supervisor's own markers.
+fn ratable(kind: &str, key: &str) -> bool {
+    match kind {
+        "website" => true,
+        "app" => ![SUPERVISOR_KEY, UNKNOWN_KEY, PAUSED_KEY].contains(&key) && !website::is_browser(key),
+        _ => false,
+    }
 }
 
 /// Spans that are not drift: they extend a focus stretch and end a drift.
@@ -2248,6 +2292,53 @@ mod tests {
         assert_eq!(report.focused_seconds, 60);
         assert_eq!(report.focus_percent, 50);
         assert_eq!(report.spans[1].state, "neutral");
+    }
+
+    #[test]
+    fn history_size_drops_when_history_is_deleted() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Size", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        for i in 0..2000 {
+            storage.insert_span(id, &app("Code"), "focused", i, 1).unwrap();
+        }
+        storage.close_session(id, "2026-09-22T12:40:00Z", "stopped", 2000).unwrap();
+        let full = storage.history_bytes().unwrap();
+        storage.delete_all_history().unwrap();
+        assert!(storage.history_bytes().unwrap() < full);
+    }
+
+    #[test]
+    fn version_nine_folds_browser_pages_into_the_browser() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Pages", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        storage.insert_span(id, &app("chrome"), "neutral", 0, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:01:00Z", "stopped", 60).unwrap();
+        storage.conn.execute_batch(
+            "UPDATE span SET kind = 'browser_pages', label = 'Google Chrome pages';
+             INSERT INTO span (session_id, app, kind, activity_key, label, source, category, state,
+                               started_offset_seconds, seconds)
+               SELECT session_id, app, 'browser_local', activity_key, 'Google Chrome local pages',
+                      source, '', state, 60, 30 FROM span;
+             PRAGMA user_version = 8;",
+        ).unwrap();
+        let reopened = SessionStorage::from_connection(storage.conn).unwrap();
+        let spans = reopened.load_spans_for_session(id, &[]).unwrap();
+        assert!(spans.iter().all(|span| span.kind == "app" && span.activity_key == "chrome"));
+        assert!(spans.iter().all(|span| span.label == "Google Chrome"));
+    }
+
+    #[test]
+    fn browsers_are_neutral_and_no_rule_reaches_them() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        storage.replace_rules(&[AppRule::app("chrome", RuleClassification::Distracting)]).unwrap();
+        let id = storage.insert_session("Browse", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        storage.insert_span(id, &app("chrome"), "neutral", 0, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:01:00Z", "stopped", 60).unwrap();
+
+        let report = storage.get_session_report(id).unwrap();
+        assert_eq!(report.spans[0].state, "neutral");
+        assert_eq!(report.unrated_seconds, 0);
+        assert!(!report.apps[0].ratable);
     }
 
     #[test]

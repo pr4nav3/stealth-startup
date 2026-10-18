@@ -93,6 +93,10 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn history_bytes(&self) -> Result<u64, String> {
+        self.storage()?.history_bytes()
+    }
+
     pub fn delete_all_history(&mut self) -> Result<(), String> {
         self.storage()?.delete_all_history()?;
         self.refresh_history();
@@ -498,6 +502,8 @@ struct Session {
     last_closed: Option<OpenSpan>,
     /// Last time media playing in front showed the user was there; Away never starts earlier.
     media_present_at: Duration,
+    /// When window reads started failing, while they still are.
+    capture_failing_since: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -543,6 +549,7 @@ impl Session {
             recorded_until: 0,
             last_closed: None,
             media_present_at: now,
+            capture_failing_since: None,
         }
     }
 
@@ -584,6 +591,7 @@ impl Session {
         supervisor: &SupervisorIdentity,
         storage: Option<&SessionStorage>,
     ) {
+        self.capture_failing_since = None;
         self.tick(now, storage);
         if !self.is_recording() {
             return;
@@ -741,11 +749,12 @@ impl Session {
         let Some(focus) = self.latest_focus.clone() else {
             return;
         };
-        // Browser pages and unidentified sites have no rule that would mean only them.
+        if !focus.markable {
+            return;
+        }
         let rule = match focus.activity.kind {
             ActivityKind::Website => AppRule::website(&focus.activity.key, classification),
-            ActivityKind::App => AppRule::app(&focus.activity.app_id, classification),
-            _ => return,
+            _ => AppRule::app(&focus.activity.app_id, classification),
         };
         if self.is_recording() {
             self.account_current(now);
@@ -811,11 +820,17 @@ impl Session {
         now.as_secs().saturating_sub(self.started_at_seconds)
     }
 
+    /// A read that fails during a switch (Alt-Tab to a minimised window, a virtual desktop
+    /// change) stays with the window before, like any switch. Only a failure that lasts
+    /// `LOST_TIME_AFTER` becomes lost time, dated from when it began.
     fn record_capture_gap(&mut self, now: Duration, storage: Option<&SessionStorage>) {
         if !self.is_recording() || now <= self.last_accounted_at {
             return;
         }
-        self.record_lost_time(self.last_accounted_at, now, storage);
+        let since = *self.capture_failing_since.get_or_insert(self.last_accounted_at);
+        if now.saturating_sub(since) >= LOST_TIME_AFTER {
+            self.record_lost_time(since, now, storage);
+        }
     }
 
     /// Time from `from` to `now` that nobody observed: a failed capture, sleep, or a freeze.
@@ -1301,10 +1316,12 @@ fn clean_rules(rules: Vec<AppRule>) -> Vec<AppRule> {
     .collect()
 }
 
+/// The first rule per target wins; rules naming a browser are dropped (browsers are Neutral).
 fn keep_current_rules(rules: Vec<AppRule>) -> Vec<AppRule> {
     let mut seen = std::collections::HashSet::new();
     rules
         .into_iter()
+        .filter(|rule| !rule.names_a_browser())
         .filter(|rule| seen.insert((rule.target, rule.value.trim().to_lowercase())))
         .collect()
 }
@@ -1379,6 +1396,7 @@ fn marked_focus(
         matched_rule: Some(matched_rule),
         sample: focus.sample.clone(),
         activity: focus.activity.clone(),
+        markable: focus.markable,
         state,
         classification,
         seconds_on_current_window: focus.seconds_on_current_window,
@@ -1549,15 +1567,38 @@ mod tests {
         for millis in [0, 1100, 2200, 3300, 4400, 5500, 6600, 7700, 8800, 9900, 11000] {
             record(&mut manager, sample("Code", "Plan", 0.0), Duration::from_millis(millis));
         }
-        manager.record_capture_gap(seconds(15));
-        let snapshot = record(&mut manager, sample("Code", "Plan", 0.0), seconds(20));
+        // Reads fail from 11s; at 30s that has lasted long enough to be lost time.
+        manager.record_capture_gap(seconds(30));
+        let snapshot = record(&mut manager, sample("Code", "Plan", 0.0), seconds(35));
         let current = snapshot.current.unwrap();
         assert_eq!(current.metrics.neutral_seconds, 11);
-        assert_eq!(current.metrics.idle_seconds, 9);
-        manager.stop(seconds(20));
+        assert_eq!(current.metrics.idle_seconds, 24);
+        manager.stop(seconds(35));
         let report = manager.session_report(current.id).unwrap();
         assert_eq!(report.unrated_seconds, 11);
-        assert_eq!(report.idle_seconds, 9);
+        assert_eq!(report.idle_seconds, 24);
+    }
+
+    #[test]
+    fn a_failed_read_during_alt_tab_stays_with_the_window_before() {
+        let mut manager = test_manager();
+        manager.start(input("Switch", Strictness::Normal), seconds(0));
+        let id = manager.snapshot(seconds(0)).current.unwrap().id;
+        for t in 0..=10 {
+            record(&mut manager, sample("Code", "Plan", 0.0), seconds(t));
+        }
+        // A minimised window in front for a moment while switching.
+        manager.record_capture_gap(seconds(11));
+        manager.record_capture_gap(seconds(12));
+        record(&mut manager, sample("Notes", "Todo", 0.0), seconds(13));
+        manager.stop(seconds(20));
+
+        let report = manager.session_report(id).unwrap();
+        let bounds: Vec<_> = report.spans.iter()
+            .map(|span| (span.started_offset_seconds, span.seconds, span.activity_key.as_str()))
+            .collect();
+        assert_eq!(bounds, vec![(0, 13, "code"), (13, 7, "notes")]);
+        assert_eq!(report.idle_seconds, 0);
     }
 
     #[test]

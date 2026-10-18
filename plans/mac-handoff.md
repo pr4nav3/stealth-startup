@@ -93,6 +93,9 @@ is ignored when it does not (the desktop). The login window gives no sample. Uti
 - [ ] Safari and Chrome on macOS. Address-bar read is a stub, so identity falls back to
       titles. Titles are not stored. Confirm the fallback is tolerable until
       `browser_macos.rs` exists.
+- [ ] A New Tab counts as the browser app itself, found by its title ("New Tab", Safari's
+      "Start Page") while the address can't be read. Confirm Safari's title after the
+      browser-name cleanup is exactly "Start Page".
 
 ## 6b. Webcam packaging on a Mac
 

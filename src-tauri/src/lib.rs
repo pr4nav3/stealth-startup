@@ -155,6 +155,11 @@ fn delete_session(id: u64, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_history_size(state: State<'_, AppState>) -> Result<u64, String> {
+    lock_sessions(&state)?.history_bytes()
+}
+
+#[tauri::command]
 fn delete_all_history(state: State<'_, AppState>) -> Result<(), String> {
     lock_sessions(&state)?.delete_all_history()
 }
@@ -183,10 +188,14 @@ fn resolve_rule_input(
     state: State<'_, AppState>,
 ) -> Result<focus::AppRule, String> {
     let names = lock_sessions(&state)?.app_names().unwrap_or_default();
-    focus::AppRule::from_input_with_apps(&text, classification, &names).ok_or_else(|| {
+    let rule = focus::AppRule::from_input_with_apps(&text, classification, &names).ok_or_else(|| {
         "Enter a website (youtube.com) or an app name (Spotify), not a page title or path"
             .to_string()
-    })
+    })?;
+    if rule.names_a_browser() {
+        return Err("Browsers always count as Neutral. Add the website instead (youtube.com).".to_string());
+    }
+    Ok(rule)
 }
 
 #[tauri::command]
@@ -499,6 +508,7 @@ pub fn run() {
             get_trends,
             delete_session,
             delete_all_history,
+            get_history_size,
             dismiss_storage_notice,
             get_settings,
             get_rules,

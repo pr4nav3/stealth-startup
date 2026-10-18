@@ -23,8 +23,8 @@ pub const BROWSERS: &[&str] = &[
     "safari",
 ];
 
-/// Browser New Tab titles, after the browser-name suffix is stripped.
-const NEW_TAB_TITLES: &[&str] = &["new tab"];
+/// Browser New Tab titles, after the browser-name suffix is stripped. Safari calls it Start Page.
+const NEW_TAB_TITLES: &[&str] = &["new tab", "start page"];
 
 /// Schemes a browser shows for its own pages.
 const BROWSER_PAGE_SCHEMES: &[&str] = &[

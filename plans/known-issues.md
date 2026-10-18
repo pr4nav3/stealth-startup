@@ -34,6 +34,8 @@ not change it. Two unrelated apps with the same stem could still share a rule.
 15 seconds during normal polling. Time since the last successful checkpoint can
 still be lost. Recovery marks sessions abandoned and recomputes saved metrics.
 
+**Browsers are always Neutral.** No rule can name a browser (typed rules are refused, stored ones are dropped), so a browser's own pages and unidentified sites stay Neutral; only websites are classified. Schema v10 rescored history for this.
+
 **Away is 3 minutes without input, dated back to the last input.** Shorter pauses (reading,
 thinking) stay with the window in front; strictness no longer changes this. Supervisor's own
 window follows the same rule, and its time is Neutral, never focus (older sessions are
