@@ -294,23 +294,32 @@ impl AppRule {
         is_plain_name(text).then(|| Self::app(text, classification))
     }
 
+    /// Like `from_input`, but a known app's key or name becomes a rule on that app's key. A
+    /// name two apps share is refused: a rule on it would rate both.
     pub fn from_input_with_apps(
         text: &str,
         classification: RuleClassification,
         names: &std::collections::HashMap<String, String>,
-    ) -> Option<Self> {
+    ) -> Result<Self, String> {
         let text = text.trim();
         // Known executable keys may contain dots (WhatsApp.Root); resolve them before URLs.
         if let Some(key) = names.keys().find(|key| key.eq_ignore_ascii_case(text)) {
-            return Some(Self::app(key, classification));
+            return Ok(Self::app(key, classification));
         }
-        let mut matches = names.iter().filter(|(_, name)| name.eq_ignore_ascii_case(text));
-        if let Some((key, _)) = matches.next() {
-            if matches.next().is_none() {
-                return Some(Self::app(key, classification));
-            }
+        let matches: Vec<&String> = names.iter()
+            .filter(|(_, name)| name.eq_ignore_ascii_case(text))
+            .map(|(key, _)| key)
+            .collect();
+        match matches.as_slice() {
+            [key] => return Ok(Self::app(key, classification)),
+            [] => {}
+            _ => return Err(format!(
+                "More than one app is called {text}. Rate the one you mean from History, or rename one first."
+            )),
         }
-        Self::from_input(text, classification)
+        Self::from_input(text, classification).ok_or_else(|| {
+            "Enter a website (youtube.com) or an app name (Spotify), not a page title or path".to_string()
+        })
     }
 
     /// Browsers are always Neutral, so no rule names one: sites are judged one by one, and a
@@ -329,10 +338,19 @@ impl AppRule {
                 activity.kind != ActivityKind::Website
                     && !website::is_browser(&activity.app_id)
                     && (activity.app_id.eq_ignore_ascii_case(value)
-                        || activity.app_label.eq_ignore_ascii_case(value))
+                        || (names_by_label(value, &activity.app_id)
+                            && activity.app_label.eq_ignore_ascii_case(value)))
             }
         }
     }
+}
+
+/// Whether an app rule may match by the app's name. Keys are lowercase without spaces, so a
+/// value like that names one app's key and never a second app that happens to share the name
+/// ("code" is not every app labeled "Code"). Nor does a rule on `app` reach `app#2`.
+fn names_by_label(value: &str, app_id: &str) -> bool {
+    let key_shaped = !value.chars().any(|ch| ch.is_uppercase() || ch.is_whitespace());
+    !key_shaped && !crate::app_identity::stem(app_id).eq_ignore_ascii_case(value)
 }
 
 /// A website, or an app that isn't a browser. Browser pages and unidentified sites have no
@@ -390,6 +408,47 @@ mod tests {
         }
         assert_eq!(AppRule::from_input_with_apps("https://whatsapp.com", RuleClassification::Focused, &names)
             .unwrap().target, RuleTarget::Website);
+    }
+
+    #[test]
+    fn a_name_two_apps_share_is_refused() {
+        let names = std::collections::HashMap::from([
+            ("gl".to_string(), "Game Launcher".to_string()),
+            ("gamelauncher".to_string(), "Game Launcher".to_string()),
+        ]);
+        assert!(AppRule::from_input_with_apps("Game Launcher", RuleClassification::Focused, &names).is_err());
+        // Each key still names exactly one.
+        let rule = AppRule::from_input_with_apps("GL", RuleClassification::Focused, &names).unwrap();
+        assert_eq!(rule.value, "gl");
+    }
+
+    #[test]
+    fn a_rule_on_one_app_never_reaches_another_with_the_same_name() {
+        let first = AppRule::app("app", RuleClassification::Distracting);
+        let mut second = Activity::app("App");
+        second.app_id = "app#2".into();
+        second.key = "app#2".into();
+        assert!(first.matches(&Activity::app("App")));
+        assert!(!first.matches(&second));
+        // Even a name rule written in the app's own case stays off the second app.
+        assert!(!AppRule::app("App", RuleClassification::Focused).matches(&second));
+        assert!(AppRule::app("app#2", RuleClassification::Focused).matches(&second));
+
+        // A key rule never matches a different program that is merely labeled the same.
+        let mut codium = Activity::app("Code");
+        codium.app_id = "vscodium".into();
+        codium.key = "vscodium".into();
+        assert!(!AppRule::app("code", RuleClassification::Focused).matches(&codium));
+    }
+
+    #[test]
+    fn a_second_browser_install_is_still_a_browser() {
+        let mut canary = Activity::app("Google Chrome Canary");
+        canary.app_id = "chrome#2".into();
+        canary.key = "chrome#2".into();
+        assert!(!is_markable(&canary));
+        assert!(AppRule::app("chrome#2", RuleClassification::Focused).names_a_browser());
+        assert!(!AppRule::app("chrome#2", RuleClassification::Focused).matches(&canary));
     }
 
     #[test]
@@ -547,6 +606,8 @@ mod tests {
             app_name: activity.app_id.clone(),
             app_label: activity.app_label.clone(),
             process_path: format!("/Applications/{}.app", activity.app_id),
+            app_identity: String::new(),
+            app_key: None,
             process_id: 42,
             window_title: None,
             window_id: "window-1".to_string(),

@@ -1,4 +1,5 @@
 use crate::activity::{ActivitySample, Bounds, BrowserRead, CapturePermissions};
+use crate::app_identity::{host_script, host_script_label, is_shared_host, windows_identity, VersionNames};
 use crate::website::is_browser;
 use super::activity_normalize::{
     app_label, app_name_from_process_path, classify_foreground_surface, is_inside_dir,
@@ -15,7 +16,10 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionManager as MediaSessions,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
 };
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH, RECT, ERROR_INSUFFICIENT_BUFFER};
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, HWND, LPARAM, MAX_PATH, RECT, UNICODE_STRING,
+};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
@@ -213,10 +217,26 @@ fn build_sample(
         }
     });
 
+    let program = cached_program(&process_path, &app_name, process_id);
+    // One java.exe or python.exe runs many apps; what it runs tells them apart.
+    let script = is_shared_host(&app_name)
+        .then(|| process_command_line(process_id))
+        .flatten()
+        .and_then(|line| host_script(&app_name, &line));
+    let app_identity = windows_identity(
+        &process_path,
+        program.aumid.as_deref(),
+        program.version.as_ref(),
+        script.as_deref(),
+    );
+    let app_label = script.as_deref().map(host_script_label).unwrap_or(program.label);
+
     ActivitySample {
         captured_at,
         platform: "windows",
-        app_label: cached_app_label(&process_path, &app_name, process_id),
+        app_label,
+        app_identity,
+        app_key: None,
         app_name,
         process_path,
         process_id: process_id as u64,
@@ -231,31 +251,93 @@ fn build_sample(
     }
 }
 
-/// The exe's FileDescription ("Visual Studio Code" for Code.exe), read once per program.
-fn cached_app_label(process_path: &str, app_name: &str, process_id: u32) -> String {
-    static LABELS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let mut labels = LABELS
+/// What one program is, read once per program: its label (the exe's FileDescription, "Visual
+/// Studio Code" for Code.exe), its package's AUMID, and who made it.
+#[derive(Clone)]
+struct Program {
+    label: String,
+    aumid: Option<String>,
+    version: Option<VersionNames>,
+}
+
+fn cached_program(process_path: &str, app_name: &str, process_id: u32) -> Program {
+    static PROGRAMS: OnceLock<Mutex<HashMap<String, Program>>> = OnceLock::new();
+    let mut programs = PROGRAMS
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(label) = labels.get(process_path) {
-        return label.clone();
+    if let Some(program) = programs.get(process_path) {
+        return program.clone();
     }
-    let version_name = file_version_name(process_path);
-    let package_name = package_display_name(process_id);
+    let strings = file_version_strings(process_path);
+    let version_name = strings.as_ref().and_then(VersionStrings::name);
+    let aumid = process_aumid(process_id);
+    let package_name = aumid.as_deref().and_then(package_display_name);
     let name = package_name.as_deref().filter(|name| !identifier_like(name))
         .or(version_name.as_deref())
         .or(package_name.as_deref());
-    let label = app_label(app_name, name);
-    if labels.len() >= 256 {
-        labels.clear();
+    let program = Program {
+        label: app_label(app_name, name),
+        aumid,
+        version: strings.map(|strings| VersionNames { company: strings.company, product: strings.product }),
+    };
+    if programs.len() >= 256 {
+        programs.clear();
     }
-    labels.insert(process_path.to_string(), label.clone());
-    label
+    programs.insert(process_path.to_string(), program.clone());
+    program
+}
+
+fn cached_app_label(process_path: &str, app_name: &str, process_id: u32) -> String {
+    cached_program(process_path, app_name, process_id).label
 }
 
 /// Windows resolves the localized display name of a packaged app from its AUMID.
-fn package_display_name(process_id: u32) -> Option<String> {
+fn package_display_name(aumid: &str) -> Option<String> {
+    let info = AppInfo::GetFromAppUserModelId(&HSTRING::from(aumid)).ok()?;
+    let name = info.DisplayInfo().ok()?.DisplayName().ok()?.to_string();
+    Some(name.trim().to_string()).filter(|name| !name.is_empty())
+}
+
+/// The command line of a shared host such as javaw.exe, to see what it runs. Read with the same
+/// limited query right as the image path; only the script it names is kept.
+fn process_command_line(process_id: u32) -> Option<String> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
+    let result = (|| {
+        let mut length = 0u32;
+        let _ = unsafe {
+            NtQueryInformationProcess(handle, ProcessCommandLineInformation, std::ptr::null_mut(), 0, &mut length)
+        };
+        if (length as usize) < std::mem::size_of::<UNICODE_STRING>() || length > 1 << 20 {
+            return None;
+        }
+        // u64s keep the UNICODE_STRING header aligned.
+        let mut buffer = vec![0u64; (length as usize).div_ceil(8)];
+        let status = unsafe {
+            NtQueryInformationProcess(
+                handle,
+                ProcessCommandLineInformation,
+                buffer.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            )
+        };
+        if status.is_err() {
+            return None;
+        }
+        let text = unsafe { &*(buffer.as_ptr() as *const UNICODE_STRING) };
+        if text.Buffer.is_null() || text.Length == 0 {
+            return None;
+        }
+        let units = unsafe { std::slice::from_raw_parts(text.Buffer.0, text.Length as usize / 2) };
+        Some(String::from_utf16_lossy(units))
+    })();
+    let _ = unsafe { CloseHandle(handle) };
+    result
+}
+
+/// A packaged app's AUMID (`PackageFamily!App`), which stays the same across updates.
+fn process_aumid(process_id: u32) -> Option<String> {
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
     let result = (|| {
         let mut length = 0u32;
@@ -269,15 +351,30 @@ fn package_display_name(process_id: u32) -> Option<String> {
             return None;
         }
         let id = String::from_utf16_lossy(&buffer[..(length as usize).saturating_sub(1)]);
-        let info = AppInfo::GetFromAppUserModelId(&HSTRING::from(id)).ok()?;
-        let name = info.DisplayInfo().ok()?.DisplayName().ok()?.to_string();
-        Some(name.trim().to_string()).filter(|name| !name.is_empty())
+        Some(id.trim().to_string()).filter(|id| !id.is_empty())
     })();
     let _ = unsafe { CloseHandle(handle) };
     result
 }
 
-fn file_version_name(path: &str) -> Option<String> {
+struct VersionStrings {
+    description: Option<String>,
+    product: Option<String>,
+    company: Option<String>,
+}
+
+impl VersionStrings {
+    fn name(&self) -> Option<String> {
+        match (&self.description, &self.product) {
+            (Some(description), Some(product))
+                if identifier_like(description) && !identifier_like(product) => Some(product.clone()),
+            (Some(description), _) => Some(description.clone()),
+            (None, product) => product.clone(),
+        }
+    }
+}
+
+fn file_version_strings(path: &str) -> Option<VersionStrings> {
     if path.is_empty() {
         return None;
     }
@@ -323,14 +420,11 @@ fn file_version_name(path: &str) -> Option<String> {
             let text = String::from_utf16_lossy(text);
             Some(text.trim_end_matches('\0').trim().to_string()).filter(|text| !text.is_empty())
         };
-        let description = read("FileDescription");
-        let product = read("ProductName");
-        match (description, product) {
-            (Some(description), Some(product))
-                if identifier_like(&description) && !identifier_like(&product) => Some(product),
-            (Some(description), _) => Some(description),
-            (None, product) => product,
-        }
+        Some(VersionStrings {
+            description: read("FileDescription"),
+            product: read("ProductName"),
+            company: read("CompanyName"),
+        })
     }
 }
 
@@ -532,9 +626,38 @@ mod tests {
     #[ignore = "manual: checks the OS display name of a running packaged app"]
     fn manual_packaged_app_name() {
         let pid: u32 = std::env::var("SUPERVISOR_PROBE_PID").expect("pid").parse().expect("numeric pid");
-        let name = package_display_name(pid).expect("package display name");
+        let aumid = process_aumid(pid).expect("packaged app");
+        let name = package_display_name(&aumid).expect("package display name");
+        println!("{aumid}");
         assert!(!identifier_like(&name), "{name}");
         println!("{name}");
+    }
+
+    /// Set SUPERVISOR_PROBE_PID to a running java/python app's PID, then run this ignored test.
+    #[test]
+    #[ignore = "manual: prints the identity of a running process"]
+    fn manual_process_identity() {
+        let pid: u32 = std::env::var("SUPERVISOR_PROBE_PID").expect("pid").parse().expect("numeric pid");
+        let path = query_process_path(pid).expect("process path");
+        let name = app_name_from_process_path(&path, "");
+        let line = process_command_line(pid).expect("command line");
+        let program = cached_program(&path, &name, pid);
+        let script = host_script(&name, &line);
+        let identity = windows_identity(&path, program.aumid.as_deref(), program.version.as_ref(), script.as_deref());
+        println!("{line}\n{identity}");
+    }
+
+    #[test]
+    fn this_process_has_an_unpackaged_identity_and_a_readable_command_line() {
+        let pid = std::process::id();
+        let path = query_process_path(pid).expect("own path");
+        let line = process_command_line(pid).expect("own command line");
+        assert!(!line.is_empty());
+        let name = app_name_from_process_path(&path, "");
+        let program = cached_program(&path, &name, pid);
+        assert_eq!(program.aumid, None);
+        let identity = windows_identity(&path, None, program.version.as_ref(), None);
+        assert!(identity.starts_with("path:") || identity.starts_with("exe:"), "{identity}");
     }
 
     #[test]

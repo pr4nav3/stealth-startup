@@ -1,4 +1,5 @@
 use crate::activity;
+use crate::app_identity::{self, AppKeys};
 use crate::attribution::{Activity, PAUSED_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
 use crate::focus::{matching_rule, starter_rules, AppRule, RuleClassification, RuleTarget};
 use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, HISTORY_CACHE_LIMIT};
@@ -9,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 /// Weeks of history the Trends page and the attention-span chart can draw.
 const TREND_WEEK_COUNT: usize = 8;
 const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
@@ -32,6 +33,10 @@ pub struct SessionStorage {
     site_names: RefCell<HashMap<String, String>>,
     app_names: RefCell<HashMap<String, String>>,
     native_app_names: RefCell<HashMap<String, String>>,
+    /// Which app key each native app identity was given (see `app_identity`).
+    app_keys: RefCell<AppKeys>,
+    /// Each identity's key and the latest label seen for it.
+    identity_labels: RefCell<HashMap<String, (String, String)>>,
     /// Seconds of timeline holes filled at close. The recorder should keep this at zero.
     repaired_seconds: std::cell::Cell<u64>,
 }
@@ -302,6 +307,8 @@ impl SessionStorage {
             site_names: RefCell::default(),
             app_names: RefCell::default(),
             native_app_names: RefCell::default(),
+            app_keys: RefCell::default(),
+            identity_labels: RefCell::default(),
             repaired_seconds: std::cell::Cell::new(0),
         };
         storage.apply_pragmas()?;
@@ -309,7 +316,79 @@ impl SessionStorage {
         storage.seed_webcam_setting_keys()?;
         storage.load_site_names()?;
         storage.load_app_names()?;
+        storage.load_app_identities()?;
         Ok(storage)
+    }
+
+    fn load_app_identities(&self) -> Result<(), String> {
+        let mut stmt = self.conn.prepare("SELECT identity, key, label FROM app_identity ORDER BY rowid")
+            .map_err(|error| error.to_string())?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut keys = AppKeys::default();
+        let mut labels = HashMap::new();
+        for (identity, key, label) in rows {
+            if keys.insert(&identity, &key) {
+                labels.insert(identity, (key, label));
+            }
+        }
+        *self.app_keys.borrow_mut() = keys;
+        *self.identity_labels.borrow_mut() = labels;
+        Ok(())
+    }
+
+    /// The app key for a native identity, assigned on first sight and kept from then on. The
+    /// first identity whose name fits the history already kept under its program name takes
+    /// that name as its key, so old spans and rules carry on; any other gets `name#2`...
+    pub fn app_key(&self, identity: &str, stem: &str, label: &str) -> String {
+        let existing = self.app_keys.borrow().get(identity).map(str::to_string);
+        if let Some(key) = existing {
+            let stale = self.identity_labels.borrow().get(identity).is_none_or(|(_, seen)| seen != label);
+            if stale && !label.is_empty() {
+                if let Err(error) = self.conn.execute(
+                    "UPDATE app_identity SET label = ?2 WHERE identity = ?1", params![identity, label],
+                ) {
+                    self.record_failure("save an app's name", error.to_string());
+                }
+                self.identity_labels.borrow_mut().insert(identity.to_string(), (key.clone(), label.to_string()));
+            }
+            return key;
+        }
+        let stem = app_identity::clean_stem(stem);
+        let fits = match self.latest_app_label(&stem) {
+            Ok(None) => true,
+            Ok(Some(seen)) => seen.eq_ignore_ascii_case(label) || seen.eq_ignore_ascii_case(&stem),
+            Err(error) => {
+                self.record_failure("read app history", error);
+                false
+            }
+        };
+        let key = self.app_keys.borrow_mut().claim(identity, &stem, fits);
+        if let Err(error) = self.conn.execute(
+            "INSERT INTO app_identity (identity, key, label) VALUES (?1, ?2, ?3)",
+            params![identity, key, label],
+        ) {
+            self.record_failure("save an app's identity", error.to_string());
+        }
+        self.identity_labels.borrow_mut().insert(identity.to_string(), (key.clone(), label.to_string()));
+        key
+    }
+
+    /// The label most recently recorded under an app key.
+    fn latest_app_label(&self, key: &str) -> Result<Option<String>, String> {
+        let label = self.conn.query_row(
+            "SELECT label FROM span WHERE kind = 'app' AND source != 'none' AND activity_key = ?1
+             ORDER BY id DESC LIMIT 1",
+            [key],
+            |row| row.get::<_, String>(0),
+        );
+        match label {
+            Ok(label) => Ok(Some(label)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn load_site_names(&self) -> Result<(), String> {
@@ -360,14 +439,26 @@ impl SessionStorage {
         let mut names: HashMap<String, String> = rows.into_iter()
             .filter(|(key, _)| !legacy_unidentified_window(key))
             .collect();
-        let keys: Vec<String> = names.keys().cloned().collect();
+        let identified: HashMap<String, String> = self.identity_labels.borrow().values()
+            .filter(|(_, label)| !label.is_empty())
+            .cloned()
+            .collect();
+        // A running process is found by program name, which names one app only while no
+        // other identity shares it.
+        let keys: Vec<String> = names.keys()
+            .filter(|key| !identified.contains_key(*key) && !self.app_keys.borrow().stem_is_shared(key))
+            .cloned()
+            .collect();
         names.extend(activity::running_app_labels(&keys));
+        names.extend(identified);
         *self.native_app_names.borrow_mut() = names;
         Ok(())
     }
 
+    /// The user's name for an app, else `fallback`, marked when another app shares it.
     pub fn app_label(&self, key: &str, fallback: &str) -> String {
-        self.app_names.borrow().get(key).cloned().unwrap_or_else(|| fallback.to_string())
+        self.app_names.borrow().get(key).cloned()
+            .unwrap_or_else(|| app_identity::display_label(key, fallback))
     }
 
     /// Observed app labels plus the user's names, for rule chips and name editing.
@@ -388,6 +479,9 @@ impl SessionStorage {
             }
         }
         names.extend(self.native_app_names.borrow().clone());
+        for (key, label) in names.iter_mut() {
+            *label = app_identity::display_label(key, label);
+        }
         names.extend(self.app_names.borrow().iter()
             .filter(|(key, _)| !legacy_unidentified_window(key))
             .map(|(key, name)| (key.clone(), name.clone())));
@@ -640,6 +734,22 @@ impl SessionStorage {
             tx.execute_batch("PRAGMA user_version = 10;").map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
         }
+        if version < 11 {
+            // Apps are known by native identity (see `app_identity`). Existing keys stay as they
+            // are: the first identity that fits one takes it over when it is next seen.
+            let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS app_identity (
+                   identity TEXT PRIMARY KEY,
+                   key TEXT NOT NULL UNIQUE,
+                   label TEXT NOT NULL DEFAULT ''
+                 );",
+            ).map_err(|error| error.to_string())?;
+            self.map_app_rules_to_keys()?;
+            self.rescore_history(&self.scoring_rules()?)?;
+            tx.execute_batch("PRAGMA user_version = 11;").map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 
@@ -706,6 +816,59 @@ impl SessionStorage {
         }
         tx.pragma_update(None, "user_version", 3)?;
         tx.commit()
+    }
+
+    /// v11: app rules written as a name ("Visual Studio Code") become a rule on that app's key
+    /// when exactly one recorded app goes by the name, so the rule can't reach another app that
+    /// later takes the same name. A name two apps share, or no recorded app has, stays as it is.
+    /// Callers hold a transaction.
+    fn map_app_rules_to_keys(&self) -> Result<(), String> {
+        let latest: Vec<(String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT activity_key, label FROM span WHERE id IN (
+                     SELECT MAX(id) FROM span
+                     WHERE kind = 'app' AND source != 'none' AND activity_key != ''
+                     GROUP BY activity_key)",
+            ).map_err(|error| error.to_string())?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|(key, _)| ratable("app", key) && !legacy_unidentified_window(key))
+                .collect()
+        };
+        let rules: Vec<(i64, String)> = {
+            let mut stmt = self.conn.prepare("SELECT id, value FROM rule WHERE target = 'app' ORDER BY id")
+                .map_err(|error| error.to_string())?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+        };
+        let mut seen = std::collections::HashSet::new();
+        for (id, value) in rules {
+            let lower = value.trim().to_lowercase();
+            let mapped = if latest.iter().any(|(key, _)| *key == lower) {
+                Some(lower)
+            } else {
+                let named: Vec<&String> = latest.iter()
+                    .filter(|(_, label)| label.eq_ignore_ascii_case(value.trim()))
+                    .map(|(key, _)| key)
+                    .collect();
+                match named.as_slice() {
+                    [key] => Some((*key).clone()),
+                    _ => None,
+                }
+            };
+            let value_now = mapped.unwrap_or_else(|| value.clone());
+            // The earlier rule already decided this app; a later duplicate never applied.
+            if !seen.insert(value_now.to_lowercase()) {
+                self.conn.execute("DELETE FROM rule WHERE id = ?1", [id]).map_err(|error| error.to_string())?;
+            } else if value_now != value {
+                self.conn.execute("UPDATE rule SET value = ?2 WHERE id = ?1", params![id, value_now])
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn seed_webcam_setting_keys(&self) -> Result<(), String> {
@@ -2449,6 +2612,86 @@ mod tests {
         storage.replace_rules(&[AppRule::app("slack", RuleClassification::Distracting)]).unwrap();
         let rated = storage.get_session_report(id).unwrap();
         assert_eq!((rated.longest_stretch_seconds, rated.drift_count), (120, 1));
+    }
+
+    fn app_span(key: &str, label: &str) -> Activity {
+        let mut activity = Activity::app(label);
+        activity.key = key.to_string();
+        activity.app_id = key.to_string();
+        activity
+    }
+
+    #[test]
+    fn version_eleven_maps_name_rules_to_keys_only_when_unambiguous() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Old", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        storage.insert_span(id, &app_span("code", "Visual Studio Code"), "neutral", 0, 60).unwrap();
+        storage.insert_span(id, &app_span("gl", "Game Launcher"), "neutral", 60, 60).unwrap();
+        storage.insert_span(id, &app_span("gamelauncher", "Game Launcher"), "neutral", 120, 60).unwrap();
+        storage.insert_span(id, &app_span("notes", "Notes"), "neutral", 180, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:04:00Z", "stopped", 240).unwrap();
+        storage.replace_rules(&[
+            AppRule::app("Visual Studio Code", RuleClassification::Focused),
+            AppRule::app("Game Launcher", RuleClassification::Distracting),
+            AppRule::app("Notes", RuleClassification::Focused),
+            AppRule::app("Spotify", RuleClassification::Distracting),
+            // Mapped onto the same app as the first rule, which always won.
+            AppRule::app("code", RuleClassification::Distracting),
+        ]).unwrap();
+        storage.conn.execute_batch("DROP TABLE app_identity; PRAGMA user_version = 10;").unwrap();
+
+        let reopened = SessionStorage::from_connection(storage.conn).unwrap();
+        let rules: Vec<(String, RuleClassification)> = reopened.read_rules().unwrap()
+            .into_iter().map(|rule| (rule.value, rule.classification)).collect();
+        assert_eq!(rules, vec![
+            ("code".to_string(), RuleClassification::Focused),
+            // Two recorded apps carry this name: neither is chosen for it.
+            ("Game Launcher".to_string(), RuleClassification::Distracting),
+            ("notes".to_string(), RuleClassification::Focused),
+            // No recorded app has this name yet; it still waits for one.
+            ("Spotify".to_string(), RuleClassification::Distracting),
+        ]);
+        // History is untouched and still rated by the same rules.
+        let report = reopened.get_session_report(id).unwrap();
+        let keys: Vec<&str> = report.spans.iter().map(|span| span.activity_key.as_str()).collect();
+        assert_eq!(keys, ["code", "gl", "gamelauncher", "notes"]);
+        assert_eq!((report.focused_seconds, report.distracted_seconds), (120, 120));
+    }
+
+    #[test]
+    fn app_identities_never_share_a_key_and_keep_it_across_restarts() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let alpha = "exe:app|alpha ltd|alpha";
+        let beta = "exe:app|beta inc|beta";
+        assert_eq!(storage.app_key(alpha, "App", "Alpha"), "app");
+        assert_eq!(storage.app_key(beta, "App", "Beta"), "app#2");
+        assert_eq!(storage.app_key(alpha, "App", "Alpha 2"), "app");
+
+        let reopened = SessionStorage::from_connection(storage.conn).unwrap();
+        assert_eq!(reopened.app_key(beta, "App", "Beta"), "app#2");
+        assert_eq!(reopened.app_key(alpha, "App", "Alpha 2"), "app");
+        assert_eq!(reopened.app_key("path:c:\\gamma\\app.exe", "app", "App"), "app#3");
+        let names = reopened.app_names().unwrap();
+        assert_eq!((names["app"].as_str(), names["app#2"].as_str()), ("Alpha 2", "Beta (2)"));
+        assert_eq!(reopened.app_label("app#3", "App"), "App (3)");
+    }
+
+    #[test]
+    fn an_identity_takes_over_old_history_only_when_its_name_fits() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        storage.replace_rules(&[AppRule::app("tool", RuleClassification::Focused)]).unwrap();
+        let id = storage.insert_session("Old", Strictness::Normal, "2026-09-22T12:00:00Z", 300).unwrap();
+        storage.insert_span(id, &app_span("tool", "Old Tool"), "neutral", 0, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:01:00Z", "stopped", 60).unwrap();
+
+        // A different program that happens to share the file name does not inherit it.
+        assert_eq!(storage.app_key("exe:tool|new co|new tool", "tool", "New Tool"), "tool#2");
+        // The program the history belongs to does, along with its rule.
+        assert_eq!(storage.app_key("exe:tool|old co|old tool", "tool", "Old Tool"), "tool");
+        assert_eq!(storage.get_session_report(id).unwrap().focused_seconds, 60);
+        // Shared hosts never inherit: their history may be several apps.
+        storage.insert_span(id, &app_span("javaw", "Java(TM) Platform SE binary"), "neutral", 60, 60).unwrap();
+        assert_eq!(storage.app_key("exe:javaw|oracle|java|jar:a", "javaw", "Java(TM) Platform SE binary"), "javaw#2");
     }
 
     #[test]

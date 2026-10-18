@@ -51,6 +51,7 @@ windows = { version = "0.61", features = [
   "Win32_UI_Accessibility",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
+  "Wdk_System_Threading",
 ] }
 
 # Apple's frameworks through the objc2 bindings Tauri itself uses (same versions, compiled once).
@@ -61,4 +62,4 @@ mach2 = "0.4"
 objc2 = "0.6"
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEventSource", "CGEventTypes", "CGWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSString", "NSPathUtilities", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSDictionary", "NSEnumerator", "NSString", "NSPathUtilities", "NSValue"] }

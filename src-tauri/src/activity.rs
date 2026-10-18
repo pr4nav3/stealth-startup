@@ -28,6 +28,13 @@ pub struct ActivitySample {
     pub platform: &'static str,
     pub app_name: String,
     pub app_label: String,
+    /// Native identity (see `app_identity`): a packaged app's AUMID, a bundle id, or the
+    /// program's maker and name. Kept apart from the label, which can change.
+    #[serde(skip)]
+    pub app_identity: String,
+    /// The history key `app_identity` was given. `None` until assigned; the stem stands in.
+    #[serde(skip)]
+    pub app_key: Option<String>,
     pub process_path: String,
     pub process_id: u64,
     /// Read for attribution only; never sent to the UI or stored.
@@ -180,6 +187,8 @@ fn sample_from_active_window(
         captured_at,
         platform: platform(),
         app_label: activity_normalize::app_label(&active_window.app_name, None),
+        app_identity: app_identity(&active_window.process_path.to_string_lossy(), &active_window.app_name),
+        app_key: None,
         app_name: active_window.app_name,
         process_path: active_window.process_path.to_string_lossy().into_owned(),
         process_id: active_window.process_id,
@@ -197,6 +206,16 @@ fn sample_from_active_window(
         browser: None,
         media_playing: false,
     }
+}
+
+/// macOS: the bundle identifier, so a renamed app stays one app. Elsewhere: the program path.
+#[cfg(not(target_os = "windows"))]
+fn app_identity(process_path: &str, app_name: &str) -> String {
+    #[cfg(target_os = "macos")]
+    if let Some(id) = crate::macos::bundle_identifier(process_path) {
+        return crate::app_identity::macos_identity(Some(&id), process_path);
+    }
+    crate::app_identity::fallback_identity(process_path, app_name)
 }
 
 #[cfg(not(target_os = "windows"))]

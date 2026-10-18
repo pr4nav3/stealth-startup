@@ -642,6 +642,14 @@ impl Session {
             self.account(now, state);
         }
 
+        let mut sample = sample;
+        if let Some(storage) = storage {
+            if sample.app_identity.is_empty() {
+                sample.app_identity =
+                    crate::app_identity::fallback_identity(&sample.process_path, &sample.app_name);
+            }
+            sample.app_key = Some(storage.app_key(&sample.app_identity, &sample.app_name, &sample.app_label));
+        }
         let activity = self.resolver.resolve(&sample, now);
         let mut display_activity = activity.clone();
         if let (ActivityKind::Website, Some(storage)) = (activity.kind, storage) {
@@ -2471,7 +2479,33 @@ mod tests {
         };
         let snapshot = record(&mut manager, other, seconds(5));
 
-        assert!(snapshot.current.unwrap().focus.is_some());
+        let focus = snapshot.current.unwrap().focus.unwrap();
+        // Never filed under Supervisor's own row.
+        assert_eq!(focus.activity.key, "supervisor#2");
+    }
+
+    #[test]
+    fn two_programs_with_one_name_are_two_apps_and_keep_their_keys() {
+        let mut manager = test_manager();
+        let mut start = input("Focus", Strictness::Normal);
+        start.rules = Some(vec![AppRule::app("app", RuleClassification::Distracting)]);
+        manager.start(start, seconds(0));
+        let alpha = ActivitySample {
+            process_path: "/Vendors/Alpha/App.app".to_string(),
+            ..sample("App", "Alpha", 0.0)
+        };
+        let beta = ActivitySample {
+            process_path: "/Vendors/Beta/App.app".to_string(),
+            ..sample("App", "Beta", 0.0)
+        };
+        let focus = |snapshot: SessionSnapshot| snapshot.current.unwrap().focus.unwrap();
+        let a = focus(record(&mut manager, alpha.clone(), seconds(0)));
+        let b = focus(record(&mut manager, beta, seconds(5)));
+        assert_eq!((a.activity.key.as_str(), a.classification), ("app", RuleClassification::Distracting));
+        // The rule on the first app does not reach the second, and the two never look alike.
+        assert_eq!((b.activity.key.as_str(), b.classification), ("app#2", RuleClassification::Neutral));
+        assert_eq!(b.activity.label, "App (2)");
+        assert_eq!(focus(record(&mut manager, alpha, seconds(10))).activity.key, "app");
     }
 
     fn sample(app_name: &str, title: &str, idle_seconds: f64) -> ActivitySample {
@@ -2530,6 +2564,8 @@ mod tests {
             app_name: app_name.to_string(),
             app_label: app_name.to_string(),
             process_path: format!("/Applications/{app_name}.app"),
+            app_identity: String::new(),
+            app_key: None,
             process_id,
             window_title: Some(title.to_string()),
             window_id: title.to_string(),
