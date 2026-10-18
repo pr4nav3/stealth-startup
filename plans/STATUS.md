@@ -99,7 +99,6 @@ already landed on `main`.
 ## Bugfixes (beside the branches)
 
 - Starter voices look ready and have no phrase clips. A nudge only plays a custom voice. The fallback beep opens an audio context it never closes
-- The screen rebuilds on a timer during a live session, so typing in a field can be wiped
 - A recording can grow without a size cap
 - `install_runtime` returns if any compatible runtime exists, so a bugfix zip never installs
 - Recent time after the last successful 15-second span checkpoint can be lost on a crash

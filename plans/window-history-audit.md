@@ -116,8 +116,8 @@ observation quality, stable app identity, and what the focus score actually mean
    Browser app rules currently exclude recognized websites entirely. Decide
    whether users should instead be able to set a browser-wide default with site
    exceptions; the preview now describes the behavior actually implemented.
-7. **Interaction QA is unfinished.** Live-session rendering rebuilds the page;
-   edit persistence and keyboard behavior need a focused UI pass. PDF export is
+7. **Interaction QA is unfinished.** Live-session polling no longer rebuilds
+   under an open editor or focused field; keyboard behavior still needs a pass. PDF export is
    still unimplemented; its nonfunctional control has been removed.
 8. **Webcam is not in the session pipeline.** Phone/away totals remain zero and
    strictness/nudge arbitration is not integrated. This audit did not change voice
