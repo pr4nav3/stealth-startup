@@ -57,6 +57,7 @@ fn start_session(
     let snapshot = sessions.snapshot(now);
     drop(sessions);
     voice::release_worker(&state.voice_worker);
+    sync_session_webcam(&app);
 
     if should_show_status {
         show_status_window_internal(&app)?;
@@ -74,15 +75,19 @@ fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, S
 }
 
 #[tauri::command]
-fn pause_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+fn pause_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.pause(now))
+    let snapshot = lock_sessions(&state)?.pause(now);
+    sync_session_webcam(&app);
+    Ok(snapshot)
 }
 
 #[tauri::command]
-fn resume_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+fn resume_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.resume(now))
+    let snapshot = lock_sessions(&state)?.resume(now);
+    sync_session_webcam(&app);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -97,6 +102,7 @@ fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSna
     let snapshot = lock_sessions(&state)?.stop(now);
 
     hide_status_window(&app);
+    sync_session_webcam(&app);
     Ok(snapshot)
 }
 
@@ -438,13 +444,47 @@ fn delete_voice_clip(
 #[tauri::command(async)]
 fn start_webcam_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let gpu = lock_sessions(&state)?.settings().webcam_gpu;
-    webcam::start_preview(app, &state.webcam, gpu)
+    webcam::start_worker(app, &state.webcam, gpu, true, on_webcam_frame)
 }
 
+/// A session that still wants the camera gets a worker without pictures back.
 #[tauri::command]
-fn stop_webcam_preview(state: State<'_, AppState>) -> Result<(), String> {
+fn stop_webcam_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     webcam::stop_preview(&state.webcam);
+    sync_session_webcam(&app);
     Ok(())
+}
+
+fn on_webcam_frame(app: &AppHandle, frame: &webcam::WebcamFrame) {
+    if frame.error.is_none() {
+        with_sessions(app, |sessions, now| {
+            sessions.record_webcam(frame.phone_in_frame, frame.present, now);
+        });
+    }
+}
+
+/// Runs the webcam exactly while a session records with it turned on. The preview worker is
+/// the Settings page's to stop. Starting happens off this thread (it can wait on a permission
+/// prompt), and waits a while after a failure instead of retrying every second.
+fn sync_session_webcam(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Ok((wants, gpu)) = lock_sessions(&state).map(|sessions| (sessions.wants_webcam(), sessions.settings().webcam_gpu)) else {
+        return;
+    };
+    let webcam = &state.webcam;
+    if wants {
+        if !webcam.is_running() && !webcam.is_starting() && !webcam.recently_failed() {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let state = app.state::<AppState>();
+                if let Err(error) = webcam::start_worker(app.clone(), &state.webcam, gpu, false, on_webcam_frame) {
+                    eprintln!("webcam: {error}");
+                }
+            });
+        }
+    } else if webcam.is_running() && !webcam.is_preview() {
+        webcam::stop_preview(webcam);
+    }
 }
 
 fn lock_sessions<'a>(
@@ -806,6 +846,7 @@ fn start_session_ticker(app: AppHandle) {
         if ended_after_tick {
             hide_status_window(&app);
         }
+        sync_session_webcam(&app);
         if !should_poll {
             continue;
         }

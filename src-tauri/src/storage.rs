@@ -1,6 +1,6 @@
 use crate::activity;
 use crate::app_identity::{self, AppKeys};
-use crate::attribution::{Activity, PAUSED_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
+use crate::attribution::{Activity, PAUSED_KEY, PHONE_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
 use crate::focus::{matching_rule, starter_rules, AppRule, RuleClassification, RuleTarget};
 use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, HISTORY_CACHE_LIMIT};
 use crate::website;
@@ -912,6 +912,9 @@ impl SessionStorage {
                 "webcam_gpu" => {
                     settings.webcam_gpu = value == "true";
                 }
+                "webcam_enabled" => {
+                    settings.webcam_enabled = value == "true";
+                }
                 _ => {}
             }
         }
@@ -940,6 +943,10 @@ impl SessionStorage {
         self.set_setting(
             "webcam_gpu",
             if settings.webcam_gpu { "true" } else { "false" },
+        )?;
+        self.set_setting(
+            "webcam_enabled",
+            if settings.webcam_enabled { "true" } else { "false" },
         )?;
         Ok(())
     }
@@ -1253,6 +1260,7 @@ impl SessionStorage {
         let mut unrated_seconds = 0u64;
         let mut distracted_seconds = 0u64;
         let mut idle_seconds = 0u64;
+        let mut phone_seconds = 0u64;
 
         for span in &spans {
             match span.state.as_str() {
@@ -1260,6 +1268,11 @@ impl SessionStorage {
                 "neutral" => neutral_seconds += span.seconds,
                 "unrated" => unrated_seconds += span.seconds,
                 "suspicious" | "distracted" => distracted_seconds += span.seconds,
+                // Phone time is distracted time, also shown on its own.
+                "phone" => {
+                    distracted_seconds += span.seconds;
+                    phone_seconds += span.seconds;
+                }
                 "idle" | "unknown" => idle_seconds += span.seconds,
                 _ => {}
             }
@@ -1285,10 +1298,12 @@ impl SessionStorage {
             median_stretch_seconds,
             neutral_seconds,
             unrated_seconds,
+            phone_seconds,
         ];
         let saved = self.conn.query_row(
             "SELECT focused_seconds, distracted_seconds, idle_seconds, drift_count, nudge_count,
-                    longest_stretch_seconds, median_stretch_seconds, neutral_seconds, unrated_seconds
+                    longest_stretch_seconds, median_stretch_seconds, neutral_seconds, unrated_seconds,
+                    phone_seconds
              FROM session WHERE id = ?1",
             [session_id],
             |row| (0..metrics.len()).map(|index| row.get::<_, i64>(index).map(|value| value as u64))
@@ -1309,7 +1324,8 @@ impl SessionStorage {
                     longest_stretch_seconds = ?6,
                     median_stretch_seconds = ?7,
                     neutral_seconds = ?9,
-                    unrated_seconds = ?10
+                    unrated_seconds = ?10,
+                    phone_seconds = ?11
                  WHERE id = ?8",
                 params![
                     focused_seconds,
@@ -1321,7 +1337,8 @@ impl SessionStorage {
                     median_stretch_seconds,
                     session_id,
                     neutral_seconds,
-                    unrated_seconds
+                    unrated_seconds,
+                    phone_seconds
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -1969,7 +1986,7 @@ fn rated_state(rules: &[AppRule], kind: &str, key: &str, label: &str, app: &str,
 fn ratable(kind: &str, key: &str) -> bool {
     match kind {
         "website" => true,
-        "app" => ![SUPERVISOR_KEY, UNKNOWN_KEY, PAUSED_KEY].contains(&key) && !website::is_browser(key),
+        "app" => ![SUPERVISOR_KEY, UNKNOWN_KEY, PAUSED_KEY, PHONE_KEY].contains(&key) && !website::is_browser(key),
         _ => false,
     }
 }
@@ -2066,7 +2083,7 @@ fn count_drifts(spans: &[ReportSpan]) -> u64 {
         }
         previous_end = span.started_offset_seconds.saturating_add(span.seconds);
         let focus_like = on_task(&span.state);
-        let drift_like = matches!(span.state.as_str(), "distracted" | "idle" | "suspicious");
+        let drift_like = matches!(span.state.as_str(), "distracted" | "idle" | "suspicious" | "phone");
         if matches!(span.state.as_str(), "paused" | "unknown") {
             in_focus_track = false;
         } else if focus_like {
@@ -2100,7 +2117,7 @@ fn drift_recoveries(spans: &[ReportSpan]) -> (Vec<u64>, u64) {
                 }
                 was_focused = true;
             }
-            "suspicious" | "distracted" => match drifting.as_mut() {
+            "suspicious" | "distracted" | "phone" => match drifting.as_mut() {
                 Some(seconds) => *seconds += span.seconds,
                 None if was_focused => drifting = Some(span.seconds),
                 None => {}
@@ -2123,7 +2140,7 @@ fn focused_stretches(spans: &[ReportSpan]) -> Vec<u64> {
         previous_end = span.started_offset_seconds.saturating_add(span.seconds);
         match span.state.as_str() {
             state if on_task(state) => current += span.seconds,
-            "distracted" | "idle" | "suspicious" | "paused" | "unknown" => {
+            "distracted" | "idle" | "suspicious" | "phone" | "paused" | "unknown" => {
                 if current > 0 {
                     stretches.push(current);
                     current = 0;
@@ -2259,7 +2276,7 @@ fn apps_from_spans(spans: &[ReportSpan]) -> Vec<RecapApp> {
             "focused" => "Focus",
             "neutral" => "Neutral",
             "unrated" => "Unclassified",
-            "suspicious" | "distracted" => "Distracting",
+            "suspicious" | "distracted" | "phone" => "Distracting",
             _ => "Away",
         };
         totals
@@ -3408,6 +3425,7 @@ mod tests {
             status_window_enabled: false,
             status_window_on_top: false,
             webcam_gpu: true,
+            webcam_enabled: true,
         };
         storage.save_settings(&settings).expect("save settings");
         let loaded = storage.load_settings().expect("load settings");

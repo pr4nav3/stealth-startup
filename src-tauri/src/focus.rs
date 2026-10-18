@@ -26,6 +26,10 @@ pub struct FocusEngine {
     last_nudge_at: Option<Duration>,
     /// Muted engines keep judging time but never ask for a nudge.
     muted: bool,
+    /// From the webcam: someone is in view (counts like media playing), or nobody has been
+    /// in view, without input, long enough to be away.
+    camera_present: bool,
+    camera_away: bool,
 }
 
 impl FocusEngine {
@@ -38,6 +42,8 @@ impl FocusEngine {
             held_since: None,
             last_nudge_at: None,
             muted: false,
+            camera_present: false,
+            camera_away: false,
         }
     }
 
@@ -123,6 +129,24 @@ impl FocusEngine {
         self.muted = muted;
     }
 
+    pub fn set_camera(&mut self, present: bool, away: bool) {
+        self.camera_present = present;
+        self.camera_away = away;
+    }
+
+    /// Every nudge, window or phone, shares one cooldown, so two never play back to back.
+    pub fn nudge_ready(&self, now: Duration) -> bool {
+        !self.muted
+            && self.last_nudge_at.is_none_or(|last| {
+                elapsed_seconds(now, last) >= self.config.nudge_cooldown_seconds
+            })
+    }
+
+    /// A nudge from outside the engine (the phone) starts the shared cooldown.
+    pub fn note_nudge(&mut self, now: Duration) {
+        self.last_nudge_at = Some(now);
+    }
+
     fn state_for_classification(
         &self,
         classification: &RuleClassification,
@@ -140,12 +164,15 @@ impl FocusEngine {
         }
     }
 
-    /// No input past the threshold is Away, unless media is playing in the app in front.
+    /// No input past the threshold is Away, unless media is playing in the app in front or the
+    /// webcam sees someone. The webcam seeing nobody makes it Away sooner.
     pub fn is_away(&self, sample: &ActivitySample) -> bool {
-        sample.idle_seconds.is_some_and(|seconds| {
-            seconds >= AWAY_AFTER_SECONDS as f64
-                && !(sample.media_playing && seconds < MEDIA_PRESENCE_LIMIT_SECONDS)
-        })
+        self.camera_away
+            || sample.idle_seconds.is_some_and(|seconds| {
+                seconds >= AWAY_AFTER_SECONDS as f64
+                    && !((sample.media_playing || self.camera_present)
+                        && seconds < MEDIA_PRESENCE_LIMIT_SECONDS)
+            })
     }
 
     fn next_nudge_in_seconds(

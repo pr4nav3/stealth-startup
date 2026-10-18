@@ -37,7 +37,8 @@ uncommitted and mixed with leftover voice-worker edits.
 - [x] Voice settings check model size only. Cancel keeps verified model files. Generation stops after 30 minutes
 - [x] Voice RAM gate and a regenerate / try-again control on clips
 - [x] Starter *reference* WAVs (`derek`, `elise`) ship in the app. Phrase clips for those voices are not generated
-- [x] Webcam tracker in Settings, with a GPU toggle. Frames are not stored. Phone and away time are not written during a session
+- [x] Webcam tracker in Settings, with a GPU toggle. Frames are not stored
+- [x] Webcam in sessions: phone spans, camera Away, phone nudges on the shared cooldown and the popup (`plans/webcam-tracking.md`)
 - [x] Chrome extension removed
 - [x] History week/month storage and recap UI. PDF export is unimplemented; its empty control was removed in the working tree
 
@@ -92,8 +93,7 @@ already landed on `main`.
    there: generation until a sample sounds right, RAM gate that a normal
    machine can pass, real starter phrase clips or stop listing starters as ready.
 3. Small bugfixes below, not a fifth product branch.
-4. `feat/webcam-session`: run the models during a session, and decide how
-   webcam strictness sits next to voice nudges. Signals: `plans/webcam-tracking.md`.
+4. ~~`feat/webcam-session`~~ done: see "Sessions" in `plans/webcam-tracking.md`.
 5. Leftover UI: dark mode and ease-of-use. Style: `plans/SUPERVISOR_UI_GUIDELINES.md`.
 
 ## Bugfixes (beside the branches)

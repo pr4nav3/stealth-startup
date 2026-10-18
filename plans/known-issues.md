@@ -83,7 +83,9 @@ unrated time is shown apart and counts once rated. See `plans/window-history-aud
 
 ## Webcam
 
-**Settings preview only.** `webcam.rs` emits frames for Settings. `session.rs` never writes `phone_seconds` / `away_seconds`. Those columns stay 0. Worker is not tied to session start/stop.
+**CPU stays under the fps target.** The worker is asked for 4 fps, but YOLO26s on CPU manages about 2 on a typical laptop, so a phone takes about 1.5 s to show. The GPU toggle helps.
+
+**`away_seconds` stays 0.** Camera Away is written as Away (`idle`) spans like input Away, so the column is unused.
 
 **Gaze is paused.** Worker emits `gaze: null`. Strict and normal phone modes are the same signal (`plans/webcam-tracking.md`).
 
