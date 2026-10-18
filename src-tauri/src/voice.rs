@@ -4,11 +4,11 @@ use cpal::SampleFormat;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -31,6 +31,9 @@ const MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES: u64 = 4 * GIBIBYTE;
 #[cfg(target_os = "macos")]
 const MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES: u64 = 5 * GIBIBYTE;
 const GENERATION_PEAK_HEADROOM_BYTES: u64 = GIBIBYTE;
+// ponytail: 1 GB extra while the model is already resident. Replace after generation_log warm runs.
+const LOADED_WORKER_HEADROOM_BYTES: u64 = GIBIBYTE;
+const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const EXTRA_DOWNLOAD_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REFERENCE_AUDIO_BYTES: usize = 60 * 1024 * 1024;
 const DOWNLOAD_CANCELLED: &str = "download cancelled";
@@ -148,6 +151,411 @@ struct VoiceRecordingClip {
     sample_rate: u32,
 }
 
+#[derive(Clone)]
+pub struct VoiceWorker {
+    inner: Arc<WorkerInner>,
+}
+
+struct WorkerInner {
+    live: Mutex<Option<LiveWorker>>,
+    killer: Mutex<Option<WorkerKiller>>,
+    busy: AtomicBool,
+    loaded: AtomicBool,
+    stop_after: AtomicBool,
+    last_used: Mutex<Instant>,
+    generation: AtomicU64,
+}
+
+struct LiveWorker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: Option<BufReader<std::process::ChildStdout>>,
+    _lifetime: WorkerLifetime,
+}
+
+#[derive(Clone)]
+struct WorkerKiller {
+    pid: u32,
+    #[cfg(windows)]
+    job: Option<isize>,
+}
+
+struct JobOutcome {
+    reused_model: bool,
+    reused_voice: bool,
+    spawn_ms: u64,
+    imports_ms: Option<u64>,
+    model_load_ms: Option<u64>,
+    condition_ms: Option<u64>,
+    synthesis_ms: Option<u64>,
+    wav_write_ms: Option<u64>,
+    peak_ram: u64,
+    peak_private: u64,
+}
+
+#[derive(Serialize)]
+struct ServeRequest<'a> {
+    id: String,
+    op: &'a str,
+    reference: String,
+    out_dir: String,
+    phrases: &'a [VoicePhraseInput],
+    overwrite: bool,
+}
+
+#[derive(Deserialize)]
+struct ServeReply {
+    ok: bool,
+    error: Option<String>,
+    loaded: Option<bool>,
+    reused_model: Option<bool>,
+    reused_voice: Option<bool>,
+    phases_ms: Option<ServePhases>,
+}
+
+#[derive(Deserialize, Default)]
+struct ServePhases {
+    imports: Option<u64>,
+    model_load: Option<u64>,
+    condition: Option<u64>,
+    synthesis: Option<u64>,
+    wav_write: Option<u64>,
+}
+
+impl Drop for WorkerInner {
+    fn drop(&mut self) {
+        if let Some(killer) = self.killer.lock().ok().and_then(|mut slot| slot.take()) {
+            killer.terminate();
+        }
+        if let Some(mut worker) = self.live.lock().ok().and_then(|mut slot| slot.take()) {
+            let _ = worker.child.kill();
+            let _ = worker.child.wait();
+        }
+    }
+}
+
+impl VoiceWorker {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(WorkerInner {
+                live: Mutex::new(None),
+                killer: Mutex::new(None),
+                busy: AtomicBool::new(false),
+                loaded: AtomicBool::new(false),
+                stop_after: AtomicBool::new(false),
+                last_used: Mutex::new(Instant::now()),
+                generation: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.inner.loaded.load(Ordering::SeqCst)
+    }
+
+    pub fn release(&self) {
+        self.inner.stop_after.store(true, Ordering::SeqCst);
+        if !self.inner.busy.load(Ordering::SeqCst) {
+            self.kill();
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.inner.stop_after.store(true, Ordering::SeqCst);
+        self.kill();
+    }
+
+    pub fn tick(&self, root: &Path) {
+        if self.inner.busy.load(Ordering::SeqCst) {
+            return;
+        }
+        let idle = self
+            .inner
+            .last_used
+            .lock()
+            .ok()
+            .map(|used| used.elapsed() >= WORKER_IDLE_TIMEOUT)
+            .unwrap_or(false);
+        let scarce = worker_memory_is_scarce();
+        if idle || scarce {
+            self.kill();
+            let _ = root;
+        }
+    }
+
+    fn kill(&self) {
+        if let Ok(killer) = self.inner.killer.lock() {
+            if let Some(killer) = killer.as_ref() {
+                killer.terminate();
+            }
+        }
+        if let Ok(mut live) = self.inner.live.lock() {
+            if let Some(mut worker) = live.take() {
+                let _ = worker.child.kill();
+                let _ = worker.child.wait();
+            }
+        }
+        if let Ok(mut killer) = self.inner.killer.lock() {
+            *killer = None;
+        }
+        self.inner.loaded.store(false, Ordering::SeqCst);
+        self.inner.busy.store(false, Ordering::SeqCst);
+    }
+
+    fn run_job(
+        &self,
+        root: &Path,
+        reference: &Path,
+        out_dir: &Path,
+        phrases: &[VoicePhraseInput],
+    ) -> Result<JobOutcome, String> {
+        if self.inner.busy.swap(true, Ordering::SeqCst) {
+            return Err("a voice clip is already generating".to_string());
+        }
+        self.inner.stop_after.store(false, Ordering::SeqCst);
+        let generation = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let started = Instant::now();
+        let result = self.run_job_inner(root, reference, out_dir, phrases, generation, started);
+        self.inner.busy.store(false, Ordering::SeqCst);
+        if let Ok(mut used) = self.inner.last_used.lock() {
+            *used = Instant::now();
+        }
+        if self.inner.stop_after.swap(false, Ordering::SeqCst) {
+            self.kill();
+        }
+        result
+    }
+
+    fn run_job_inner(
+        &self,
+        root: &Path,
+        reference: &Path,
+        out_dir: &Path,
+        phrases: &[VoicePhraseInput],
+        generation: u64,
+        started: Instant,
+    ) -> Result<JobOutcome, String> {
+        let mut live = self
+            .inner
+            .live
+            .lock()
+            .map_err(|_| "voice worker lock".to_string())?;
+        let mut spawn_ms = 0;
+        let dead = match live.as_mut() {
+            Some(worker) => !matches!(worker.child.try_wait(), Ok(None)),
+            None => true,
+        };
+        if dead {
+            *live = None;
+            let spawn_started = Instant::now();
+            let (worker, killer) = spawn_serve_worker(root)?;
+            if let Ok(mut slot) = self.inner.killer.lock() {
+                *slot = Some(killer);
+            }
+            *live = Some(worker);
+            spawn_ms = spawn_started.elapsed().as_millis() as u64;
+        }
+        let worker = live.as_mut().ok_or_else(|| "voice worker missing".to_string())?;
+        let request = ServeRequest {
+            id: generation.to_string(),
+            op: "generate",
+            reference: reference.to_string_lossy().into_owned(),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+            phrases,
+            overwrite: true,
+        };
+        let mut encoded = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+        encoded.push(b'\n');
+        worker
+            .stdin
+            .write_all(&encoded)
+            .map_err(|error| error.to_string())?;
+        worker.stdin.flush().map_err(|error| error.to_string())?;
+
+        let mut stdout = worker
+            .stdout
+            .take()
+            .ok_or_else(|| "voice worker stdout missing".to_string())?;
+        let pid = worker.child.id();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let result = stdout.read_line(&mut line);
+            let _ = tx.send((result, line, stdout));
+        });
+
+        let killer = self.inner.killer.lock().ok().and_then(|slot| slot.clone());
+        let mut peak = process_tree_ram(pid).unwrap_or_default();
+        persist_generation_peak(root, peak.working_set);
+        let reply = loop {
+            if started.elapsed() >= MAX_VOICE_GENERATION
+                || self.inner.generation.load(Ordering::SeqCst) != generation
+            {
+                if let Some(killer) = &killer {
+                    killer.terminate();
+                }
+                drop(live);
+                self.kill();
+                return Err("voice generation timed out".to_string());
+            }
+            if let Some(used) = process_tree_ram(pid) {
+                if used.working_set > peak.working_set {
+                    peak = used;
+                    persist_generation_peak(root, peak.working_set);
+                }
+            }
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok((Ok(_), line, stdout)) => {
+                    if let Some(worker) = live.as_mut() {
+                        worker.stdout = Some(stdout);
+                    }
+                    break line;
+                }
+                Ok((Err(error), _, _)) => {
+                    let cancelled = self.inner.stop_after.load(Ordering::SeqCst);
+                    drop(live);
+                    self.kill();
+                    return Err(if cancelled {
+                        "voice generation cancelled".to_string()
+                    } else {
+                        error.to_string()
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let cancelled = self.inner.stop_after.load(Ordering::SeqCst);
+                    drop(live);
+                    self.kill();
+                    return Err(if cancelled {
+                        "voice generation cancelled".to_string()
+                    } else {
+                        "voice worker stopped".to_string()
+                    });
+                }
+            }
+        };
+
+        finish_generation_peak(root, peak.working_set);
+        let parsed: ServeReply =
+            serde_json::from_str(reply.trim()).map_err(|error| error.to_string())?;
+        self.inner
+            .loaded
+            .store(parsed.loaded.unwrap_or(parsed.ok), Ordering::SeqCst);
+        if !parsed.ok {
+            return Err(parsed
+                .error
+                .unwrap_or_else(|| "voice worker failed".to_string()));
+        }
+        let phases = parsed.phases_ms.unwrap_or_default();
+        Ok(JobOutcome {
+            reused_model: parsed.reused_model.unwrap_or(false),
+            reused_voice: parsed.reused_voice.unwrap_or(false),
+            spawn_ms,
+            imports_ms: phases.imports,
+            model_load_ms: phases.model_load,
+            condition_ms: phases.condition,
+            synthesis_ms: phases.synthesis,
+            wav_write_ms: phases.wav_write,
+            peak_ram: peak.working_set,
+            peak_private: peak.private,
+        })
+    }
+}
+
+impl WorkerKiller {
+    fn terminate(&self) {
+        #[cfg(windows)]
+        {
+            if let Some(job) = self.job {
+                unsafe {
+                    let _ = windows::Win32::System::JobObjects::TerminateJobObject(
+                        windows::Win32::Foundation::HANDLE(job as *mut core::ffi::c_void),
+                        1,
+                    );
+                }
+                return;
+            }
+        }
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .arg("-9")
+                .arg(self.pid.to_string())
+                .status();
+        }
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::{
+                OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            };
+            if let Ok(handle) = unsafe { OpenProcess(PROCESS_TERMINATE, false, self.pid) } {
+                let _ = unsafe { TerminateProcess(handle, 1) };
+                let _ = unsafe { CloseHandle(handle) };
+            }
+        }
+    }
+}
+
+fn spawn_serve_worker(root: &Path) -> Result<(LiveWorker, WorkerKiller), String> {
+    let mut command = voice_runtime::run_worker_command(root)?;
+    command
+        .arg("--serve")
+        .arg("--model-dir")
+        .arg(model_dir(root))
+        .arg("--device")
+        .arg("cpu")
+        .arg("--cache-dir")
+        .arg(root.join("worker_cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+        });
+    }
+    let lifetime = bind_worker_lifetime(&child);
+    let killer = WorkerKiller {
+        pid: child.id(),
+        #[cfg(windows)]
+        job: lifetime.raw_job(),
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "voice worker stdin missing".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "voice worker stdout missing".to_string())?;
+    Ok((
+        LiveWorker {
+            child,
+            stdin,
+            stdout: Some(BufReader::new(stdout)),
+            _lifetime: lifetime,
+        },
+        killer,
+    ))
+}
+
+fn worker_memory_is_scarce() -> bool {
+    if !macos_pressure_allows() {
+        return true;
+    }
+    available_ram_bytes()
+        .map(|bytes| bytes < LOADED_WORKER_HEADROOM_BYTES)
+        .unwrap_or(false)
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct VoiceBackendStatus {
     pub model: VoiceModelStatus,
@@ -221,7 +629,23 @@ struct GenerationLogRow {
     total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     worker_peak: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker_private: Option<u64>,
     duration_ms: u64,
+    reused_model: bool,
+    reused_voice: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spawn_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    imports_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_load_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    condition_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    synthesis_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wav_write_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pressure: Option<u32>,
 }
@@ -345,11 +769,26 @@ const MODEL_FILES: &[ModelFile] = &[
     },
 ];
 
-pub fn get_status(app: &AppHandle) -> Result<VoiceBackendStatus, String> {
+pub fn get_status(app: &AppHandle, worker: &VoiceWorker) -> Result<VoiceBackendStatus, String> {
     let root = voice_root(app)?;
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     seed_starter_profiles(&root, Some(app));
-    Ok(status_for_root(&root))
+    Ok(status_for_root(&root, worker.is_loaded()))
+}
+
+pub fn release_worker(worker: &VoiceWorker) {
+    worker.release();
+}
+
+pub fn cancel_generation(worker: &VoiceWorker) {
+    worker.cancel();
+}
+
+pub fn tick_worker(app: &AppHandle, worker: &VoiceWorker) {
+    let Ok(root) = voice_root(app) else {
+        return;
+    };
+    worker.tick(&root);
 }
 
 pub fn download_model(app: AppHandle) -> Result<VoiceModelStatus, String> {
@@ -753,12 +1192,14 @@ pub fn delete_clip(
 
 pub fn generate_clips(
     app: AppHandle,
+    worker: &VoiceWorker,
     input: GenerateVoiceClipsInput,
 ) -> Result<VoiceProfileSummary, String> {
     let started = Instant::now();
     let root = voice_root(&app)?;
     let root = ensure_voice_root(&root)?;
     seed_starter_profiles(&root, Some(&app));
+    let loaded = worker.is_loaded();
     let mut row = GenerationLogRow {
         at_ms: unix_millis() as u64,
         os: std::env::consts::OS,
@@ -767,15 +1208,24 @@ pub fn generate_clips(
         profile: input.profile_id.clone(),
         phrases: input.phrases.as_ref().map(Vec::len).unwrap_or(0),
         merge: input.merge_clips.unwrap_or(false),
-        need: required_available_ram_bytes(load_generation_budget(&root).last_peak_ram_bytes),
+        need: required_ram_for_gate(loaded, load_generation_budget(&root).last_peak_ram_bytes),
         available_before: available_ram_bytes(),
         available_after: None,
         total: total_ram_bytes(),
         worker_peak: None,
+        worker_private: None,
         duration_ms: 0,
+        reused_model: false,
+        reused_voice: false,
+        spawn_ms: None,
+        imports_ms: None,
+        model_load_ms: None,
+        condition_ms: None,
+        synthesis_ms: None,
+        wav_write_ms: None,
         pressure: macos_pressure_for_log(),
     };
-    let result = generate_clips_inner(&root, input, &mut row);
+    let result = generate_clips_inner(&root, worker, input, &mut row);
     row.duration_ms = started.elapsed().as_millis() as u64;
     row.available_after = available_ram_bytes();
     match &result {
@@ -788,6 +1238,7 @@ pub fn generate_clips(
 
 fn generate_clips_inner(
     root: &Path,
+    worker: &VoiceWorker,
     input: GenerateVoiceClipsInput,
     row: &mut GenerationLogRow,
 ) -> Result<VoiceProfileSummary, String> {
@@ -803,13 +1254,13 @@ fn generate_clips_inner(
     if !model_status(&root).installed || !voice_runtime::status(&root).installed {
         return Err("download the voice cloning model pack before generating clips".to_string());
     }
-    ensure_generation_ram(&root)?;
+    ensure_generation_ram(root, worker.is_loaded())?;
 
     let phrases = input.phrases.unwrap_or_else(default_phrases);
     row.phrases = phrases.len();
     validate_phrases(&phrases)?;
 
-    let dir = profile_dir(&root, &profile_id);
+    let dir = profile_dir(root, &profile_id);
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let reference_copy = dir.join("reference.wav");
     if !same_path(&reference, &reference_copy) {
@@ -822,43 +1273,23 @@ fn generate_clips_inner(
     }
     fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
 
-    let phrase_path = staging.join("phrases.json");
-    write_phrase_bank(&phrase_path, &phrases)?;
-
-    let mut command = voice_runtime::run_worker_command(&root)?;
-    command
-        .arg("--phrases")
-        .arg(&phrase_path)
-        .arg("--reference")
-        .arg(&reference_copy)
-        .arg("--out-dir")
-        .arg(&staging)
-        .arg("--model-dir")
-        .arg(model_dir(&root))
-        .arg("--overwrite")
-        .arg("--device")
-        .arg("cpu");
-
-    let output = match run_worker_and_record_peak(&root, command) {
-        Ok(output) => output,
-        Err(fail) => {
-            if fail.peak_ram_bytes > 0 {
-                row.worker_peak = Some(fail.peak_ram_bytes);
-            }
-            let _ = fs::remove_dir_all(&staging);
-            return Err(fail.message);
+    match worker.run_job(root, &reference_copy, &staging, &phrases) {
+        Ok(outcome) => {
+            row.worker_peak = (outcome.peak_ram > 0).then_some(outcome.peak_ram);
+            row.worker_private = (outcome.peak_private > 0).then_some(outcome.peak_private);
+            row.reused_model = outcome.reused_model;
+            row.reused_voice = outcome.reused_voice;
+            row.spawn_ms = Some(outcome.spawn_ms);
+            row.imports_ms = outcome.imports_ms;
+            row.model_load_ms = outcome.model_load_ms;
+            row.condition_ms = outcome.condition_ms;
+            row.synthesis_ms = outcome.synthesis_ms;
+            row.wav_write_ms = outcome.wav_write_ms;
         }
-    };
-    if output.peak_ram_bytes > 0 {
-        row.worker_peak = Some(output.peak_ram_bytes);
-    }
-    if !output.status.success() {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!(
-            "voice worker failed: {}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        Err(message) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(message);
+        }
     }
     let merge = input.merge_clips.unwrap_or(false);
     let install = if merge {
@@ -889,12 +1320,12 @@ fn generate_clips_inner(
     profile_summary(&dir, &profile_id)
 }
 
-fn status_for_root(root: &Path) -> VoiceBackendStatus {
+fn status_for_root(root: &Path, worker_loaded: bool) -> VoiceBackendStatus {
     // Size checks only. The Voice screen polls this, and hashing the model pack keeps the disk busy.
     let model = model_status_for(root, false);
     let runtime = voice_runtime::status(root);
     VoiceBackendStatus {
-        system: system_info(root, model.recommended_free_bytes),
+        system: system_info(root, model.recommended_free_bytes, worker_loaded),
         model,
         runtime,
         profiles: profile_summaries(root),
@@ -1731,11 +2162,11 @@ fn clean_id(value: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-fn system_info(root: &Path, recommended_free_disk_bytes: u64) -> VoiceSystemInfo {
+fn system_info(root: &Path, recommended_free_disk_bytes: u64, worker_loaded: bool) -> VoiceSystemInfo {
     let total_ram_bytes = total_ram_bytes();
     let available_ram_bytes = available_ram_bytes();
     let last_peak_ram_bytes = load_generation_budget(root).last_peak_ram_bytes;
-    let min_free_ram_bytes = required_available_ram_bytes(last_peak_ram_bytes);
+    let min_free_ram_bytes = required_ram_for_gate(worker_loaded, last_peak_ram_bytes);
     let available_disk_bytes = available_disk_bytes(root);
     VoiceSystemInfo {
         os: std::env::consts::OS.to_string(),
@@ -1748,10 +2179,11 @@ fn system_info(root: &Path, recommended_free_disk_bytes: u64) -> VoiceSystemInfo
         min_required_ram_bytes: MIN_REQUIRED_RAM_BYTES,
         min_free_ram_bytes,
         last_peak_ram_bytes,
-        has_enough_ram: ram_allows_generation(
+        has_enough_ram: ram_allows_job(
             available_ram_bytes,
             total_ram_bytes,
             last_peak_ram_bytes,
+            worker_loaded,
         )
         .map(|ok| ok && macos_pressure_allows()),
         available_disk_bytes,
@@ -1769,12 +2201,29 @@ fn required_available_ram_bytes(last_peak_ram_bytes: Option<u64>) -> u64 {
     }
 }
 
+fn required_ram_for_gate(worker_loaded: bool, last_peak_ram_bytes: Option<u64>) -> u64 {
+    if worker_loaded {
+        LOADED_WORKER_HEADROOM_BYTES
+    } else {
+        required_available_ram_bytes(last_peak_ram_bytes)
+    }
+}
+
 fn ram_allows_generation(
     available_ram_bytes: Option<u64>,
     total_ram_bytes: Option<u64>,
     last_peak_ram_bytes: Option<u64>,
 ) -> Option<bool> {
-    let need = required_available_ram_bytes(last_peak_ram_bytes);
+    ram_allows_job(available_ram_bytes, total_ram_bytes, last_peak_ram_bytes, false)
+}
+
+fn ram_allows_job(
+    available_ram_bytes: Option<u64>,
+    total_ram_bytes: Option<u64>,
+    last_peak_ram_bytes: Option<u64>,
+    worker_loaded: bool,
+) -> Option<bool> {
+    let need = required_ram_for_gate(worker_loaded, last_peak_ram_bytes);
     let available_ok = available_ram_bytes.map(|bytes| bytes >= need)?;
     let machine_ok = total_ram_bytes
         .map(|bytes| bytes >= MIN_REQUIRED_RAM_BYTES)
@@ -1808,7 +2257,7 @@ fn macos_pressure_for_log() -> Option<u32> {
     }
 }
 
-fn ensure_generation_ram(root: &Path) -> Result<(), String> {
+fn ensure_generation_ram(root: &Path, worker_loaded: bool) -> Result<(), String> {
     if !macos_pressure_allows() {
         return Err(
             "macOS is under memory pressure. Close other apps, then try again.".into(),
@@ -1817,8 +2266,8 @@ fn ensure_generation_ram(root: &Path) -> Result<(), String> {
     let available = available_ram_bytes();
     let total = total_ram_bytes();
     let last_peak = load_generation_budget(root).last_peak_ram_bytes;
-    let need = required_available_ram_bytes(last_peak);
-    match ram_allows_generation(available, total, last_peak) {
+    let need = required_ram_for_gate(worker_loaded, last_peak);
+    match ram_allows_job(available, total, last_peak, worker_loaded) {
         Some(true) => Ok(()),
         Some(false) => Err(format!(
             "Not enough available RAM to clone a voice. Need about {}, this PC has {} available. Close other apps and try again.",
@@ -1921,10 +2370,6 @@ struct WorkerFail {
     peak_ram_bytes: u64,
 }
 
-fn run_worker_and_record_peak(root: &Path, command: Command) -> Result<WorkerRun, WorkerFail> {
-    run_worker_until(root, command, MAX_VOICE_GENERATION)
-}
-
 fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Result<WorkerRun, WorkerFail> {
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -2002,14 +2447,25 @@ fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Res
 
 struct WorkerLifetime {
     #[cfg(windows)]
-    job: Option<windows::Win32::Foundation::HANDLE>,
+    job: Option<isize>,
+}
+
+impl WorkerLifetime {
+    #[cfg(windows)]
+    fn raw_job(&self) -> Option<isize> {
+        self.job
+    }
 }
 
 impl Drop for WorkerLifetime {
     fn drop(&mut self) {
         #[cfg(windows)]
         if let Some(job) = self.job.take() {
-            unsafe { let _ = windows::Win32::Foundation::CloseHandle(job); };
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(
+                    windows::Win32::Foundation::HANDLE(job as *mut core::ffi::c_void),
+                );
+            };
         }
     }
 }
@@ -2029,7 +2485,7 @@ fn bind_worker_lifetime(child: &std::process::Child) -> WorkerLifetime {
 }
 
 #[cfg(windows)]
-fn bind_windows_job(child: &std::process::Child) -> Option<windows::Win32::Foundation::HANDLE> {
+fn bind_windows_job(child: &std::process::Child) -> Option<isize> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::JobObjects::{
@@ -2060,15 +2516,89 @@ fn bind_windows_job(child: &std::process::Child) -> Option<windows::Win32::Found
         unsafe { let _ = windows::Win32::Foundation::CloseHandle(job); };
         return None;
     }
-    Some(job)
+    Some(job.0 as isize)
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProcessRam {
+    working_set: u64,
+    private: u64,
 }
 
 fn process_ram_bytes(pid: u32) -> Option<u64> {
-    process_ram_bytes_impl(pid)
+    process_tree_ram(pid).map(|ram| ram.working_set)
+}
+
+fn process_tree_ram(pid: u32) -> Option<ProcessRam> {
+    let mut total = ProcessRam::default();
+    for child in process_tree_pids(pid) {
+        if let Some(ram) = process_ram_one(child) {
+            total.working_set = total.working_set.saturating_add(ram.working_set);
+            total.private = total.private.saturating_add(ram.private);
+        }
+    }
+    (total.working_set > 0 || total.private > 0).then_some(total)
+}
+
+fn process_tree_pids(root: u32) -> Vec<u32> {
+    let mut pids = vec![root];
+    let mut index = 0;
+    while index < pids.len() {
+        let parent = pids[index];
+        for child in child_pids(parent) {
+            if !pids.contains(&child) {
+                pids.push(child);
+            }
+        }
+        index += 1;
+    }
+    pids
 }
 
 #[cfg(target_os = "windows")]
-fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
+fn child_pids(pid: u32) -> Vec<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    let Ok(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut children = Vec::new();
+    let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+    while more {
+        if entry.th32ParentProcessID == pid {
+            children.push(entry.th32ProcessID);
+        }
+        more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    }
+    let _ = unsafe { CloseHandle(snapshot) };
+    children
+}
+
+#[cfg(target_os = "linux")]
+fn child_pids(pid: u32) -> Vec<u32> {
+    fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|value| value.parse().ok())
+        .collect()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn child_pids(_pid: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+fn process_ram_one(pid: u32) -> Option<ProcessRam> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::ProcessStatus::{
         K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
@@ -2098,29 +2628,39 @@ fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
     }
     .as_bool();
     let _ = unsafe { CloseHandle(handle) };
-    ok.then_some(counters.PrivateUsage as u64)
+    ok.then_some(ProcessRam {
+        working_set: counters.WorkingSetSize as u64,
+        private: counters.PrivateUsage as u64,
+    })
 }
 
 #[cfg(target_os = "linux")]
-fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
+fn process_ram_one(pid: u32) -> Option<ProcessRam> {
     let text = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    let kb = text
+    let rss = text
         .lines()
         .find_map(|line| line.strip_prefix("VmRSS:"))?
         .split_whitespace()
         .next()?
         .parse::<u64>()
-        .ok()?;
-    Some(kb * 1024)
+        .ok()?
+        * 1024;
+    Some(ProcessRam {
+        working_set: rss,
+        private: rss,
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn process_ram_bytes_impl(pid: u32) -> Option<u64> {
-    crate::macos::process_ram_bytes(pid)
+fn process_ram_one(pid: u32) -> Option<ProcessRam> {
+    crate::macos::process_ram_bytes(pid).map(|bytes| ProcessRam {
+        working_set: bytes,
+        private: bytes,
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn process_ram_bytes_impl(_pid: u32) -> Option<u64> {
+fn process_ram_one(_pid: u32) -> Option<ProcessRam> {
     None
 }
 
@@ -2410,6 +2950,32 @@ mod tests {
             Some(false)
         );
         assert_eq!(ram_allows_generation(None, Some(16 * GIBIBYTE), None), None);
+
+        assert_eq!(
+            required_ram_for_gate(true, None),
+            LOADED_WORKER_HEADROOM_BYTES
+        );
+        assert_eq!(
+            ram_allows_job(Some(LOADED_WORKER_HEADROOM_BYTES), Some(16 * GIBIBYTE), None, true),
+            Some(true)
+        );
+        assert_eq!(
+            ram_allows_job(
+                Some(LOADED_WORKER_HEADROOM_BYTES.saturating_sub(1)),
+                Some(16 * GIBIBYTE),
+                None,
+                true
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            ram_allows_job(Some(2 * GIBIBYTE), Some(16 * GIBIBYTE), None, true),
+            Some(true)
+        );
+        assert_eq!(
+            ram_allows_job(Some(2 * GIBIBYTE), Some(16 * GIBIBYTE), None, false),
+            Some(false)
+        );
     }
 
     #[test]
@@ -2431,7 +2997,16 @@ mod tests {
                 available_after: Some(3 * GIBIBYTE),
                 total: Some(16 * GIBIBYTE),
                 worker_peak: None,
+                worker_private: None,
                 duration_ms: 12,
+                reused_model: false,
+                reused_voice: false,
+                spawn_ms: None,
+                imports_ms: None,
+                model_load_ms: None,
+                condition_ms: None,
+                synthesis_ms: None,
+                wav_write_ms: None,
                 pressure: None,
             },
         );
@@ -2488,7 +3063,7 @@ mod tests {
         let path = dir.join(file.path);
         File::create(&path).unwrap().set_len(file.bytes).unwrap();
 
-        let status = status_for_root(&root);
+        let status = status_for_root(&root, false);
         let listed = status
             .model
             .files

@@ -1,4 +1,5 @@
 mod activity;
+mod attribution;
 mod focus;
 mod session;
 mod storage;
@@ -7,14 +8,15 @@ mod voice_runtime;
 #[cfg(target_os = "macos")]
 mod macos;
 mod webcam;
+mod website;
 
 use activity::ActivitySample;
-use focus::{FocusEngine, FocusSnapshot};
 use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
 use storage::{HistoryWeek, PeriodRecap, SessionReport, StoredPhraseLibrary, TrendsData};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,29 +33,13 @@ const OVERLAY_HEIGHT: f64 = 286.0;
 const OVERLAY_MARGIN: i32 = 18;
 
 struct AppState {
-    focus_engine: Mutex<FocusEngine>,
     sessions: Mutex<SessionManager>,
     voice_download: Arc<Mutex<voice::VoiceDownloadState>>,
     voice_recording: Mutex<voice::VoiceRecordingState>,
+    voice_worker: voice::VoiceWorker,
     webcam: webcam::WebcamPreview,
     started_at: Instant,
     identity: SupervisorIdentity,
-}
-
-#[tauri::command]
-fn get_activity_sample(state: State<'_, AppState>) -> Result<ActivitySample, String> {
-    current_activity_sample(&state)
-}
-
-#[tauri::command]
-fn get_focus_snapshot(state: State<'_, AppState>) -> Result<FocusSnapshot, String> {
-    let sample = current_activity_sample(&state)?;
-    let mut engine = state
-        .focus_engine
-        .lock()
-        .map_err(|_| "focus engine unavailable".to_string())?;
-
-    Ok(engine.record_sample(&sample, state.started_at.elapsed()))
 }
 
 #[tauri::command]
@@ -69,6 +55,7 @@ fn start_session(
     let should_show_status = sessions.status_window_enabled();
     let snapshot = sessions.snapshot(now);
     drop(sessions);
+    voice::release_worker(&state.voice_worker);
 
     if should_show_status {
         show_status_window_internal(&app)?;
@@ -101,12 +88,6 @@ fn resume_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String>
 fn snooze_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     Ok(lock_sessions(&state)?.snooze(now, 5 * 60))
-}
-
-#[tauri::command]
-fn clear_snooze(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
-    let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.clear_snooze(now))
 }
 
 #[tauri::command]
@@ -174,13 +155,13 @@ fn delete_session(id: u64, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_all_history(state: State<'_, AppState>) -> Result<(), String> {
-    lock_sessions(&state)?.delete_all_history()
+fn get_history_size(state: State<'_, AppState>) -> Result<u64, String> {
+    lock_sessions(&state)?.history_bytes()
 }
 
 #[tauri::command]
-fn scrub_span_context(state: State<'_, AppState>) -> Result<(), String> {
-    lock_sessions(&state)?.scrub_span_context()
+fn delete_all_history(state: State<'_, AppState>) -> Result<(), String> {
+    lock_sessions(&state)?.delete_all_history()
 }
 
 #[tauri::command]
@@ -199,11 +180,57 @@ fn get_rules(state: State<'_, AppState>) -> Result<Vec<focus::AppRule>, String> 
     Ok(lock_sessions(&state)?.rules())
 }
 
+/// Turns what the user typed into a website or app rule, or says why it can't be one.
+#[tauri::command]
+fn resolve_rule_input(
+    text: String,
+    classification: focus::RuleClassification,
+    state: State<'_, AppState>,
+) -> Result<focus::AppRule, String> {
+    let names = lock_sessions(&state)?.app_names().unwrap_or_default();
+    let rule = focus::AppRule::from_input_with_apps(&text, classification, &names).ok_or_else(|| {
+        "Enter a website (youtube.com) or an app name (Spotify), not a page title or path"
+            .to_string()
+    })?;
+    if rule.names_a_browser() {
+        return Err("Browsers always count as Neutral. Add the website instead (youtube.com).".to_string());
+    }
+    Ok(rule)
+}
+
+#[tauri::command]
+fn get_site_names(state: State<'_, AppState>) -> Result<HashMap<String, String>, String> {
+    Ok(lock_sessions(&state)?.site_names())
+}
+
+#[tauri::command]
+fn set_site_name(
+    key: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
+    lock_sessions(&state)?.set_site_name(&key, &name)
+}
+
+#[tauri::command]
+fn get_app_names(state: State<'_, AppState>) -> Result<HashMap<String, String>, String> {
+    lock_sessions(&state)?.app_names()
+}
+
+#[tauri::command]
+fn set_app_name(
+    key: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
+    lock_sessions(&state)?.set_app_name(&key, &name)
+}
+
 #[tauri::command]
 fn update_rules(
     rules: Vec<focus::AppRule>,
     state: State<'_, AppState>,
-) -> Result<Vec<focus::AppRule>, String> {
+) -> Result<session::RulesSaved, String> {
     Ok(lock_sessions(&state)?.update_rules(rules))
 }
 
@@ -275,8 +302,11 @@ fn set_status_window_on_top(
 }
 
 #[tauri::command]
-fn get_voice_backend_status(app: AppHandle) -> Result<voice::VoiceBackendStatus, String> {
-    voice::get_status(&app)
+fn get_voice_backend_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceBackendStatus, String> {
+    voice::get_status(&app, &state.voice_worker)
 }
 
 #[tauri::command]
@@ -358,11 +388,23 @@ fn clear_voice_recording(
 #[tauri::command]
 async fn generate_voice_clips(
     app: AppHandle,
+    state: State<'_, AppState>,
     input: voice::GenerateVoiceClipsInput,
 ) -> Result<voice::VoiceProfileSummary, String> {
-    tauri::async_runtime::spawn_blocking(move || voice::generate_clips(app, input))
+    let worker = state.voice_worker.clone();
+    tauri::async_runtime::spawn_blocking(move || voice::generate_clips(app, &worker, input))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn release_voice_worker(state: State<'_, AppState>) {
+    voice::release_worker(&state.voice_worker);
+}
+
+#[tauri::command]
+fn cancel_voice_generation(state: State<'_, AppState>) {
+    voice::cancel_generation(&state.voice_worker);
 }
 
 #[tauri::command]
@@ -424,6 +466,8 @@ fn database_path(app: &tauri::App) -> Result<PathBuf, String> {
 }
 
 pub fn run() {
+    // Before Tauri starts any thread; see `capture_local_offset`.
+    storage::capture_local_offset();
     tauri::Builder::default()
         // Must be the first plugin: a second launch focuses this window and exits before
         // it can open the database.
@@ -432,10 +476,10 @@ pub fn run() {
         }))
         .setup(|app| {
             app.manage(AppState {
-                focus_engine: Mutex::new(FocusEngine::default()),
                 sessions: Mutex::new(SessionManager::open(database_path(app))),
                 voice_download: Arc::new(Mutex::new(voice::VoiceDownloadState::default())),
                 voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
+                voice_worker: voice::VoiceWorker::new(),
                 webcam: webcam::WebcamPreview::default(),
                 started_at: Instant::now(),
                 identity: supervisor_identity(),
@@ -444,17 +488,15 @@ pub fn run() {
             setup_status_window(app)?;
             setup_tray(app)?;
             start_session_ticker(app.handle().clone());
+            start_voice_worker_ticker(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_activity_sample,
-            get_focus_snapshot,
             start_session,
             get_session_snapshot,
             pause_session,
             resume_session,
             snooze_session,
-            clear_snooze,
             stop_session,
             mark_current_relevant,
             mark_current_distracting,
@@ -466,10 +508,15 @@ pub fn run() {
             get_trends,
             delete_session,
             delete_all_history,
-            scrub_span_context,
+            get_history_size,
             dismiss_storage_notice,
             get_settings,
             get_rules,
+            resolve_rule_input,
+            get_site_names,
+            set_site_name,
+            get_app_names,
+            set_app_name,
             update_rules,
             get_phrase_library,
             update_phrase_library,
@@ -490,6 +537,8 @@ pub fn run() {
             stop_voice_recording,
             clear_voice_recording,
             generate_voice_clips,
+            release_voice_worker,
+            cancel_voice_generation,
             list_voice_profiles,
             delete_voice_profile,
             delete_voice_profile_clips,
@@ -530,7 +579,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         MenuItem::with_id(app, "show_status", "Show Status Window", true, None::<&str>)?;
     let pin_status = MenuItem::with_id(app, "pin_status", "Pin Status Window", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause_resume", "Pause/Resume", true, None::<&str>)?;
-    let snooze = MenuItem::with_id(app, "snooze", "Snooze 5 min", true, None::<&str>)?;
+    let snooze = MenuItem::with_id(app, "snooze", "Mute Nudges 5 min", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "Stop Session", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -725,7 +774,16 @@ fn place_status_window(
         .map_err(|error| error.to_string())
 }
 
+fn start_voice_worker_ticker(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let state = app.state::<AppState>();
+        voice::tick_worker(&app, &state.voice_worker);
+    });
+}
+
 fn start_session_ticker(app: AppHandle) {
+    let mut last_loop = app.state::<AppState>().started_at.elapsed();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
 
@@ -735,6 +793,11 @@ fn start_session_ticker(app: AppHandle) {
             let Ok(mut sessions) = state.sessions.lock() else {
                 continue;
             };
+            // This loop runs every second; a long silence means the machine slept or froze.
+            if now.saturating_sub(last_loop) > session::LOST_TIME_AFTER {
+                sessions.record_lost_time(last_loop, now);
+            }
+            last_loop = now;
             let had_current = sessions.has_current();
             let snapshot = sessions.tick(now);
             (

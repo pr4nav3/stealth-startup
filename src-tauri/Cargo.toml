@@ -13,9 +13,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-active-win-pos-rs = "0.11"
 cpal = "0.15"
 hound = "3.5"
+psl = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,19 +24,31 @@ sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "image-ico"] }
 tauri-plugin-single-instance = "~2.4"
 time = { version = "0.3", features = ["formatting", "parsing", "local-offset"] }
+url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Windows reads the foreground window through Win32 instead (activity_win32.rs).
+[target.'cfg(not(windows))'.dependencies]
+active-win-pos-rs = "0.11"
 
 # Keep in step with the version Tauri uses, so the crate is compiled once, not twice.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
+  "ApplicationModel",
+  "Media_Control",
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Storage_FileSystem",
+  "Win32_Storage_Packaging_Appx",
+  "Win32_System_Com",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_ProcessStatus",
   "Win32_System_SystemInformation",
   "Win32_Security",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_Accessibility",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
@@ -49,4 +61,4 @@ mach2 = "0.4"
 objc2 = "0.6"
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEventSource", "CGEventTypes", "CGWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSPathUtilities"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSString", "NSPathUtilities", "NSValue"] }

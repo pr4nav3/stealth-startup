@@ -3,7 +3,7 @@
 Living log of what is done and what is left. Update this file when an item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-10-07 (`main` at `4971f9a`)
+Last updated: 2026-10-17 (`main` at `68561c8`; working tree dirty)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
 ship target. There is no Mac on hand, so Windows is the development and
@@ -13,12 +13,21 @@ re-verified until a Mac is available again.
 Kokoro starter generation is out. Starter clips, if we ship them, come from the
 same Chatterbox-Nano worker users already use.
 
-New work branches from `main`. The old worktrees are removed.
+Treat **`feat/window-supervision` as the baseline.** Window targeting,
+attribution, and history storage changes happen on this branch. Committed
+`main` is behind the working tree.
 
-## Done
+New work still branches from `main` once this lands. The old worktrees are
+gone. These local branch names are fully inside `main` and must not be merged
+again: `feat/sqlite`, `feat/ui`, `feat/voice-runtime-hardening`,
+`feat/webcam-models`, `feat/win32-capture`, `test-features`.
+`feat/window-supervision` is the same SHA as `main`; the new code is
+uncommitted and mixed with leftover voice-worker edits.
+
+## On `main`
 
 - [x] Local-first Tauri 2 shell (vanilla TypeScript UI, no React)
-- [x] Session UI: session, settings, history report, trends, phrase library, overlay, tray
+- [x] Session UI overhaul (home, preflight, session, settings, history, overlay, tray)
 - [x] SQLite history, rules, and settings. A bad database is reset. A second copy of the app is refused. A failed save does not continue in a temporary database
 - [x] Focus scored by time actually spent. Alt-Tab, Start, and Search are ignored. Supervisor is recognized by its process
 - [x] Windows capture through the Microsoft Windows crate. macOS capture code is present and untested on a Mac
@@ -26,50 +35,80 @@ New work branches from `main`. The old worktrees are removed.
 - [x] Voice runtime install checks the zip and can roll back. Manifest builder exists
 - [x] Session accounting: a switch keeps time on the previous app, a capture gap does not stretch the last app, history delete cannot remove the live session
 - [x] Voice settings check model size only. Cancel keeps verified model files. Generation stops after 30 minutes
-- [x] Webcam tracker in Settings, with a GPU toggle. Frames are not stored
+- [x] Voice RAM gate and a regenerate / try-again control on clips
+- [x] Starter *reference* WAVs (`derek`, `elise`) ship in the app. Phrase clips for those voices are not generated
+- [x] Webcam tracker in Settings, with a GPU toggle. Frames are not stored. Phone and away time are not written during a session
 - [x] Chrome extension removed
+- [x] History week/month storage and recap UI. PDF export is unimplemented; its empty control was removed in the working tree
 
-Not done even if the UI implies it: starter voices have no real audio.
+`808dab0` (UI overhaul) landed with a warning that app/website rule matching
+may be broken. That is still the committed model. The rewrite is in the
+working tree, not on `main`.
 
-## Next branches
+## Working tree (not committed)
 
-Start each from `main`. Merge one back before the next branch edits the same screens.
+Two features are mixed in one dirty tree. Do not commit them as one blob.
 
-### 1. `feat/ui-polish`
+### Window supervision (split and commit first)
 
-Make the UI easier to use, rearrange the screens, and add dark mode.
-Style direction: `plans/SUPERVISOR_UI_GUIDELINES.md`.
+Implemented, Windows-probed, tests reported green. Browser time is one row per
+website key, read from the address bar through UI Automation. Browser pages,
+local pages, and Other websites are their own rows. Titles are a narrow
+fallback and are never stored. Rules are app or website. Site names live in
+`site_name`. macOS reads no address yet (`browser_macos.rs` stub).
 
-### 2. `feat/voice-path`
+Additional uncommitted naming pass: rule suggestion chips removed in favor of
+entry guidance; recap has an Edit names mode for app and site rows. App names
+are display overrides in schema v5. Windows skips an unidentifiable process
+instead of storing its window class, filters the observed System32 ShellHost,
+and asks the OS for packaged-app display names before using version metadata.
+Verified on Windows: packaged-app lookup returned `WhatsApp` for the running
+`WhatsApp.Root` process; `cargo test` passed 116 tests (3 manual tests ignored),
+and `npm run check` passed. The recap naming UI still needs an in-app look.
 
-Finish the voice path. Add a generation screen where the user can generate again until a sample sounds right. The model is small, so some samples come out garbled. Set the RAM check so a normal machine is not locked out.
+Audit follow-up (2026-10-17): open-span checkpoints, rule persistence and identity
+fixes, corrected timing/report gaps, and schema-v6 repair of cached stretch
+metrics. Detailed findings, remaining release gaps, and the retention proposal:
+`plans/window-history-audit.md`.
 
-### 3. `feat/history`
+Check after commit: `cargo test`, `npm run check`, then
+`cargo test manual_foreground_probe -- --ignored --nocapture` and
+`cargo test manual_read_open_browser_windows -- --ignored --nocapture`.
 
-History UI changes. Change a couple of things the session tracks. A PDF for each month's focus, and a weekly recap that shows up in History.
+### Persistent voice worker (park, then its own branch)
 
-### 4. `feat/webcam-session`
+`voice.rs` / `chatterbox_nano_worker.py --serve` keep the model loaded, plus
+related UI. This is leftover dirty work from before window supervision. Review
+it after the supervision commit, on a separate branch.
 
-Make the webcam models work in the app so they can be tested there. Control how webcam strictness sits alongside the voice nudges.
-Signals: `plans/webcam-tracking.md`.
+## Next
 
-## Outside those branches
+Do not open `feat/history` or `feat/ui-polish` as new epics. Most of that
+already landed on `main`.
 
-### Before the branches
+1. Split window supervision out of the voice/worker files, commit it, smoke a
+   live Chrome session and the rule editor, then it is `main`.
+2. Move the persistent voice worker onto its own branch. Finish the voice path
+   there: generation until a sample sounds right, RAM gate that a normal
+   machine can pass, real starter phrase clips or stop listing starters as ready.
+3. Small bugfixes below, not a fifth product branch.
+4. `feat/webcam-session`: run the models during a session, and decide how
+   webcam strictness sits next to voice nudges. Signals: `plans/webcam-tracking.md`.
+5. Leftover UI: dark mode and ease-of-use. Style: `plans/SUPERVISOR_UI_GUIDELINES.md`.
 
-No code has to land first. `main` is the base.
+## Bugfixes (beside the branches)
 
-### After the branches, or beside them as bugfix-only work
+- Starter voices look ready and have no phrase clips. A nudge only plays a custom voice. The fallback beep opens an audio context it never closes
+- The screen rebuilds on a timer during a live session, so typing in a field can be wiped
+- A recording can grow without a size cap
+- `install_runtime` returns if any compatible runtime exists, so a bugfix zip never installs
+- Recent time after the last successful 15-second span checkpoint can be lost on a crash
 
-These are not the four features. Do them as small fixes, not as a fifth product branch.
+Uncommitted voice code stages generation then replaces/merges, which covers the
+old half-written-profile hole. That fix is not on `main` until the voice branch
+lands.
 
-- Starter voices are listed as ready and have no clips. A nudge only plays a custom voice. The fallback beep opens an audio context it never closes
-- The screen rebuilds on a timer, so typing in a field can be wiped
-- A window-title change restarts the distraction timer
-- "Forget app names" clears saved titles only. The live session can write the title back, and the app name stays
-- A recording can grow without a size cap, and a failed generation can leave a half-written profile
-
-### Ship, after the app behavior is settled
+## Ship, after the app behavior is settled
 
 - [ ] Dev voice path on Windows: `.venv-voice-runtime-windows` launches the worker
 - [ ] Prod voice path: download the frozen zip, generate, play, delete, regenerate

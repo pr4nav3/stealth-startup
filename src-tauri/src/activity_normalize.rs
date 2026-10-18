@@ -22,15 +22,8 @@ const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
     ("arc", &[" - Arc", " — Arc"]),
 ];
 
-const PLACEHOLDER_TITLES: &[&str] = &[
-    "",
-    "untitled",
-    "new tab",
-    "start page",
-    "about:blank",
-    "chrome://newtab",
-    "edge://newtab",
-];
+/// "New Tab" stays: attribution recognizes it as a browser page.
+const PLACEHOLDER_TITLES: &[&str] = &["", "untitled", "about:blank"];
 
 /// The window class File Explorer folder windows have used for decades. Every other top-level
 /// window owned by explorer.exe is shell UI: desktop, taskbar, Alt-Tab, tray, Run dialog.
@@ -52,6 +45,7 @@ pub struct RawForegroundIdentity {
     /// The process runs from `<Windows>\SystemApps`, where Windows installs its shell UI
     /// (Start, Search, notification center, touch keyboard, system dialogs).
     pub is_system_app: bool,
+    pub is_system_shell: bool,
 }
 
 pub fn classify_foreground_surface(identity: &RawForegroundIdentity) -> ForegroundDisposition {
@@ -65,6 +59,11 @@ pub fn classify_foreground_surface(identity: &RawForegroundIdentity) -> Foregrou
 
     if exe == "lockapp" || exe == "logonui" || exe == "credentialuibroker" {
         return ForegroundDisposition::NoSample;
+    }
+
+    // ShellHost is a Windows shell process under System32, outside SystemApps.
+    if exe == "shellhost" && identity.is_system_shell {
+        return ForegroundDisposition::ShellSurface;
     }
 
     if identity.is_system_app {
@@ -222,70 +221,49 @@ pub fn round_seconds(seconds: f64) -> f64 {
     (seconds * 10.0).round() / 10.0
 }
 
-const BROWSER_STEMS: &[&str] = &[
-    "chrome", "msedge", "firefox", "brave", "opera", "arc", "safari", "vivaldi",
-];
-const APP_NAME_STEMS: &[&str] = &["thorium"];
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MarkSubject {
-    pub by_title: bool,
-    pub value: String,
-}
-
-pub fn mark_subject(app_name: &str, process_path: &str, window_title: Option<&str>) -> MarkSubject {
-    let title = window_title.and_then(normalize_title_text);
-    if !is_app_name_process(app_name, process_path) && is_browser_process(app_name, process_path) {
-        if let Some(title) = title {
-            return MarkSubject {
-                by_title: true,
-                value: title,
-            };
-        }
+/// The name people know an app by: the exe's own description, with every shell as "Terminal".
+pub fn app_label(app_name: &str, description: Option<&str>) -> String {
+    const TERMINALS: &[&str] = &[
+        "cmd", "powershell", "pwsh", "windowsterminal", "wt", "conhost", "openconsole", "terminal",
+    ];
+    if TERMINALS.contains(&exe_stem_lower(app_name).as_str()) {
+        return "Terminal".to_string();
     }
-    MarkSubject {
-        by_title: false,
-        value: display_app_name(app_name, process_path),
+    description
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .unwrap_or(app_name)
+        .to_string()
+}
+
+/// What Edge reports for a site that gives no media details. Which tab plays can't be told.
+const UNTITLED_BROWSER_MEDIA: &[&str] = &["a site is playing media"];
+
+/// Whether a playing media session belongs to the window in front. `source_app` is the
+/// session's app id ("Spotify.exe", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", "MSEdge").
+/// A browser plays for all its tabs, so it counts when the media title is in the window title,
+/// which names the active tab, or when it won't say what plays. Other apps also match by their
+/// exe name in the app id.
+pub fn media_is_in_front(
+    app_name: &str,
+    window_title: Option<&str>,
+    in_browser: bool,
+    source_app: &str,
+    media_title: &str,
+) -> bool {
+    let media_title = media_title.trim().to_lowercase();
+    // Very short titles ("A", "Go") would match almost any window title.
+    let title_in_front = media_title.chars().count() >= 3
+        && window_title.is_some_and(|title| title.to_lowercase().contains(&media_title));
+    let app = exe_stem_lower(app_name);
+    let same_app = !app.is_empty()
+        && source_app
+            .split(|ch: char| !ch.is_alphanumeric())
+            .any(|part| part.eq_ignore_ascii_case(&app));
+    if in_browser {
+        return title_in_front || (same_app && UNTITLED_BROWSER_MEDIA.contains(&media_title.as_str()));
     }
-}
-
-fn is_app_name_process(app_name: &str, process_path: &str) -> bool {
-    is_app_name_stem(&exe_stem_lower(app_name)) || is_app_name_stem(&exe_stem_lower(process_path))
-}
-
-fn is_app_name_stem(stem: &str) -> bool {
-    APP_NAME_STEMS.contains(&stem)
-}
-
-fn is_browser_process(app_name: &str, process_path: &str) -> bool {
-    is_browser_stem(&exe_stem_lower(app_name)) || is_browser_stem(&exe_stem_lower(process_path))
-}
-
-fn is_browser_stem(stem: &str) -> bool {
-    BROWSER_STEMS.iter().any(|browser| stem == *browser || stem.ends_with(&format!(" {browser}")))
-}
-
-fn display_app_name(app_name: &str, process_path: &str) -> String {
-    let source = if app_name.trim().is_empty() {
-        process_path
-    } else {
-        app_name
-    };
-    match exe_stem_lower(source).as_str() {
-        "cmd" | "powershell" | "pwsh" | "windowsterminal" | "wt" | "conhost" | "openconsole" => {
-            "Terminal".to_string()
-        }
-        _ => {
-            let trimmed = source.trim();
-            if trimmed.is_empty() {
-                "App".to_string()
-            } else if trimmed.contains('\\') || trimmed.contains('/') {
-                app_name_from_process_path(trimmed, "")
-            } else {
-                trimmed.to_string()
-            }
-        }
-    }
+    title_in_front || same_app
 }
 
 fn exe_stem_lower(exe_name: &str) -> String {
@@ -308,10 +286,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn browser_media_counts_only_for_the_tab_in_front() {
+        let youtube = Some("Lo-fi beats to study to - YouTube");
+        assert!(media_is_in_front("chrome", youtube, true, "Chrome", "Lo-fi beats to study to"));
+        // Music in a background tab while reading mail: the browser plays, but not in front.
+        assert!(!media_is_in_front("chrome", Some("Inbox - Gmail"), true, "Chrome", "Lo-fi beats to study to"));
+        assert!(!media_is_in_front("chrome", youtube, true, "Chrome", ""));
+        assert!(!media_is_in_front("chrome", youtube, true, "Chrome", "Lo"));
+    }
+
+    #[test]
+    fn untitled_browser_media_counts_for_that_browser_in_front() {
+        let page = Some("Lecture 4 | Some University");
+        assert!(media_is_in_front("msedge", page, true, "MSEdge", "A site is playing media"));
+        // Edge playing behind Chrome is not Chrome playing.
+        assert!(!media_is_in_front("chrome", page, true, "MSEdge", "A site is playing media"));
+    }
+
+    #[test]
+    fn app_media_counts_by_its_app_id_or_title() {
+        assert!(media_is_in_front("Spotify", Some("Spotify Premium"), false, "Spotify.exe", "Song"));
+        assert!(media_is_in_front(
+            "Spotify",
+            Some("Spotify Premium"),
+            false,
+            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+            "Song",
+        ));
+        assert!(media_is_in_front("vlc", Some("Lecture 4.mp4 - VLC media player"), false, "", "Lecture 4.mp4"));
+        // Spotify playing behind an editor is not the editor playing.
+        assert!(!media_is_in_front("Code", Some("main.rs - Supervisor"), false, "Spotify.exe", "Song"));
+        // Part of an app id is not an app id.
+        assert!(!media_is_in_front("App", Some("Main window"), false, "Microsoft.WindowsApps!Player", "Song"));
+    }
+
+    #[test]
     fn placeholder_titles_become_none() {
         assert_eq!(normalize_title_text("   "), None);
-        assert_eq!(normalize_title_text("New Tab"), None);
         assert_eq!(normalize_title_text("about:blank"), None);
+        assert_eq!(normalize_title_text("New Tab").as_deref(), Some("New Tab"));
     }
 
     #[test]
@@ -339,6 +352,7 @@ mod tests {
             window_class: class.to_string(),
             window_title: title.to_string(),
             is_system_app,
+            is_system_shell: exe.eq_ignore_ascii_case("ShellHost.exe"),
         }
     }
 
@@ -366,6 +380,13 @@ mod tests {
                 "{exe}"
             );
         }
+        assert_eq!(
+            classify_foreground_surface(&identity("ShellHost.exe", "ShellHost", "", false)),
+            ForegroundDisposition::ShellSurface
+        );
+        let mut unrelated = identity("ShellHost.exe", "AppWindow", "Work", false);
+        unrelated.is_system_shell = false;
+        assert_eq!(classify_foreground_surface(&unrelated), ForegroundDisposition::Sample);
     }
 
     #[test]
@@ -434,21 +455,9 @@ mod tests {
     }
 
     #[test]
-    fn thorium_book_app_uses_its_name_and_browsers_use_the_tab() {
-        let book = mark_subject(
-            "Thorium",
-            r"C:\Program Files\Thorium\Thorium.exe",
-            Some("Thorium - Bog Standard Isekai: Benighted"),
-        );
-        assert!(!book.by_title);
-        assert_eq!(book.value, "Thorium");
-
-        let tab = mark_subject(
-            "chrome",
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            Some("YouTube"),
-        );
-        assert!(tab.by_title);
-        assert_eq!(tab.value, "YouTube");
+    fn app_label_prefers_the_description_and_names_shells_terminal() {
+        assert_eq!(app_label("Code", Some("Visual Studio Code")), "Visual Studio Code");
+        assert_eq!(app_label("cmd", Some("Windows Command Processor")), "Terminal");
+        assert_eq!(app_label("Thorium", Some("  ")), "Thorium");
     }
 }
