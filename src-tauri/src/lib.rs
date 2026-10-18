@@ -586,8 +586,15 @@ pub fn run() {
             start_webcam_preview,
             stop_webcam_preview
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Supervisor");
+        .build(tauri::generate_context!())
+        .expect("failed to run Supervisor")
+        .run(|app, event| {
+            // Managed state is never dropped (the ticker threads hold AppHandles), so stop the
+            // voice worker here; outside Windows nothing else kills it when the app exits.
+            if let tauri::RunEvent::Exit = event {
+                voice::release_worker(&app.state::<AppState>().voice_worker);
+            }
+        });
 }
 
 fn setup_status_window(app: &mut tauri::App) -> tauri::Result<()> {
@@ -818,7 +825,7 @@ fn start_voice_worker_ticker(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
         let state = app.state::<AppState>();
-        voice::tick_worker(&app, &state.voice_worker);
+        voice::tick_worker(&state.voice_worker);
     });
 }
 

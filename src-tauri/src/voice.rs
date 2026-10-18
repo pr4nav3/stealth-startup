@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
@@ -19,23 +19,20 @@ const MODEL_DISPLAY_NAME: &str = "Chatterbox-Nano voice cloning model";
 const MODEL_REPO: &str = "ResembleAI/chatterbox-nano";
 const MODEL_REVISION: &str = "71ccd1d0081b430592cea481f4307e764e07bc64";
 const GIBIBYTE: u64 = 1024 * 1024 * 1024;
-const MIN_REQUIRED_RAM_BYTES: u64 = 8 * GIBIBYTE;
-// ponytail: 5 GB is 3.3 GB measured worker peak plus headroom, rounded up. Provisional until generation_log.jsonl has more runs.
-#[cfg(not(target_os = "macos"))]
-const DEFAULT_MIN_AVAILABLE_RAM_BYTES: u64 = 5 * GIBIBYTE;
-// macOS "available" includes inactive cache pages, so 5 GB is not the same as Windows ullAvailPhys.
-#[cfg(target_os = "macos")]
-const DEFAULT_MIN_AVAILABLE_RAM_BYTES: u64 = 6 * GIBIBYTE;
-#[cfg(not(target_os = "macos"))]
-const MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES: u64 = 4 * GIBIBYTE;
-#[cfg(target_os = "macos")]
-const MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES: u64 = 5 * GIBIBYTE;
-const GENERATION_PEAK_HEADROOM_BYTES: u64 = GIBIBYTE;
-// ponytail: 1 GB extra while the model is already resident. Replace after generation_log warm runs.
+// A nominal 8 GB laptop reports about 7.8 GiB (firmware reserves the rest), so 7 GiB admits it.
+const MIN_REQUIRED_RAM_BYTES: u64 = 7 * GIBIBYTE;
+// Measured 2026-10 on Windows (Chatterbox-Nano, CPU): the serve worker sits at 2.9 GB working
+// set once the model is loaded (4.6 GB commit) and a warm generation adds nothing. Loading the
+// model spikes to 4.1 GB working set (5.4 GB commit) for a few seconds, which may page. So
+// 4 GiB free covers the resident model with a 1 GiB margin and lets that spike through.
+const MIN_AVAILABLE_RAM_BYTES: u64 = 4 * GIBIBYTE;
+// Model already resident: only refuse when the machine is nearly out of memory.
 const LOADED_WORKER_HEADROOM_BYTES: u64 = GIBIBYTE;
 const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const EXTRA_DOWNLOAD_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_REFERENCE_AUDIO_BYTES: usize = 60 * 1024 * 1024;
+// A cloning sample needs 10 to 30 s. Past this the mic stops and the recording is refused.
+const MAX_RECORDING_SECONDS: u32 = 60;
 const DOWNLOAD_CANCELLED: &str = "download cancelled";
 const MAX_VOICE_GENERATION: Duration = Duration::from_secs(30 * 60);
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -260,12 +257,22 @@ impl VoiceWorker {
         }
     }
 
+    /// Stops a running job. The job thread sees `stop_after`, kills the worker and reports
+    /// "cancelled"; terminating here as well unblocks its stdout read at once.
     pub fn cancel(&self) {
         self.inner.stop_after.store(true, Ordering::SeqCst);
-        self.kill();
+        if let Ok(killer) = self.inner.killer.lock() {
+            if let Some(killer) = killer.as_ref() {
+                killer.terminate();
+            }
+        }
+        if !self.inner.busy.load(Ordering::SeqCst) {
+            self.kill();
+        }
     }
 
-    pub fn tick(&self, root: &Path) {
+    /// Every few seconds: drop the worker once it sat idle or RAM got scarce.
+    pub fn tick(&self) {
         if self.inner.busy.load(Ordering::SeqCst) {
             return;
         }
@@ -276,30 +283,24 @@ impl VoiceWorker {
             .ok()
             .map(|used| used.elapsed() >= WORKER_IDLE_TIMEOUT)
             .unwrap_or(false);
-        let scarce = worker_memory_is_scarce();
-        if idle || scarce {
+        if idle || worker_memory_is_scarce() {
             self.kill();
-            let _ = root;
         }
     }
 
+    /// Kills the worker process. A running job holds `live` for its whole duration; it reaps the
+    /// dead child itself, so never block on that lock here.
     fn kill(&self) {
-        if let Ok(killer) = self.inner.killer.lock() {
-            if let Some(killer) = killer.as_ref() {
-                killer.terminate();
-            }
+        if let Some(killer) = self.inner.killer.lock().ok().and_then(|mut slot| slot.take()) {
+            killer.terminate();
         }
-        if let Ok(mut live) = self.inner.live.lock() {
+        if let Ok(mut live) = self.inner.live.try_lock() {
             if let Some(mut worker) = live.take() {
                 let _ = worker.child.kill();
                 let _ = worker.child.wait();
             }
         }
-        if let Ok(mut killer) = self.inner.killer.lock() {
-            *killer = None;
-        }
         self.inner.loaded.store(false, Ordering::SeqCst);
-        self.inner.busy.store(false, Ordering::SeqCst);
     }
 
     fn run_job(
@@ -388,6 +389,14 @@ impl VoiceWorker {
         let mut peak = process_tree_ram(pid).unwrap_or_default();
         persist_generation_peak(root, peak.working_set);
         let reply = loop {
+            if self.inner.stop_after.load(Ordering::SeqCst) {
+                if let Some(killer) = &killer {
+                    killer.terminate();
+                }
+                drop(live);
+                self.kill();
+                return Err("voice generation cancelled".to_string());
+            }
             if started.elapsed() >= MAX_VOICE_GENERATION
                 || self.inner.generation.load(Ordering::SeqCst) != generation
             {
@@ -404,35 +413,27 @@ impl VoiceWorker {
                     persist_generation_peak(root, peak.working_set);
                 }
             }
-            match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok((Ok(_), line, stdout)) => {
+            // A read of zero bytes is EOF: the worker died (crash, kill, out of memory).
+            let failure = match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok((Ok(read), line, stdout)) if read > 0 => {
                     if let Some(worker) = live.as_mut() {
                         worker.stdout = Some(stdout);
                     }
                     break line;
                 }
-                Ok((Err(error), _, _)) => {
-                    let cancelled = self.inner.stop_after.load(Ordering::SeqCst);
-                    drop(live);
-                    self.kill();
-                    return Err(if cancelled {
-                        "voice generation cancelled".to_string()
-                    } else {
-                        error.to_string()
-                    });
-                }
+                Ok((Ok(_), _, _)) => "voice worker stopped".to_string(),
+                Ok((Err(error), _, _)) => error.to_string(),
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let cancelled = self.inner.stop_after.load(Ordering::SeqCst);
-                    drop(live);
-                    self.kill();
-                    return Err(if cancelled {
-                        "voice generation cancelled".to_string()
-                    } else {
-                        "voice worker stopped".to_string()
-                    });
-                }
-            }
+                Err(mpsc::RecvTimeoutError::Disconnected) => "voice worker stopped".to_string(),
+            };
+            let cancelled = self.inner.stop_after.load(Ordering::SeqCst);
+            drop(live);
+            self.kill();
+            return Err(if cancelled {
+                "voice generation cancelled".to_string()
+            } else {
+                failure
+            });
         };
 
         finish_generation_peak(root, peak.working_set);
@@ -478,7 +479,7 @@ impl WorkerKiller {
         }
         #[cfg(unix)]
         {
-            let _ = Command::new("kill")
+            let _ = std::process::Command::new("kill")
                 .arg("-9")
                 .arg(self.pid.to_string())
                 .status();
@@ -784,11 +785,8 @@ pub fn cancel_generation(worker: &VoiceWorker) {
     worker.cancel();
 }
 
-pub fn tick_worker(app: &AppHandle, worker: &VoiceWorker) {
-    let Ok(root) = voice_root(app) else {
-        return;
-    };
-    worker.tick(&root);
+pub fn tick_worker(worker: &VoiceWorker) {
+    worker.tick();
 }
 
 pub fn download_model(app: AppHandle) -> Result<VoiceModelStatus, String> {
@@ -820,23 +818,10 @@ pub fn start_model_download(
     }
 
     ensure_download_space(&root)?;
-    let model = model_status(&root);
+    // No early return when everything is installed: the worker thread still asks the manifest
+    // for a newer runtime, and valid model files are skipped.
     let runtime = voice_runtime::status(&root);
     let required_bytes = required_model_bytes() + runtime.required_bytes.unwrap_or(0);
-    if model.installed && runtime.installed {
-        let mut download = state
-            .lock()
-            .map_err(|_| "voice download state unavailable".to_string())?;
-        download.phase = VoiceDownloadPhase::Complete;
-        download.downloaded_bytes = required_bytes;
-        download.started_downloaded_bytes = required_bytes;
-        download.total_bytes = required_bytes;
-        download.current_file = None;
-        download.started_at = None;
-        download.error = None;
-        download.cancel = None;
-        return Ok(download_snapshot(&download, &root));
-    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -1208,7 +1193,7 @@ pub fn generate_clips(
         profile: input.profile_id.clone(),
         phrases: input.phrases.as_ref().map(Vec::len).unwrap_or(0),
         merge: input.merge_clips.unwrap_or(false),
-        need: required_ram_for_gate(loaded, load_generation_budget(&root).last_peak_ram_bytes),
+        need: required_ram_for_gate(loaded),
         available_before: available_ram_bytes(),
         available_after: None,
         total: total_ram_bytes(),
@@ -1254,7 +1239,7 @@ fn generate_clips_inner(
     if !model_status(&root).installed || !voice_runtime::status(&root).installed {
         return Err("download the voice cloning model pack before generating clips".to_string());
     }
-    ensure_generation_ram(root, worker.is_loaded())?;
+    ensure_generation_ram(worker.is_loaded())?;
 
     let phrases = input.phrases.unwrap_or_else(default_phrases);
     row.phrases = phrases.len();
@@ -1894,25 +1879,36 @@ fn run_recording_thread(
     let sample_rate = supported_config.sample_rate().0;
     let channels = usize::from(supported_config.channels());
     let stream_config = supported_config.config();
+    let max_samples = sample_rate as usize * MAX_RECORDING_SECONDS as usize;
     let samples = Arc::new(Mutex::new(Vec::new()));
     let capture_samples = Arc::clone(&samples);
     let error_handler = |error| eprintln!("Supervisor voice recording stream error: {error}");
     let stream = match supported_config.sample_format() {
         SampleFormat::F32 => device.build_input_stream(
             &stream_config,
-            move |data: &[f32], _| capture_f32_samples(data, channels, &capture_samples),
+            move |data: &[f32], _| {
+                capture_samples_from(data, channels, max_samples, &capture_samples, |v| {
+                    (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+                })
+            },
             error_handler,
             None,
         ),
         SampleFormat::I16 => device.build_input_stream(
             &stream_config,
-            move |data: &[i16], _| capture_i16_samples(data, channels, &capture_samples),
+            move |data: &[i16], _| {
+                capture_samples_from(data, channels, max_samples, &capture_samples, |v| v)
+            },
             error_handler,
             None,
         ),
         SampleFormat::U16 => device.build_input_stream(
             &stream_config,
-            move |data: &[u16], _| capture_u16_samples(data, channels, &capture_samples),
+            move |data: &[u16], _| {
+                capture_samples_from(data, channels, max_samples, &capture_samples, |v| {
+                    (i32::from(v) - 32768) as i16
+                })
+            },
             error_handler,
             None,
         ),
@@ -1935,21 +1931,36 @@ fn run_recording_thread(
     }
     let _ = ready.send(Ok(sample_rate));
 
-    match commands.recv() {
-        Ok(RecordingCommand::Stop(path, result)) => {
-            drop(stream);
-            let captured = samples
-                .lock()
-                .map(|samples| samples.clone())
-                .unwrap_or_default();
-            let _ = result.send(recording_clip_from_samples(path, captured, sample_rate));
+    let mut stream = Some(stream);
+    loop {
+        let full = samples.lock().map(|s| s.len() >= max_samples).unwrap_or(false);
+        if full {
+            // Release the mic; the stop below reports the limit.
+            stream = None;
         }
-        Ok(RecordingCommand::Cancel(done)) => {
-            drop(stream);
-            let _ = done.send(());
-        }
-        Err(_) => {
-            drop(stream);
+        match commands.recv_timeout(Duration::from_millis(200)) {
+            Ok(RecordingCommand::Stop(path, result)) => {
+                drop(stream);
+                let captured = samples
+                    .lock()
+                    .map(|samples| samples.clone())
+                    .unwrap_or_default();
+                let _ = result.send(if full {
+                    Err(format!(
+                        "Recording stopped at the {MAX_RECORDING_SECONDS} second limit. Record a shorter sample; 10 to 30 seconds is plenty."
+                    ))
+                } else {
+                    recording_clip_from_samples(path, captured, sample_rate)
+                });
+                return;
+            }
+            Ok(RecordingCommand::Cancel(done)) => {
+                drop(stream);
+                let _ = done.send(());
+                return;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -1975,38 +1986,20 @@ fn recording_clip_from_samples(
     })
 }
 
-fn capture_f32_samples(data: &[f32], channels: usize, samples: &Arc<Mutex<Vec<i16>>>) {
+/// Keeps the first channel of each frame, converted to i16, up to `max_samples` in total.
+fn capture_samples_from<T: Copy>(
+    data: &[T],
+    channels: usize,
+    max_samples: usize,
+    samples: &Arc<Mutex<Vec<i16>>>,
+    convert: impl Fn(T) -> i16,
+) {
     if channels == 0 {
         return;
     }
     if let Ok(mut output) = samples.lock() {
-        for frame in data.chunks(channels) {
-            let value = frame.first().copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-            output.push((value * i16::MAX as f32) as i16);
-        }
-    }
-}
-
-fn capture_i16_samples(data: &[i16], channels: usize, samples: &Arc<Mutex<Vec<i16>>>) {
-    if channels == 0 {
-        return;
-    }
-    if let Ok(mut output) = samples.lock() {
-        for frame in data.chunks(channels) {
-            output.push(frame.first().copied().unwrap_or(0));
-        }
-    }
-}
-
-fn capture_u16_samples(data: &[u16], channels: usize, samples: &Arc<Mutex<Vec<i16>>>) {
-    if channels == 0 {
-        return;
-    }
-    if let Ok(mut output) = samples.lock() {
-        for frame in data.chunks(channels) {
-            let centered = i32::from(frame.first().copied().unwrap_or(u16::MAX / 2)) - 32768;
-            output.push(centered.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
-        }
+        let room = max_samples.saturating_sub(output.len());
+        output.extend(data.chunks(channels).take(room).map(|frame| convert(frame[0])));
     }
 }
 
@@ -2166,7 +2159,7 @@ fn system_info(root: &Path, recommended_free_disk_bytes: u64, worker_loaded: boo
     let total_ram_bytes = total_ram_bytes();
     let available_ram_bytes = available_ram_bytes();
     let last_peak_ram_bytes = load_generation_budget(root).last_peak_ram_bytes;
-    let min_free_ram_bytes = required_ram_for_gate(worker_loaded, last_peak_ram_bytes);
+    let min_free_ram_bytes = required_ram_for_gate(worker_loaded);
     let available_disk_bytes = available_disk_bytes(root);
     VoiceSystemInfo {
         os: std::env::consts::OS.to_string(),
@@ -2179,51 +2172,28 @@ fn system_info(root: &Path, recommended_free_disk_bytes: u64, worker_loaded: boo
         min_required_ram_bytes: MIN_REQUIRED_RAM_BYTES,
         min_free_ram_bytes,
         last_peak_ram_bytes,
-        has_enough_ram: ram_allows_job(
-            available_ram_bytes,
-            total_ram_bytes,
-            last_peak_ram_bytes,
-            worker_loaded,
-        )
-        .map(|ok| ok && macos_pressure_allows()),
+        has_enough_ram: ram_allows_job(available_ram_bytes, total_ram_bytes, worker_loaded)
+            .map(|ok| ok && macos_pressure_allows()),
         available_disk_bytes,
         recommended_free_disk_bytes,
         has_enough_disk: available_disk_bytes.map(|bytes| bytes >= recommended_free_disk_bytes),
     }
 }
 
-fn required_available_ram_bytes(last_peak_ram_bytes: Option<u64>) -> u64 {
-    match last_peak_ram_bytes {
-        Some(peak) if peak > 0 => peak
-            .saturating_add(GENERATION_PEAK_HEADROOM_BYTES)
-            .max(MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES),
-        _ => DEFAULT_MIN_AVAILABLE_RAM_BYTES,
-    }
-}
-
-fn required_ram_for_gate(worker_loaded: bool, last_peak_ram_bytes: Option<u64>) -> u64 {
+fn required_ram_for_gate(worker_loaded: bool) -> u64 {
     if worker_loaded {
         LOADED_WORKER_HEADROOM_BYTES
     } else {
-        required_available_ram_bytes(last_peak_ram_bytes)
+        MIN_AVAILABLE_RAM_BYTES
     }
-}
-
-fn ram_allows_generation(
-    available_ram_bytes: Option<u64>,
-    total_ram_bytes: Option<u64>,
-    last_peak_ram_bytes: Option<u64>,
-) -> Option<bool> {
-    ram_allows_job(available_ram_bytes, total_ram_bytes, last_peak_ram_bytes, false)
 }
 
 fn ram_allows_job(
     available_ram_bytes: Option<u64>,
     total_ram_bytes: Option<u64>,
-    last_peak_ram_bytes: Option<u64>,
     worker_loaded: bool,
 ) -> Option<bool> {
-    let need = required_ram_for_gate(worker_loaded, last_peak_ram_bytes);
+    let need = required_ram_for_gate(worker_loaded);
     let available_ok = available_ram_bytes.map(|bytes| bytes >= need)?;
     let machine_ok = total_ram_bytes
         .map(|bytes| bytes >= MIN_REQUIRED_RAM_BYTES)
@@ -2257,7 +2227,7 @@ fn macos_pressure_for_log() -> Option<u32> {
     }
 }
 
-fn ensure_generation_ram(root: &Path, worker_loaded: bool) -> Result<(), String> {
+fn ensure_generation_ram(worker_loaded: bool) -> Result<(), String> {
     if !macos_pressure_allows() {
         return Err(
             "macOS is under memory pressure. Close other apps, then try again.".into(),
@@ -2265,9 +2235,8 @@ fn ensure_generation_ram(root: &Path, worker_loaded: bool) -> Result<(), String>
     }
     let available = available_ram_bytes();
     let total = total_ram_bytes();
-    let last_peak = load_generation_budget(root).last_peak_ram_bytes;
-    let need = required_ram_for_gate(worker_loaded, last_peak);
-    match ram_allows_job(available, total, last_peak, worker_loaded) {
+    let need = required_ram_for_gate(worker_loaded);
+    match ram_allows_job(available, total, worker_loaded) {
         Some(true) => Ok(()),
         Some(false) => Err(format!(
             "Not enough available RAM to clone a voice. Need about {}, this PC has {} available. Close other apps and try again.",
@@ -2358,93 +2327,6 @@ fn finish_generation_peak(root: &Path, peak_ram_bytes: u64) {
     let _ = write_json(&generation_budget_path(root), &budget);
 }
 
-struct WorkerRun {
-    status: std::process::ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    peak_ram_bytes: u64,
-}
-
-struct WorkerFail {
-    message: String,
-    peak_ram_bytes: u64,
-}
-
-fn run_worker_until(root: &Path, mut command: Command, timeout: Duration) -> Result<WorkerRun, WorkerFail> {
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    command.stdin(Stdio::null());
-    let mut child = command.spawn().map_err(|error| WorkerFail {
-        message: error.to_string(),
-        peak_ram_bytes: 0,
-    })?;
-    let _job = bind_worker_lifetime(&child);
-    let pid = child.id();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_thread = stdout.map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
-            bytes
-        })
-    });
-    let stderr_thread = stderr.map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
-            bytes
-        })
-    });
-
-    let started = Instant::now();
-    let mut peak = process_ram_bytes(pid).unwrap_or(0);
-    persist_generation_peak(root, peak);
-    let status = loop {
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            finish_generation_peak(root, peak);
-            return Err(WorkerFail {
-                message: "voice generation timed out".to_string(),
-                peak_ram_bytes: peak,
-            });
-        }
-        if let Some(used) = process_ram_bytes(pid) {
-            if used > peak {
-                peak = used;
-                persist_generation_peak(root, peak);
-            }
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(250).min(timeout)),
-            Err(error) => {
-                let _ = child.kill();
-                finish_generation_peak(root, peak);
-                return Err(WorkerFail {
-                    message: error.to_string(),
-                    peak_ram_bytes: peak,
-                });
-            }
-        }
-    };
-    finish_generation_peak(root, peak);
-
-    let stdout = stdout_thread
-        .map(|thread| thread.join().unwrap_or_default())
-        .unwrap_or_default();
-    let stderr = stderr_thread
-        .map(|thread| thread.join().unwrap_or_default())
-        .unwrap_or_default();
-    Ok(WorkerRun {
-        status,
-        stdout,
-        stderr,
-        peak_ram_bytes: peak,
-    })
-}
-
 struct WorkerLifetime {
     #[cfg(windows)]
     job: Option<isize>,
@@ -2523,10 +2405,6 @@ fn bind_windows_job(child: &std::process::Child) -> Option<isize> {
 struct ProcessRam {
     working_set: u64,
     private: u64,
-}
-
-fn process_ram_bytes(pid: u32) -> Option<u64> {
-    process_tree_ram(pid).map(|ram| ram.working_set)
 }
 
 fn process_tree_ram(pid: u32) -> Option<ProcessRam> {
@@ -2892,7 +2770,7 @@ mod tests {
         assert!(available > 0 && available <= total);
         assert!(available > total / 50, "available {available} of {total}");
         assert!(available_disk_bytes(&std::env::temp_dir()).expect("free disk") > 0);
-        assert!(process_ram_bytes(std::process::id()).expect("own process ram") > 0);
+        assert!(process_tree_ram(std::process::id()).expect("own process ram").working_set > 0);
     }
 
     #[test]
@@ -2915,67 +2793,28 @@ mod tests {
     }
 
     #[test]
-    fn generation_ram_gate_uses_available_ram_and_measured_peak() {
-        assert_eq!(
-            required_available_ram_bytes(None),
-            DEFAULT_MIN_AVAILABLE_RAM_BYTES
-        );
-        assert_eq!(
-            required_available_ram_bytes(Some(5 * GIBIBYTE)),
-            6 * GIBIBYTE
-        );
-        assert_eq!(
-            required_available_ram_bytes(Some(2 * GIBIBYTE)),
-            MIN_AVAILABLE_RAM_AFTER_MEASURE_BYTES
-        );
+    fn generation_ram_gate_admits_an_8gb_laptop_with_4gb_free() {
+        let laptop = Some(7_800 * 1024 * 1024);
+        assert_eq!(ram_allows_job(Some(4 * GIBIBYTE), laptop, false), Some(true));
+        assert_eq!(ram_allows_job(Some(4 * GIBIBYTE - 1), laptop, false), Some(false));
+        assert_eq!(ram_allows_job(Some(7 * GIBIBYTE), Some(4 * GIBIBYTE), false), Some(false));
+        assert_eq!(ram_allows_job(None, laptop, false), None);
 
-        assert_eq!(
-            ram_allows_generation(
-                Some(DEFAULT_MIN_AVAILABLE_RAM_BYTES),
-                Some(16 * GIBIBYTE),
-                None
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            ram_allows_generation(
-                Some(DEFAULT_MIN_AVAILABLE_RAM_BYTES.saturating_sub(GIBIBYTE)),
-                Some(16 * GIBIBYTE),
-                None
-            ),
-            Some(false)
-        );
-        assert_eq!(
-            ram_allows_generation(Some(7 * GIBIBYTE), Some(4 * GIBIBYTE), None),
-            Some(false)
-        );
-        assert_eq!(ram_allows_generation(None, Some(16 * GIBIBYTE), None), None);
+        assert_eq!(required_ram_for_gate(true), LOADED_WORKER_HEADROOM_BYTES);
+        assert_eq!(ram_allows_job(Some(GIBIBYTE), laptop, true), Some(true));
+        assert_eq!(ram_allows_job(Some(GIBIBYTE - 1), laptop, true), Some(false));
+        assert_eq!(ram_allows_job(Some(2 * GIBIBYTE), laptop, false), Some(false));
+    }
 
-        assert_eq!(
-            required_ram_for_gate(true, None),
-            LOADED_WORKER_HEADROOM_BYTES
-        );
-        assert_eq!(
-            ram_allows_job(Some(LOADED_WORKER_HEADROOM_BYTES), Some(16 * GIBIBYTE), None, true),
-            Some(true)
-        );
-        assert_eq!(
-            ram_allows_job(
-                Some(LOADED_WORKER_HEADROOM_BYTES.saturating_sub(1)),
-                Some(16 * GIBIBYTE),
-                None,
-                true
-            ),
-            Some(false)
-        );
-        assert_eq!(
-            ram_allows_job(Some(2 * GIBIBYTE), Some(16 * GIBIBYTE), None, true),
-            Some(true)
-        );
-        assert_eq!(
-            ram_allows_job(Some(2 * GIBIBYTE), Some(16 * GIBIBYTE), None, false),
-            Some(false)
-        );
+    #[test]
+    fn recording_capture_stops_at_the_sample_cap() {
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        capture_samples_from(&[1i16, 9, 2, 9, 3, 9], 2, 5, &samples, |v| v);
+        capture_samples_from(&[4i16, 9, 5, 9, 6, 9], 2, 5, &samples, |v| v);
+        assert_eq!(*samples.lock().unwrap(), [1, 2, 3, 4, 5]);
+        capture_samples_from(&[0.5f32, 0.0], 1, 7, &samples, |v| (v * i16::MAX as f32) as i16);
+        assert_eq!(samples.lock().unwrap().len(), 7);
+        assert_eq!(samples.lock().unwrap()[5], 16383);
     }
 
     #[test]
@@ -3087,32 +2926,6 @@ mod tests {
         assert_eq!(fs::read(&verified).unwrap(), b"keep");
         assert!(!partial.exists());
         let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn worker_wait_stops_a_process_at_the_deadline() {
-        let root = test_dir("worker-timeout");
-        fs::create_dir_all(&root).unwrap();
-        let mut command = if cfg!(windows) {
-            let mut command = Command::new("ping");
-            command.args(["127.0.0.1", "-n", "8"]);
-            command
-        } else {
-            let mut command = Command::new("sleep");
-            command.arg("5");
-            command
-        };
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000);
-        }
-        let error = match run_worker_until(&root, command, Duration::from_millis(200)) {
-            Err(fail) => fail.message,
-            Ok(_) => panic!("worker should time out"),
-        };
-        assert!(error.contains("timed out"), "{error}");
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

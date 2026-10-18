@@ -383,6 +383,7 @@ def serve(args: argparse.Namespace) -> int:
                 },
             )
         except Exception as exc:
+            # The model is still good; keep serving so the app's "loaded" flag stays true.
             traceback.print_exc(file=sys.stderr)
             reply(
                 replies,
@@ -393,7 +394,6 @@ def serve(args: argparse.Namespace) -> int:
                     "loaded": model is not None,
                 },
             )
-            return 1
     return 0
 
 
