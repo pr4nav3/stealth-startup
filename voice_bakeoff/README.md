@@ -1,5 +1,7 @@
 # Voice Bakeoff
 
+Eval only as of 2026-10-16. The app worker is `voice_worker/`. Do not treat this folder as the in-app path.
+
 Phase 0 decides whether Chatterbox-Nano is good enough for Supervisor V1 before any full voice UI work.
 
 ## Setup

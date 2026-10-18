@@ -4,7 +4,7 @@ Last updated: 2026-10-07
 
 The tracker runs as a Settings preview. Phone and away time are not written
 during a real session yet. That wiring, and how strictness changes a voice
-nudge, is the webcam branch in `plans/STATUS.md`.
+nudge, is the webcam-session leftover in `plans/STATUS.md`.
 
 ## Signals
 
