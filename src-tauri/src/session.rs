@@ -17,6 +17,15 @@ use std::time::Duration;
 pub const HISTORY_CACHE_LIMIT: usize = 20;
 /// The ticker runs every second. A longer silence means the machine slept or froze.
 pub const LOST_TIME_AFTER: Duration = Duration::from_secs(15);
+/// The worker already smooths frames (k-of-n), so the phone counts from its first report. It
+/// ends once the worker has not seen it for this long, so a dropped frame doesn't split it.
+const PHONE_CLEAR_AFTER: Duration = Duration::from_secs(2);
+/// No frame for this long means the camera is not watching (worker stopped or camera lost).
+const CAMERA_STALE_AFTER: Duration = Duration::from_secs(3);
+/// Nobody in view, and no input, for this long is Away (dated back to when they left).
+pub const CAMERA_AWAY_AFTER: Duration = Duration::from_secs(60);
+/// A span state of its own, apart from the focus states: the phone outranks the window.
+const PHONE_STATE: &str = "phone";
 
 pub struct SessionManager {
     settings: SessionSettings,
@@ -288,6 +297,21 @@ impl SessionManager {
         self.snapshot(now)
     }
 
+    /// One webcam reading (about four a second). Ignored unless the user turned the webcam on.
+    pub fn record_webcam(&mut self, phone: bool, present: bool, now: Duration) {
+        if !self.settings.webcam_enabled {
+            return;
+        }
+        if let Some(session) = self.current.as_mut() {
+            session.record_webcam(phone, present, now, self.storage.as_ref());
+        }
+    }
+
+    /// The webcam runs while a session records (Active or Muted) and the user turned it on.
+    pub fn wants_webcam(&self) -> bool {
+        self.settings.webcam_enabled && self.should_poll_activity()
+    }
+
     pub fn should_poll_activity(&self) -> bool {
         self.current.as_ref().is_some_and(|session| {
             matches!(
@@ -382,6 +406,9 @@ impl SessionManager {
         }
         if let Some(enabled) = update.webcam_gpu {
             self.settings.webcam_gpu = enabled;
+        }
+        if let Some(enabled) = update.webcam_enabled {
+            self.settings.webcam_enabled = enabled;
         }
         if let Some(voice_profile) = update.voice_profile {
             let voice_profile = voice_profile.trim();
@@ -500,10 +527,23 @@ struct Session {
     recorded_until: u64,
     /// The last span written, so a short unclaimed tail can be given back to it.
     last_closed: Option<OpenSpan>,
-    /// Last time media playing in front showed the user was there; Away never starts earlier.
-    media_present_at: Duration,
+    /// Last time media playing in front, or the webcam, showed the user was there; Away never
+    /// starts earlier.
+    present_at: Duration,
     /// When window reads started failing, while they still are.
     capture_failing_since: Option<Duration>,
+    camera: Camera,
+}
+
+/// What the webcam last said. Only flags and times: frames never reach the session.
+#[derive(Debug, Default)]
+struct Camera {
+    last_frame_at: Option<Duration>,
+    present: bool,
+    absent_since: Option<Duration>,
+    /// While a phone is in view: when it was first seen. Its span is the open span.
+    phone_since: Option<Duration>,
+    phone_seen_at: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -548,14 +588,18 @@ impl Session {
             last_span_checkpoint: now,
             recorded_until: 0,
             last_closed: None,
-            media_present_at: now,
+            present_at: now,
             capture_failing_since: None,
+            camera: Camera::default(),
         }
     }
 
     fn tick(&mut self, now: Duration, storage: Option<&SessionStorage>) {
         if self.status == SessionStatus::Paused {
             self.checkpoint_open_span(now, storage);
+        }
+        if self.is_recording() {
+            self.update_phone(now, storage);
         }
         if self.status == SessionStatus::Snoozed
             && self
@@ -614,6 +658,15 @@ impl Session {
             sample
         };
 
+        // A phone in hand outranks the window in front until it is put down.
+        if self.phone_active() {
+            self.account_phone(now);
+            self.checkpoint_open_span(now, storage);
+            return;
+        }
+        let camera_away = self.camera_away(&sample, now);
+        self.engine.set_camera(self.camera_sees_someone(now), camera_away);
+
         // Supervisor's own window is never judged by rules and is not focus: Neutral, or Away
         // after the same stretch without input as any other window.
         if supervisor.matches(&sample) {
@@ -659,7 +712,7 @@ impl Session {
             display_activity.label = storage.app_label(&activity.key, &activity.label);
         }
         if sample.media_playing {
-            self.media_present_at = now;
+            self.present_at = now;
         }
         let focus = self.engine.record_sample(&sample, &display_activity, now);
         let span_at = if focus.state == FocusState::Idle {
@@ -696,6 +749,7 @@ impl Session {
         self.start_timer_hold(now);
         self.close_open_span(now, storage);
         self.open_marker_span(Activity::paused(), "paused");
+        self.camera = Camera::default();
         self.unmute();
         self.status = SessionStatus::Paused;
         self.push_event(now, "Session paused", "HOLD");
@@ -738,7 +792,7 @@ impl Session {
     fn replace_rules(&mut self, rules: Vec<AppRule>, now: Duration, storage: Option<&SessionStorage>) {
         if self.is_recording() {
             self.account_current(now);
-            if self.supervisor_state.is_none() {
+            if self.supervisor_state.is_none() && !self.phone_active() {
                 self.close_open_span(now, storage);
             }
         }
@@ -771,8 +825,12 @@ impl Session {
         }
 
         let marked_rule = rule.clone();
+        // A phone span stays a phone span; the rule applies once it is put down.
+        let on_phone = self.phone_active();
         let recorded_activity = self.open_span.as_ref().map(|span| span.activity.clone());
-        self.close_open_span(now, storage);
+        if !on_phone {
+            self.close_open_span(now, storage);
+        }
         self.rules.insert(0, rule);
         self.rules = keep_current_rules(std::mem::take(&mut self.rules));
         self.engine.replace_rules(self.rules.clone());
@@ -783,7 +841,7 @@ impl Session {
             classification,
             self.strictness,
         ));
-        if self.is_recording() && self.supervisor_state.is_none() {
+        if self.is_recording() && self.supervisor_state.is_none() && !on_phone {
             if let (Some(activity), Some(marked)) = (recorded_activity, self.latest_focus.as_ref()) {
                 self.sync_span(now, &focus.sample.window_id,
                     focus.sample.window_title.as_deref(), &activity, marked.state, storage);
@@ -835,6 +893,11 @@ impl Session {
         if !self.is_recording() || now <= self.last_accounted_at {
             return;
         }
+        // The phone span doesn't need the window.
+        if self.phone_active() {
+            self.capture_failing_since = None;
+            return;
+        }
         let since = *self.capture_failing_since.get_or_insert(self.last_accounted_at);
         if now.saturating_sub(since) >= LOST_TIME_AFTER {
             self.record_lost_time(since, now, storage);
@@ -850,6 +913,7 @@ impl Session {
             self.close_open_span(from, storage);
             self.open_marker_span(Activity::unknown(), "unknown");
             self.last_accounted_at = self.last_accounted_at.max(from);
+            self.camera = Camera::default();
         }
         self.account_open_gap(now);
         self.checkpoint_open_span(now, storage);
@@ -980,6 +1044,7 @@ impl Session {
             evidence: self.evidence.clone(),
             focus: self.latest_focus.clone(),
             rules: self.rules.clone(),
+            camera: self.camera_status(now),
         }
     }
 
@@ -987,8 +1052,12 @@ impl Session {
         self.raw_timer_elapsed_seconds(now) >= self.duration_seconds
     }
 
-    /// Credits time up to `now` to whatever was in front: Supervisor counts as focused.
+    /// Credits time up to `now` to whatever was in front (or the phone in hand).
     fn account_current(&mut self, now: Duration) {
+        if self.phone_active() {
+            self.account_phone(now);
+            return;
+        }
         match self.supervisor_state {
             Some(state) => self.account(now, state),
             None => self.account_latest(now),
@@ -1035,6 +1104,17 @@ impl Session {
         self.last_accounted_at = now;
     }
 
+    /// Phone time is distracted time, and also counted on its own.
+    fn account_phone(&mut self, now: Duration) {
+        let delta = now.as_secs().saturating_sub(self.last_accounted_at.as_secs());
+        if delta == 0 {
+            return;
+        }
+        self.metrics.distracted_seconds += delta;
+        self.metrics.phone_seconds += delta;
+        self.last_accounted_at = now;
+    }
+
     fn account_open_gap(&mut self, now: Duration) {
         let delta = now.as_secs().saturating_sub(self.last_accounted_at.as_secs());
         if delta == 0 {
@@ -1063,7 +1143,7 @@ impl Session {
         };
         let span_start = Duration::from_secs(self.started_at_seconds + span.started_offset_seconds);
         let last_input = now.saturating_sub(Duration::from_secs_f64(sample.idle_seconds.unwrap_or(0.0)));
-        let left_at = Duration::from_secs(last_input.max(span_start).max(self.media_present_at).as_secs());
+        let left_at = Duration::from_secs(last_input.max(span_start).max(self.present_at).as_secs());
         // The site's nudge clock stops at the same moment.
         self.engine.hold(left_at);
         let reclaimed = boundary.as_secs().saturating_sub(left_at.as_secs());
@@ -1117,6 +1197,112 @@ impl Session {
         self.evidence.truncate(8);
     }
 
+    fn record_webcam(&mut self, phone: bool, present: bool, now: Duration, storage: Option<&SessionStorage>) {
+        if !self.is_recording() {
+            return;
+        }
+        // Frames and ticks take the lock in either order; never step back in time.
+        let now = now.max(self.last_accounted_at);
+        self.camera.last_frame_at = Some(now);
+        self.camera.present = present || phone;
+        if self.camera.present {
+            self.camera.absent_since = None;
+            self.present_at = self.present_at.max(now);
+        } else {
+            self.camera.absent_since.get_or_insert(now);
+        }
+        if phone {
+            self.camera.phone_seen_at = now;
+            if self.camera.phone_since.is_none() {
+                self.start_phone(now, storage);
+            }
+        }
+        self.update_phone(now, storage);
+    }
+
+    fn phone_active(&self) -> bool {
+        self.camera.phone_since.is_some()
+    }
+
+    fn camera_live(&self, now: Duration) -> bool {
+        self.camera
+            .last_frame_at
+            .is_some_and(|at| now.saturating_sub(at) <= CAMERA_STALE_AFTER)
+    }
+
+    fn camera_sees_someone(&self, now: Duration) -> bool {
+        self.camera_live(now) && self.camera.present
+    }
+
+    /// Nobody in view for `CAMERA_AWAY_AFTER`, and no input since they left. Input always wins:
+    /// someone typing is there even if the camera misses them.
+    fn camera_away(&self, sample: &ActivitySample, now: Duration) -> bool {
+        let Some(since) = self.camera.absent_since.filter(|_| self.camera_live(now)) else {
+            return false;
+        };
+        let gone = now.saturating_sub(since);
+        gone >= CAMERA_AWAY_AFTER && sample.idle_seconds.unwrap_or(0.0) >= gone.as_secs_f64()
+    }
+
+    /// The phone gets a span of its own from the first frame that saw it.
+    fn start_phone(&mut self, now: Duration, storage: Option<&SessionStorage>) {
+        if self.open_span_is_capture_gap() {
+            self.account_open_gap(now);
+        } else {
+            self.account_current(now);
+        }
+        self.supervisor_state = None;
+        self.capture_failing_since = None;
+        // Phone time doesn't count toward the site in front.
+        self.engine.hold(now);
+        self.close_open_span(now, storage);
+        self.open_marker_span(Activity::phone(), PHONE_STATE);
+        self.camera.phone_since = Some(now);
+        self.push_event(now, "Phone in view", "WEBCAM");
+    }
+
+    /// Ends the phone once no frame has seen it for a moment (put down, or the camera
+    /// stopped), else nudges when due: after the strictness grace, never while muted, and on
+    /// the cooldown every nudge shares.
+    fn update_phone(&mut self, now: Duration, storage: Option<&SessionStorage>) {
+        let Some(since) = self.camera.phone_since else {
+            return;
+        };
+        self.account_phone(now);
+        if now.saturating_sub(self.camera.phone_seen_at) >= PHONE_CLEAR_AFTER {
+            self.close_open_span(now, storage);
+            self.camera.phone_since = None;
+            self.push_event(now, "Phone put down", "WEBCAM");
+            return;
+        }
+        if now.saturating_sub(since).as_secs() >= self.phone_grace_seconds() && self.engine.nudge_ready(now) {
+            self.engine.note_nudge(now);
+            self.metrics.nudges += 1;
+            self.push_event(now, "Phone nudge queued", "VOICE 01");
+            self.persist_event(now, "nudge", Some("phone"), storage);
+        }
+    }
+
+    /// A phone in hand is a distraction with no doubt about it, so it skips the long wait a
+    /// site gets: it is distracted, and nudged, after the strictness's Slipping grace.
+    fn phone_grace_seconds(&self) -> u64 {
+        self.strictness.focus_config().distracted_after_seconds
+    }
+
+    fn camera_status(&self, now: Duration) -> CameraStatus {
+        let phone_seconds = self
+            .camera
+            .phone_since
+            .map_or(0, |since| now.saturating_sub(since).as_secs());
+        CameraStatus {
+            live: self.camera_live(now),
+            present: self.camera_sees_someone(now),
+            phone: self.phone_active(),
+            phone_seconds,
+            phone_distracted: self.phone_active() && phone_seconds >= self.phone_grace_seconds(),
+        }
+    }
+
     fn start_timer_hold(&mut self, now: Duration) {
         if self.timer_hold_started_at_seconds.is_none() {
             self.timer_hold_started_at_seconds = Some(now.as_secs());
@@ -1161,6 +1347,8 @@ pub struct SettingsUpdate {
     pub voice_profile: Option<String>,
     #[serde(default)]
     pub webcam_gpu: Option<bool>,
+    #[serde(default)]
+    pub webcam_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1170,6 +1358,8 @@ pub struct SessionSettings {
     pub status_window_enabled: bool,
     pub status_window_on_top: bool,
     pub webcam_gpu: bool,
+    /// Runs the webcam during sessions (phone and presence). Off until the user turns it on.
+    pub webcam_enabled: bool,
 }
 
 impl Default for SessionSettings {
@@ -1180,6 +1370,7 @@ impl Default for SessionSettings {
             status_window_enabled: true,
             status_window_on_top: true,
             webcam_gpu: false,
+            webcam_enabled: false,
         }
     }
 }
@@ -1258,6 +1449,19 @@ pub struct CurrentSession {
     pub evidence: Vec<EvidenceEvent>,
     pub focus: Option<FocusSnapshot>,
     pub rules: Vec<AppRule>,
+    pub camera: CameraStatus,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct CameraStatus {
+    /// Frames are arriving.
+    pub live: bool,
+    pub present: bool,
+    pub phone: bool,
+    /// How long this phone has been in view.
+    pub phone_seconds: u64,
+    /// Past the grace: the popup shows and the phone is nudged when due.
+    pub phone_distracted: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -1267,6 +1471,8 @@ pub struct SessionMetrics {
     pub suspicious_seconds: u64,
     pub distracted_seconds: u64,
     pub idle_seconds: u64,
+    /// Part of `distracted_seconds`.
+    pub phone_seconds: u64,
     pub nudges: u64,
 }
 
@@ -1759,6 +1965,165 @@ mod tests {
         assert!(report.spans.iter().all(|span| span.state != "idle"));
     }
 
+    fn webcam_manager() -> SessionManager {
+        let mut manager = test_manager();
+        manager.update_settings(SettingsUpdate {
+            default_strictness: None,
+            status_window_on_top: None,
+            voice_profile: None,
+            webcam_gpu: None,
+            webcam_enabled: Some(true),
+        });
+        manager
+    }
+
+    fn bounds(manager: &SessionManager, id: u64) -> Vec<(u64, u64, String, String)> {
+        manager.session_report(id).unwrap().spans.into_iter()
+            .map(|span| (span.started_offset_seconds, span.seconds, span.activity_key, span.state))
+            .collect()
+    }
+
+    fn span(start: u64, seconds: u64, key: &str, state: &str) -> (u64, u64, String, String) {
+        (start, seconds, key.to_string(), state.to_string())
+    }
+
+    #[test]
+    fn a_phone_interrupts_the_window_from_its_first_frame() {
+        let mut manager = webcam_manager();
+        manager.start(input("Phone", Strictness::Normal), seconds(0));
+        let id = manager.snapshot(seconds(0)).current.unwrap().id;
+        for t in 0..=30 {
+            manager.record_webcam((10..20).contains(&t), true, seconds(t));
+            record(&mut manager, sample("Code", "plan.md", 0.0), seconds(t));
+        }
+        manager.stop(seconds(30));
+
+        // Last seen at 19s; gone for two seconds at 21s.
+        assert_eq!(bounds(&manager, id), vec![
+            span(0, 10, "code", "unrated"),
+            span(10, 11, "phone", "phone"),
+            span(21, 9, "code", "unrated"),
+        ]);
+        let report = manager.session_report(id).unwrap();
+        assert_eq!(report.phone_seconds, 11);
+        assert_eq!(report.distracted_seconds, 11);
+        // Normal: nudged eight seconds in.
+        assert_eq!(report.nudge_count, 1);
+        assert!(report.events.iter().any(|event| event.kind == "nudge"
+            && event.detail.as_deref() == Some("phone") && event.at_offset_seconds == 18));
+        assert!(report.apps.iter().any(|app| app.group == "Distracting" && app.key == "phone" && !app.ratable));
+    }
+
+    #[test]
+    fn the_phone_shows_live_and_is_distracted_after_the_strictness_grace() {
+        let mut manager = webcam_manager();
+        manager.start(input("Phone", Strictness::Strict), seconds(0));
+        record(&mut manager, sample("Code", "plan.md", 0.0), seconds(0));
+        manager.record_webcam(true, true, seconds(1));
+        let camera = manager.snapshot(seconds(1)).current.unwrap().camera;
+        assert!(camera.live && camera.phone && !camera.phone_distracted);
+        for t in 2..=6 {
+            manager.record_webcam(true, true, seconds(t));
+        }
+        let current = manager.snapshot(seconds(6)).current.unwrap();
+        assert!(current.camera.phone_distracted);
+        assert_eq!(current.metrics.nudges, 1);
+        assert_eq!(current.metrics.phone_seconds, 5);
+    }
+
+    #[test]
+    fn a_muted_session_records_the_phone_but_never_nudges() {
+        let mut manager = webcam_manager();
+        manager.start(input("Phone", Strictness::Strict), seconds(0));
+        let id = manager.snapshot(seconds(0)).current.unwrap().id;
+        record(&mut manager, sample("Code", "plan.md", 0.0), seconds(0));
+        manager.snooze(seconds(0), 300);
+        for t in 1..=60 {
+            manager.record_webcam(true, true, seconds(t));
+            record(&mut manager, sample("Code", "plan.md", 0.0), seconds(t));
+        }
+        let snapshot = manager.stop(seconds(61));
+        assert_eq!(snapshot.history[0].nudges, 0);
+        assert_eq!(manager.session_report(id).unwrap().phone_seconds, 60);
+    }
+
+    #[test]
+    fn window_and_phone_nudges_share_one_cooldown() {
+        let mut manager = webcam_manager();
+        manager.start(input("Phone", Strictness::Strict), seconds(0));
+        let nudges = |manager: &SessionManager, t| manager.snapshot(seconds(t)).current.unwrap().metrics.nudges;
+        for t in 0..=210 {
+            // Strict: YouTube is nudged at 30s; the phone from 31s to 125s.
+            manager.record_webcam((31..=125).contains(&t), true, seconds(t));
+            record(&mut manager, site("youtube.com", 0.0), seconds(t));
+            match t {
+                30 => assert_eq!(nudges(&manager, t), 1),
+                // The phone waits out the 90s cooldown instead of nudging 5s in.
+                119 => assert_eq!(nudges(&manager, t), 1),
+                120 => assert_eq!(nudges(&manager, t), 2),
+                // And YouTube, back in front, waits out the phone's.
+                209 => assert_eq!(nudges(&manager, t), 2),
+                210 => assert_eq!(nudges(&manager, t), 3),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn frames_are_ignored_while_the_webcam_is_off_or_the_session_paused() {
+        let mut manager = test_manager();
+        manager.start(input("Off", Strictness::Strict), seconds(0));
+        manager.record_webcam(true, true, seconds(1));
+        assert!(!manager.snapshot(seconds(1)).current.unwrap().camera.phone);
+        assert!(!manager.wants_webcam());
+
+        let mut manager = webcam_manager();
+        manager.start(input("Paused", Strictness::Strict), seconds(0));
+        assert!(manager.wants_webcam());
+        manager.record_webcam(true, true, seconds(1));
+        manager.pause(seconds(2));
+        assert!(!manager.wants_webcam());
+        manager.record_webcam(true, true, seconds(3));
+        assert!(!manager.snapshot(seconds(3)).current.unwrap().camera.phone);
+    }
+
+    #[test]
+    fn the_phone_ends_two_seconds_after_the_last_frame_that_saw_it() {
+        let mut manager = webcam_manager();
+        manager.start(input("Lost", Strictness::Normal), seconds(0));
+        for t in 0..=2 {
+            manager.record_webcam(true, true, seconds(t));
+        }
+        // The camera stops sending.
+        manager.tick(seconds(3));
+        assert!(manager.snapshot(seconds(3)).current.unwrap().camera.phone);
+        manager.tick(seconds(4));
+        assert!(!manager.snapshot(seconds(4)).current.unwrap().camera.phone);
+    }
+
+    #[test]
+    fn someone_in_view_is_present_without_input_and_leaving_is_away_sooner() {
+        let mut manager = webcam_manager();
+        manager.start(input("Read", Strictness::Normal), seconds(0));
+        let id = manager.snapshot(seconds(0)).current.unwrap().id;
+        // Reading for five minutes without touching anything, in view the whole time.
+        for t in 0..=300 {
+            manager.record_webcam(false, true, seconds(t));
+            record(&mut manager, sample("Code", "plan.md", t as f64), seconds(t));
+        }
+        // Typing until 320s, in view until 340s, then gone; Away a minute later, from 340s.
+        for t in 301..=500 {
+            manager.record_webcam(false, t <= 340, seconds(t));
+            let idle = if t <= 320 { 0.0 } else { (t - 320) as f64 };
+            record(&mut manager, sample("Code", "plan.md", idle), seconds(t));
+        }
+        manager.stop(seconds(500));
+        assert_eq!(bounds(&manager, id), vec![
+            span(0, 340, "code", "unrated"),
+            span(340, 160, "code", "idle"),
+        ]);
+    }
+
     #[test]
     fn a_real_break_is_away_from_the_last_input() {
         let mut manager = test_manager();
@@ -1939,20 +2304,21 @@ mod tests {
     /// recorded segment. Random event sequences must never leave a hole or an overlap.
     #[test]
     fn every_second_of_a_session_is_recorded() {
+        let mut seeds_with_phone = 0;
         for seed in 1..=300u64 {
             let mut state = seed;
             let mut next = move |n: u64| {
                 state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
                 (state >> 33) % n
             };
-            let mut manager = test_manager();
+            let mut manager = webcam_manager();
             manager.start(input_minutes("Fuzz", Strictness::Strict, 180), seconds(0));
             let id = manager.snapshot(seconds(0)).current.unwrap().id;
             let mut now = 0u64;
-            for _ in 0..120 {
+            for _ in 0..160 {
                 now += 1 + next(4);
                 let t = seconds(now);
-                match next(15) {
+                match next(19) {
                     0..=3 => {
                         let app = ["Code", "Slack", "Notes"][next(3) as usize];
                         record(&mut manager, sample(app, "window", 0.0), t);
@@ -1995,6 +2361,18 @@ mod tests {
                         let rules = manager.rules();
                         manager.update_current_rules(rules, t);
                     }
+                    // Webcam readings arrive between ticks, a few a second.
+                    14 | 15 => {
+                        for quarter in 0..1 + next(8) {
+                            manager.record_webcam(true, true, t + Duration::from_millis(250 * quarter));
+                        }
+                    }
+                    16 => {
+                        manager.record_webcam(false, true, t + Duration::from_millis(500));
+                    }
+                    17 => {
+                        manager.record_webcam(false, false, t + Duration::from_millis(750));
+                    }
                     _ => {
                         now += 20 + next(100);
                         manager.record_lost_time(t, seconds(now));
@@ -2007,7 +2385,8 @@ mod tests {
             now += 1;
             manager.stop(seconds(now));
 
-            let spans = manager.session_report(id).expect("report").spans;
+            let report = manager.session_report(id).expect("report");
+            let spans = report.spans;
             let mut cursor = 0;
             for span in &spans {
                 assert_eq!(span.started_offset_seconds, cursor, "seed {seed}: hole or overlap at {cursor}s");
@@ -2015,7 +2394,11 @@ mod tests {
             }
             assert_eq!(cursor, now, "seed {seed}: timeline ends at {cursor}s, session at {now}s");
             assert_eq!(manager.storage.as_ref().unwrap().repaired_seconds(), 0, "seed {seed}: holes were repaired");
+            let phone: u64 = spans.iter().filter(|span| span.state == "phone").map(|span| span.seconds).sum();
+            assert_eq!(report.phone_seconds, phone, "seed {seed}");
+            seeds_with_phone += u64::from(phone > 0);
         }
+        assert!(seeds_with_phone > 100, "only {seeds_with_phone} seeds recorded a phone");
     }
 
     #[test]

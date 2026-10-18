@@ -84,6 +84,7 @@ interface SessionSettings {
   status_window_enabled: boolean;
   status_window_on_top: boolean;
   webcam_gpu: boolean;
+  webcam_enabled: boolean;
 }
 
 interface SessionMetrics {
@@ -92,7 +93,19 @@ interface SessionMetrics {
   suspicious_seconds: number;
   distracted_seconds: number;
   idle_seconds: number;
+  /** Part of distracted_seconds. */
+  phone_seconds: number;
   nudges: number;
+}
+
+/** What the webcam says during a session. Only flags; frames never reach the session. */
+interface CameraStatus {
+  live: boolean;
+  present: boolean;
+  phone: boolean;
+  phone_seconds: number;
+  /** Past the strictness grace: the popup shows and the phone is nudged when due. */
+  phone_distracted: boolean;
 }
 
 interface EvidenceEvent {
@@ -114,6 +127,7 @@ interface CurrentSession {
   evidence: EvidenceEvent[];
   focus: FocusSnapshot | null;
   rules: AppRule[];
+  camera: CameraStatus;
 }
 
 interface SessionSummary {
@@ -554,6 +568,7 @@ let settings: SessionSettings = {
   status_window_enabled: true,
   status_window_on_top: true,
   webcam_gpu: false,
+  webcam_enabled: false,
 };
 let history: SessionSummary[] = [];
 const EMPTY_RECAP: FocusRecap = { start: "", end: "", focus_seconds: 0, session_count: 0 };
@@ -687,6 +702,7 @@ async function init(): Promise<void> {
       invoke<Record<string, string>>("get_app_names"),
     ]);
     settings = loadedSettings;
+    webcamSettings.phoneUse = loadedSettings.webcam_enabled;
     siteNames = loadedSiteNames;
     appNames = loadedAppNames;
     history = loadedHistory;
@@ -942,6 +958,8 @@ function sessionViewKey(current: CurrentSession | null): string {
     sample?.app_name ?? "",
     focus?.activity.key ?? "",
     current.metrics.nudges,
+    current.camera.phone ? 1 : 0,
+    current.camera.phone_distracted ? 1 : 0,
     rules,
   ].join("\u001f");
 }
@@ -1308,12 +1326,22 @@ function renderDistractionOverlay(current: CurrentSession): string {
   const percent = current.duration_seconds
     ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
     : 0;
-  return `
-    <main class="overlay-shell overlay-interrupt">
-      <section class="state-slab interrupt-alert">
+  const phone = distractionLatchKey === PHONE_LATCH;
+  const alert = phone
+    ? `
+        <p class="interrupt-kicker">The webcam sees your phone</p>
+        <h2>Phone detected.</h2>
+        <p>Put it down. The timer is still running.</p>
+      `
+    : `
         <p class="interrupt-kicker">You opened ${escapeHtml(distractionLatchLabel || distractionLabel(current))}</p>
         <h2>Distraction detected.</h2>
         <p>${escapeHtml(distractionLatchLabel || distractionLabel(current))} is outside this session's rules.</p>
+      `;
+  return `
+    <main class="overlay-shell overlay-interrupt">
+      <section class="state-slab interrupt-alert">
+        ${alert}
       </section>
       <div class="interrupt-facts">
         <article class="panel">
@@ -1328,7 +1356,7 @@ function renderDistractionOverlay(current: CurrentSession): string {
       </div>
       <div class="interrupt-actions">
         <button class="primary" type="button" data-action="dismiss-distraction">Return to task</button>
-        <button type="button" data-action="dismiss-mark-relevant">Mark as relevant</button>
+        ${phone ? "" : `<button type="button" data-action="dismiss-mark-relevant">Mark as relevant</button>`}
       </div>
     </main>
   `;
@@ -1338,7 +1366,13 @@ function distractionLabel(current: CurrentSession): string {
   return current.focus?.activity.label || "This app";
 }
 
+/** The phone outranks the window in front, in the popup as in the timeline. */
+const PHONE_LATCH = "phone|phone";
+
 function distractionIdentity(current: CurrentSession): string {
+  if (current.camera.phone) {
+    return PHONE_LATCH;
+  }
   const activity = current.focus?.activity;
   return `${activity?.kind ?? ""}|${activity?.key ?? ""}`;
 }
@@ -1353,11 +1387,24 @@ function updateDistractionLatch(current: CurrentSession | null): void {
     distractionLatchLabel = "";
     return;
   }
+  const key = distractionIdentity(current);
+  if (current.camera.phone) {
+    // Shown once past the strictness grace; a dismissal lasts until the phone is put down.
+    if (current.camera.phone_distracted && distractionDismissedFor !== key) {
+      distractionLatchKey = key;
+      distractionLatchLabel = "Your phone";
+    }
+    return;
+  }
+  if (distractionLatchKey === PHONE_LATCH || distractionDismissedFor === PHONE_LATCH) {
+    distractionLatchKey = "";
+    distractionLatchLabel = "";
+    distractionDismissedFor = "";
+  }
   const focus = current.focus;
   if (!focus) {
     return;
   }
-  const key = distractionIdentity(current);
   if (focus.state === "distracted") {
     if (distractionDismissedFor !== key) {
       distractionLatchKey = key;
@@ -1611,7 +1658,7 @@ function renderWebcamSettings(): string {
           <section class="panel webcam-test-panel">
             <p class="eyebrow">Camera test</p>
             ${renderWebcamMetrics(frame)}
-            <p class="quiet">No images saved. Vision models run locally, and correct you in real time. You get a reminder if you leave your desk or if a phone is in view.</p>
+            <p class="quiet">No images saved. Vision models run locally while a session runs. A phone in view is recorded as phone time and nudged like any distraction; leaving your desk is recorded as Away.</p>
           </section>
         </div>
       </section>
@@ -2889,7 +2936,7 @@ function renderAppGroups(apps: RecapApp[], groups: string[]): string {
 }
 
 function renderRecapAppName(app: RecapApp): string {
-  if ((app.kind !== "website" && app.kind !== "app") || app.key === "untracked" || app.key === "supervisor") {
+  if ((app.kind !== "website" && app.kind !== "app") || ["untracked", "supervisor", "phone"].includes(app.key)) {
     return `<span class="recap-app-name">${escapeHtml(app.label)}</span>`;
   }
   if (historyRename?.key === app.key && historyRename.kind === app.kind) {
@@ -3316,6 +3363,7 @@ function renderSessionReport(report: SessionReport): string {
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds))}
           ${renderFocusStat(report)}
           ${reportStat("Nudges", String(report.nudge_count))}
+          ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds)) : ""}
         </aside>
       </div>
       <section class="panel recap-apps">
@@ -3416,6 +3464,7 @@ function renderTimelineLegend(report: SessionReport, unrecorded: boolean): strin
     [["unrated"], "state-unrated", "Unclassified"],
     [["suspicious"], "state-suspicious", "Slipping"],
     [["distracted"], "state-distracted", "Distracted"],
+    [["phone"], "state-phone", "Phone"],
     // Idle (no input) and device asleep / unknown are one "Away"; hovering a segment says which.
     [["idle", "unknown"], "state-idle", "Away"],
     [["paused"], "state-paused", "Paused"],
@@ -3639,9 +3688,7 @@ function bindEvents(): void {
   });
 
   document.getElementById("webcam-phone-use")?.addEventListener("change", (event) => {
-    webcamSettings.phoneUse = (event.target as HTMLInputElement).checked;
-    webcamHitStreak = 0;
-    paintWebcamDom();
+    void setWebcamEnabled((event.target as HTMLInputElement).checked);
   });
 
   document.getElementById("webcam-gpu")?.addEventListener("change", (event) => {
@@ -5196,6 +5243,21 @@ function paintRecordingClock(): void {
   }
 }
 
+/** Saved, because sessions run the webcam only when this is on. */
+async function setWebcamEnabled(enabled: boolean): Promise<void> {
+  webcamSettings.phoneUse = enabled;
+  webcamHitStreak = 0;
+  try {
+    settings = await invoke<SessionSettings>("update_settings", {
+      update: { webcam_enabled: enabled },
+    });
+  } catch (error) {
+    webcamError = errorText(error);
+  }
+  webcamSettings.phoneUse = settings.webcam_enabled;
+  paintWebcamDom();
+}
+
 async function setWebcamGpu(enabled: boolean): Promise<void> {
   try {
     settings = await invoke<SessionSettings>("update_settings", {
@@ -5266,7 +5328,8 @@ function applyWebcamFrame(frame: WebcamFrame): void {
   } else {
     webcamHitStreak = 0;
   }
-  if (webcamHitStreak >= 8) {
+  // During a session the session nudges, through the same voice and popup as everything else.
+  if (webcamHitStreak >= 8 && !snapshot?.current) {
     void fireWebcamAlert();
   }
   if (settingsView === "webcam" && activeTab === "settings") {
@@ -5472,6 +5535,10 @@ function stateTitle(current: CurrentSession | null): string {
     return "Paused";
   }
 
+  if (current.camera.phone) {
+    return current.camera.phone_distracted ? "On the phone" : "Phone in view";
+  }
+
   switch (current.focus?.state) {
     case "focused":
       return "Locked in";
@@ -5497,6 +5564,10 @@ function stateCopy(current: CurrentSession | null): string {
     return "No judgment recorded.";
   }
 
+  if (current.camera.phone_distracted) {
+    return "Put the phone down.";
+  }
+
   if (current.focus?.should_nudge) {
     return "You have been here long enough. Pay attention.";
   }
@@ -5511,6 +5582,10 @@ function stateClass(current: CurrentSession | null): string {
 
   if (current.status === "paused") {
     return "state-paused";
+  }
+
+  if (current.camera.phone) {
+    return current.camera.phone_distracted ? "state-distracted" : "state-suspicious";
   }
 
   return `state-${current.focus?.state ?? "neutral"}`;

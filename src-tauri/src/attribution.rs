@@ -11,6 +11,7 @@ const GRACE: Duration = Duration::from_millis(1500);
 const OTHER_WEBSITES_KEY: &str = "other-websites";
 pub const PAUSED_KEY: &str = "paused";
 pub const UNKNOWN_KEY: &str = "untracked";
+pub const PHONE_KEY: &str = "phone";
 pub const UNKNOWN_LABEL: &str = "Device asleep / unknown";
 pub const SUPERVISOR_KEY: &str = "supervisor";
 
@@ -91,6 +92,11 @@ impl Activity {
     /// The machine slept, froze, or would not report a window.
     pub fn unknown() -> Self {
         Self::marker(UNKNOWN_KEY, UNKNOWN_LABEL)
+    }
+
+    /// The webcam saw a phone in hand. Interrupts the window in front; counts as distracted.
+    pub fn phone() -> Self {
+        Self::marker(PHONE_KEY, "Phone")
     }
 
     fn marker(key: &str, label: &str) -> Self {

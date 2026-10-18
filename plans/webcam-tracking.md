@@ -1,10 +1,9 @@
 # Webcam Tracking
 
-Last updated: 2026-10-07
+Last updated: 2026-10-18
 
-The tracker runs as a Settings preview. Phone and away time are not written
-during a real session yet. That wiring, and how strictness changes a voice
-nudge, is the webcam-session leftover in `plans/STATUS.md`.
+The tracker runs as a Settings preview and, when the user turns it on, during
+every session (see Sessions below).
 
 ## Signals
 
@@ -50,9 +49,40 @@ webcam worker  --JSON-->  Tauri emits webcam-frame  -->  settings / session
   frames die here          never stored
 ```
 
-Session-only worker in Python; kill on stop.
+One worker serves both: the Settings page asks for preview JPEGs, a session
+runs it without them. Every reading goes to `SessionManager::record_webcam`
+(flags only).
+
+## Sessions
+
+The worker runs while a session is Active or Muted and "Turn on webcam
+monitoring" (saved as `webcam_enabled`) is on. Pause and Stop stop it within a
+second. After a failure (no camera, denied) sessions retry every 30 s.
+
+**Phone = its own span.** The first reading that sees a phone closes the
+window's span and opens a `phone` span (marker activity `phone`, state
+`phone`). It ends 2 s after the last reading that saw it. It counts as
+distracted time and also as `phone_seconds`, is drift for stretches and
+recovery, shows striped coral in the timeline with a Phone legend entry, and
+is a "Phone" row under Distracting in Apps & sites. The phone outranks the
+window and input Away; the site in front doesn't accrue time meanwhile. A span
+of its own (not an overlay on the window's span) keeps the gap-free tiling
+trivial: the fuzz test in `session.rs` interleaves webcam readings.
+
+**Phone nudges.** Distracted, popup ("Phone detected.") and first nudge after
+the strictness's Slipping grace: Gentle 15 s, Normal 8 s, Strict 5 s. Muted
+records but never nudges or shows the popup. **One cooldown for all nudges**
+(`FocusEngine::nudge_ready` / `note_nudge`): a window nudge and a phone nudge
+never play within the strictness cooldown of each other. A phone nudge plays
+through the same voice clip path (`metrics.nudges`, event detail `phone`).
+The Settings-page alarm only sounds outside a session.
+
+**Away.** Someone in view keeps a reader present without input, like media
+(up to 45 minutes). Nobody in view for 60 s with no input since is Away,
+dated back to when the camera last saw them. Input always wins. Away is
+recorded, never nudged.
 
 ## Out of scope
 
-Gaze-to-pixel, walked-away nudges (without a toggle), cloud models,
+Gaze-to-pixel, walked-away nudges, cloud models,
 frame storage, MediaPipe runtime wheels. A GPU toggle exists for the preview.

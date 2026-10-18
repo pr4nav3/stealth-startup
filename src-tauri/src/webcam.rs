@@ -7,9 +7,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const WORKER_EVENT: &str = "webcam-frame";
+/// The plan's floor. With the worker's 3-of-5 smoothing a phone shows up in under a second.
+const WORKER_FPS: &str = "4";
+/// After the worker fails (no camera, camera denied), sessions wait this long to try again.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 #[cfg(not(debug_assertions))]
 const WORKER_NAME: &str = "supervisor-webcam-worker";
 
@@ -62,10 +67,18 @@ impl WebcamFrame {
     }
 }
 
+/// Called for every reading, preview or not. Frames themselves never leave this module except
+/// as the preview JPEG, which only the Settings page asks for and nothing stores.
+pub type FrameObserver = fn(&AppHandle, &WebcamFrame);
+
+/// One worker serves both the Settings preview and live sessions.
 pub struct WebcamPreview {
     starting: Mutex<()>,
     stop: Mutex<Arc<AtomicBool>>,
     child: Mutex<Option<Child>>,
+    /// The running worker sends preview JPEGs.
+    preview: AtomicBool,
+    failed_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Default for WebcamPreview {
@@ -74,6 +87,8 @@ impl Default for WebcamPreview {
             starting: Mutex::new(()),
             stop: Mutex::new(Arc::new(AtomicBool::new(false))),
             child: Mutex::new(None),
+            preview: AtomicBool::new(false),
+            failed_at: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -85,6 +100,28 @@ impl Drop for WebcamPreview {
 }
 
 impl WebcamPreview {
+    pub fn is_preview(&self) -> bool {
+        self.preview.load(Ordering::SeqCst)
+    }
+
+    pub fn is_starting(&self) -> bool {
+        self.starting.try_lock().is_err()
+    }
+
+    /// Whether a session should leave the camera alone for now after a failure.
+    pub fn recently_failed(&self) -> bool {
+        self.failed_at
+            .lock()
+            .ok()
+            .and_then(|at| *at)
+            .is_some_and(|at| at.elapsed() < RETRY_AFTER)
+    }
+
+    fn mark_failed(&self) {
+        if let Ok(mut at) = self.failed_at.lock() {
+            *at = Some(Instant::now());
+        }
+    }
     fn take_child(&self) -> Option<Child> {
         self.child.lock().ok().and_then(|mut slot| slot.take())
     }
@@ -128,20 +165,46 @@ impl WebcamPreview {
     }
 }
 
-pub fn start_preview(app: AppHandle, state: &WebcamPreview, gpu: bool) -> Result<(), String> {
+/// Starts the worker unless one already serves: a preview worker also serves a session, and a
+/// session worker is replaced by a preview one when the Settings page asks for pictures.
+pub fn start_worker(
+    app: AppHandle,
+    state: &WebcamPreview,
+    gpu: bool,
+    preview: bool,
+    on_frame: FrameObserver,
+) -> Result<(), String> {
     let _one_start_at_a_time = state
         .starting
         .lock()
         .map_err(|_| "webcam lock unavailable".to_string())?;
-    if state.is_running() {
+    if state.is_running() && (state.is_preview() || !preview) {
         return Ok(());
     }
     stop_preview(state);
+    let started = spawn_worker(app, state, gpu, preview, on_frame);
+    if started.is_err() {
+        state.mark_failed();
+    }
+    started
+}
+
+fn spawn_worker(
+    app: AppHandle,
+    state: &WebcamPreview,
+    gpu: bool,
+    preview: bool,
+    on_frame: FrameObserver,
+) -> Result<(), String> {
     camera_access()?;
 
     let mut command = worker_command(&app)?;
+    if preview {
+        command.arg("--preview");
+    }
     command
-        .arg("--preview")
+        .arg("--fps")
+        .arg(WORKER_FPS)
         .arg("--device")
         .arg(if gpu { "gpu" } else { "cpu" })
         .stdout(Stdio::piped())
@@ -164,8 +227,13 @@ pub fn start_preview(app: AppHandle, state: &WebcamPreview, gpu: bool) -> Result
         .ok_or_else(|| "webcam worker stdout missing".to_string())?;
     let stop = state.replace_stop_flag()?;
     state.store_child(child)?;
+    state.preview.store(preview, Ordering::SeqCst);
+    if let Ok(mut at) = state.failed_at.lock() {
+        *at = None;
+    }
 
-    std::thread::spawn(move || read_worker(app, stdout, stop));
+    let failed_at = Arc::clone(&state.failed_at);
+    std::thread::spawn(move || read_worker(app, stdout, stop, on_frame, failed_at));
     Ok(())
 }
 
@@ -179,7 +247,13 @@ pub fn stop_preview(state: &WebcamPreview) {
     }
 }
 
-fn read_worker<R: std::io::Read>(app: AppHandle, stdout: R, stop: Arc<AtomicBool>) {
+fn read_worker<R: std::io::Read>(
+    app: AppHandle,
+    stdout: R,
+    stop: Arc<AtomicBool>,
+    on_frame: FrameObserver,
+    failed_at: Arc<Mutex<Option<Instant>>>,
+) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         if stop.load(Ordering::SeqCst) {
@@ -194,6 +268,7 @@ fn read_worker<R: std::io::Read>(app: AppHandle, stdout: R, stop: Arc<AtomicBool
         }
         match serde_json::from_str::<WebcamFrame>(line) {
             Ok(frame) => {
+                on_frame(&app, &frame);
                 let _ = app.emit(WORKER_EVENT, &frame);
             }
             Err(_) => {
@@ -205,6 +280,9 @@ fn read_worker<R: std::io::Read>(app: AppHandle, stdout: R, stop: Arc<AtomicBool
         }
     }
     if !stop.load(Ordering::SeqCst) {
+        if let Ok(mut at) = failed_at.lock() {
+            *at = Some(Instant::now());
+        }
         let _ = app.emit(
             WORKER_EVENT,
             WebcamFrame::error_frame("Webcam worker stopped"),
