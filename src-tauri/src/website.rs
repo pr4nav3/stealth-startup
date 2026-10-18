@@ -93,8 +93,9 @@ pub enum Address {
     NotAddress,
 }
 
+/// `chrome#2` (a second Chrome install, such as Canary) is a browser too.
 pub fn is_browser(app_id: &str) -> bool {
-    BROWSERS.contains(&app_id)
+    BROWSERS.contains(&crate::app_identity::stem(app_id))
 }
 
 pub fn is_new_tab_title(title: &str) -> bool {

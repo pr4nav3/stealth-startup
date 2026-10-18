@@ -68,6 +68,19 @@ pub fn keeps_display_awake(pid: u64) -> bool {
     })
 }
 
+/// The bundle identifier ("com.microsoft.VSCode") of the app bundle at `path`. It survives
+/// renames and updates, unlike the app's display name.
+pub fn bundle_identifier(path: &str) -> Option<String> {
+    use objc2_foundation::{NSBundle, NSString};
+
+    if path.is_empty() {
+        return None;
+    }
+    let bundle = NSBundle::bundleWithPath(&NSString::from_str(path))?;
+    let id = bundle.bundleIdentifier()?.to_string();
+    Some(id.trim().to_string()).filter(|id| !id.is_empty())
+}
+
 /// `/System/Library/CoreServices` as macOS reports it: home of the Dock, Spotlight,
 /// Notification Center, Control Center, Finder, and the login window.
 pub fn core_services_dir() -> Option<&'static str> {

@@ -1,4 +1,5 @@
 mod activity;
+mod app_identity;
 mod attribution;
 mod focus;
 mod session;
@@ -188,10 +189,7 @@ fn resolve_rule_input(
     state: State<'_, AppState>,
 ) -> Result<focus::AppRule, String> {
     let names = lock_sessions(&state)?.app_names().unwrap_or_default();
-    let rule = focus::AppRule::from_input_with_apps(&text, classification, &names).ok_or_else(|| {
-        "Enter a website (youtube.com) or an app name (Spotify), not a page title or path"
-            .to_string()
-    })?;
+    let rule = focus::AppRule::from_input_with_apps(&text, classification, &names)?;
     if rule.names_a_browser() {
         return Err("Browsers always count as Neutral. Add the website instead (youtube.com).".to_string());
     }

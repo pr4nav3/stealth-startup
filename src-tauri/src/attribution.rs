@@ -160,8 +160,9 @@ impl Source {
     }
 }
 
+/// The app's history key once assigned (see `app_identity`), else its program name.
 pub fn app_id(sample: &ActivitySample) -> String {
-    sample.app_name.to_lowercase()
+    sample.app_key.clone().unwrap_or_else(|| sample.app_name.to_lowercase())
 }
 
 #[derive(Debug)]
@@ -267,6 +268,8 @@ mod tests {
             app_name: app.to_string(),
             app_label: if app == "chrome" { "Google Chrome" } else { app }.to_string(),
             process_path: format!("C:\\Apps\\{app}.exe"),
+            app_identity: String::new(),
+            app_key: None,
             process_id: 1,
             window_title: (!title.is_empty()).then(|| title.to_string()),
             window_id: window.to_string(),
@@ -395,6 +398,23 @@ mod tests {
             .last()
             .expect("samples");
         assert_eq!(late.kind, ActivityKind::OtherWebsites);
+    }
+
+    #[test]
+    fn the_assigned_app_key_names_the_app_and_its_browser_pages() {
+        let mut resolver = Resolver::default();
+        let mut canary = chrome("History", Some("chrome://history"));
+        canary.app_key = Some("chrome#2".to_string());
+        let pages = resolver.resolve(&canary, at(0));
+        assert_eq!((pages.kind, pages.key.as_str()), (ActivityKind::App, "chrome#2"));
+        canary.browser = Some(BrowserRead { address: Some("github.com/x".into()), editing: false });
+        let site = resolver.resolve(&canary, at(1000));
+        assert_eq!((site.kind, site.app_id.as_str()), (ActivityKind::Website, "chrome#2"));
+
+        let mut tool = sample("tool", "9", "Main", None, false);
+        tool.browser = None;
+        tool.app_key = Some("tool#2".to_string());
+        assert_eq!(resolver.resolve(&tool, at(2000)).key, "tool#2");
     }
 
     #[test]

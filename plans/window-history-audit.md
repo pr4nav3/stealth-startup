@@ -83,12 +83,22 @@ observation quality, stable app identity, and what the focus score actually mean
    the first Edit control outside page content. This needs acceptance cases for
    Firefox, browser search/sidebar controls, redirects, toolbar rebuilds, and
    localized browsers. An unreadable address must remain visibly unknown.
-3. **App identity is not durable enough.** Windows executable stems and macOS
-   captured app names can collide. Prefer native installed-app identity with a
-   path fallback, and keep display names separate. Current native-name refresh
-   depends on a running process or a newer saved observation; it is not an
-   installed-app catalog. Historical shell cleanup is a limited compatibility
-   mapping, not a general guarantee that every shell artifact is recognized.
+3. **App identity (mostly resolved, schema v11).** Each sample carries a native
+   identity (`app_identity.rs`): a packaged app's AUMID; else the exe name plus
+   version-info CompanyName/ProductName; else the install path with version
+   folders ignored; java/python/node/electron and other shared hosts add the
+   jar/module/script from the command line; macOS uses the bundle identifier.
+   The `app_identity` table maps identities to keys (unique). The first identity
+   whose label fits a stem's stored history keeps the old stem as its key, so old
+   spans and rules carry on; others get `stem#2`, shown as "Name (2)". Shared
+   hosts and Supervisor's marker keys are never inherited. Unresolved
+   ApplicationFrameHost frames are a shell surface. v11 rewrites name-valued app
+   rules to a key only when exactly one recorded app has that name. Remaining:
+   history recorded before v11 under one stem by two different programs cannot be
+   split (it stays with whichever identity fits its latest label); a typed name rule
+   that two apps share still rates both (new typed names that are ambiguous are
+   refused); macOS bundle-id capture needs a real Mac run. Historical shell
+   cleanup is still a limited compatibility mapping.
 4. **Capture failures still count with idle time in the headline.** The score
    is now Relevant time only (schema v7): Neutral and unrated time no longer
    count as focus, unrated time has its own total, and rating an app rescores

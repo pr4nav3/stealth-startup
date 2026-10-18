@@ -74,8 +74,9 @@ pub fn classify_foreground_surface(identity: &RawForegroundIdentity) -> Foregrou
         return ForegroundDisposition::ShellSurface;
     }
 
-    if exe == "applicationframehost" && title.is_none() {
-        // A Store-app frame whose app could not be resolved and has no title: nothing to credit.
+    if exe == "applicationframehost" {
+        // A Store-app frame whose app could not be resolved. Every Store app shares this host,
+        // so crediting it would mix them up; the window the user came from keeps the time.
         return ForegroundDisposition::ShellSurface;
     }
 
@@ -395,6 +396,17 @@ mod tests {
             classify_foreground_surface(&identity("Spotify.exe", "Windows.UI.Core.CoreWindow", "Spotify", false)),
             ForegroundDisposition::Sample
         );
+    }
+
+    #[test]
+    fn an_unresolved_store_app_frame_is_never_credited() {
+        for title in ["", "Calculator", "Settings"] {
+            assert_eq!(
+                classify_foreground_surface(&identity("ApplicationFrameHost.exe", "ApplicationFrameWindow", title, false)),
+                ForegroundDisposition::ShellSurface,
+                "{title}"
+            );
+        }
     }
 
     #[test]
