@@ -2,7 +2,7 @@
 
 Ponytail applies on coding work: laziest solution that actually works, stdlib and native features first, no extra dependency unless this phase needs it, one runnable check for non-trivial logic. Off: "stop ponytail" / "normal mode".
 
-This repo does not vendor ponytail. Cursor loads the full skill from the machine. Codex, Claude Code, and other tools only see this file unless ponytail is copied into that tool.
+Claude Code loads the ponytail skills from `.claude/skills/` (committed, so worktree sessions get them too). Cursor loads its own copy from the machine. Other tools only see this file. To update, re-copy `skills/*/SKILL.md` from the ponytail repo into `.claude/skills/`.
 
 Supervisor-specific defaults:
 

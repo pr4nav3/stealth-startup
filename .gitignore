@@ -21,3 +21,4 @@ webcam_bakeoff/eval/youtube/**
 .venv-webcam-tools/
 Ultralytics/
 *.pt
+.claude/worktrees/
