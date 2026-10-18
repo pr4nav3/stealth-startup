@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Supervisor Chatterbox Nano phrase generator.
 
-This is the app worker, not the research bakeoff harness. It accepts explicit
-paths from the Rust backend, writes cached WAV clips, and exits so the main app
-never keeps the model resident.
+CLI one-shot still works. `--serve` keeps the model loaded and reads one JSON
+request per stdin line until stdin closes. The desktop app owns the process.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, TextIO, Tuple
 
 
 WORKER_API_VERSION = 1
@@ -35,6 +34,15 @@ def utc_now() -> str:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower()).strip("_")
     return slug or "phrase"
+
+
+def same_reference(current: Optional[Path], incoming: Path) -> bool:
+    if current is None:
+        return False
+    try:
+        return current.resolve() == incoming.resolve()
+    except OSError:
+        return current == incoming
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -60,9 +68,12 @@ def write_json(path: Path, data: Dict[str, Any]) -> None:
 
 def load_phrases(path: Path) -> List[Dict[str, str]]:
     data = read_json(path)
-    phrases = data.get("phrases")
+    return normalize_phrases(data.get("phrases"))
+
+
+def normalize_phrases(phrases: Any) -> List[Dict[str, str]]:
     if not isinstance(phrases, list) or not phrases:
-        raise WorkerError(f"{path} must contain a non-empty 'phrases' list")
+        raise WorkerError("request must contain a non-empty 'phrases' list")
 
     normalized: List[Dict[str, str]] = []
     seen_ids = set()
@@ -99,12 +110,14 @@ def patch_perth_watermarker() -> bool:
     return True
 
 
-def load_model(args: argparse.Namespace) -> tuple[Any, Any, bool]:
+def load_model(args: argparse.Namespace) -> tuple[Any, Any, bool, Dict[str, int]]:
+    import_started = time.perf_counter()
     try:
         import torch
         from chatterbox.tts_turbo import ChatterboxTurboTTS
     except Exception as exc:
         raise WorkerError(f"Could not import the Chatterbox Nano runtime: {exc}") from exc
+    imports_ms = ms_since(import_started)
 
     if args.threads is not None:
         torch.set_num_threads(args.threads)
@@ -112,17 +125,32 @@ def load_model(args: argparse.Namespace) -> tuple[Any, Any, bool]:
         torch.manual_seed(args.seed)
 
     patched = patch_perth_watermarker()
+    load_started = time.perf_counter()
     model = ChatterboxTurboTTS.from_local(str(args.model_dir), device=args.device, nano=True)
-    return model, torch, patched
+    return model, torch, patched, {
+        "imports": imports_ms,
+        "model_load": ms_since(load_started),
+    }
 
 
-def configure_runtime_environment(out_dir: Path) -> None:
-    hf_home = out_dir / ".hf_cache"
+def configure_runtime_environment(cache_dir: Path) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    hf_home = cache_dir / ".hf_cache"
     os.environ.setdefault("HF_HOME", str(hf_home))
     os.environ.setdefault("HF_HUB_CACHE", str(hf_home / "hub"))
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-    os.environ.setdefault("NUMBA_CACHE_DIR", str(out_dir / ".numba_cache"))
+    os.environ.setdefault("NUMBA_CACHE_DIR", str(cache_dir / ".numba_cache"))
+
+
+def ms_since(started: float) -> int:
+    return max(0, round((time.perf_counter() - started) * 1000))
+
+
+def prepare_voice(model: Any, reference: Path) -> int:
+    started = time.perf_counter()
+    model.prepare_conditionals(str(reference))
+    return ms_since(started)
 
 
 def generate_clip(
@@ -131,62 +159,89 @@ def generate_clip(
     torch_module: Any,
     phrase: Dict[str, str],
     output_path: Path,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], int, int]:
     import torchaudio as ta
 
-    started = time.perf_counter()
+    synth_started = time.perf_counter()
     wav = model.generate(
         phrase["text"],
-        audio_prompt_path=str(args.reference),
         temperature=args.temperature,
         top_p=args.top_p,
         top_k=args.top_k,
         repetition_penalty=args.repetition_penalty,
     )
+    synthesis_ms = ms_since(synth_started)
+    write_started = time.perf_counter()
     save_wav = wav.detach().cpu() if hasattr(wav, "detach") else torch_module.as_tensor(wav).detach().cpu()
     if len(save_wav.shape) == 1:
         save_wav = save_wav.unsqueeze(0)
 
     ta.save(str(output_path), save_wav, model.sr, encoding="PCM_S", bits_per_sample=16)
-    elapsed = time.perf_counter() - started
     audio_seconds = float(save_wav.shape[-1]) / float(model.sr)
-    return {
-        "phrase_id": phrase["id"],
-        "tone": phrase["tone"],
-        "text": phrase["text"],
-        "path": str(output_path.resolve()),
-        "generation_seconds": round(elapsed, 3),
-        "audio_seconds": round(audio_seconds, 3),
-    }
+    return (
+        {
+            "phrase_id": phrase["id"],
+            "tone": phrase["tone"],
+            "text": phrase["text"],
+            "path": str(output_path.resolve()),
+            "generation_seconds": round((synthesis_ms + ms_since(write_started)) / 1000, 3),
+            "audio_seconds": round(audio_seconds, 3),
+        },
+        synthesis_ms,
+        ms_since(write_started),
+    )
 
 
-def run(args: argparse.Namespace) -> int:
-    started_at = utc_now()
-    if not args.model_dir.exists():
-        raise WorkerError(f"Model directory not found: {args.model_dir}")
-    if not args.reference.exists():
-        raise WorkerError(f"Reference audio not found: {args.reference}")
-    if args.out_dir.exists() and any(args.out_dir.iterdir()) and not args.overwrite:
-        raise WorkerError(f"Output directory is not empty: {args.out_dir}")
+def generate_phrases(
+    args: argparse.Namespace,
+    model: Any,
+    torch_module: Any,
+    phrases: List[Dict[str, str]],
+    out_dir: Path,
+    reference: Path,
+    current_reference: Optional[Path],
+    overwrite: bool,
+) -> Tuple[List[Dict[str, Any]], Path, Dict[str, int], bool]:
+    if not reference.exists():
+        raise WorkerError(f"Reference audio not found: {reference}")
+    if out_dir.exists() and any(out_dir.iterdir()) and not overwrite:
+        raise WorkerError(f"Output directory is not empty: {out_dir}")
 
-    phrases = load_phrases(args.phrases)
-    clips_dir = args.out_dir / "clips"
+    clips_dir = out_dir / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
-    configure_runtime_environment(args.out_dir)
 
-    load_started = time.perf_counter()
-    model, torch_module, watermarker_patched = load_model(args)
-    model_load_seconds = round(time.perf_counter() - load_started, 3)
+    resolved = reference.resolve()
+    reused_voice = same_reference(current_reference, resolved)
+    condition_ms = 0 if reused_voice else prepare_voice(model, resolved)
 
     clips: List[Dict[str, Any]] = []
-    generation_started = time.perf_counter()
+    synthesis_ms = 0
+    write_ms = 0
     for index, phrase in enumerate(phrases, start=1):
         output_path = clips_dir / f"{index:02d}_{slugify(phrase['id'])}.wav"
-        if output_path.exists() and not args.overwrite:
+        if output_path.exists() and not overwrite:
             raise WorkerError(f"Clip already exists: {output_path}")
-        clips.append(generate_clip(args, model, torch_module, phrase, output_path))
+        clip, clip_synth, clip_write = generate_clip(args, model, torch_module, phrase, output_path)
+        clips.append(clip)
+        synthesis_ms += clip_synth
+        write_ms += clip_write
 
-    generation_seconds = round(time.perf_counter() - generation_started, 3)
+    return clips, resolved, {
+        "condition": condition_ms,
+        "synthesis": synthesis_ms,
+        "wav_write": write_ms,
+    }, reused_voice
+
+
+def write_report(
+    out_dir: Path,
+    args: argparse.Namespace,
+    model: Any,
+    watermarker_patched: bool,
+    clips: List[Dict[str, Any]],
+    phases_ms: Dict[str, int],
+    started_at: str,
+) -> None:
     report = {
         "schema_version": 1,
         "worker_api": WORKER_API_VERSION,
@@ -195,8 +250,13 @@ def run(args: argparse.Namespace) -> int:
         "completed_at": utc_now(),
         "engine": "chatterbox-nano",
         "device": args.device,
-        "model_load_seconds": model_load_seconds,
-        "generation_total_seconds": generation_seconds,
+        "model_load_seconds": round(phases_ms.get("model_load", 0) / 1000, 3),
+        "generation_total_seconds": round(
+            (phases_ms.get("condition", 0) + phases_ms.get("synthesis", 0) + phases_ms.get("wav_write", 0))
+            / 1000,
+            3,
+        ),
+        "phases_ms": phases_ms,
         "sample_rate": model.sr,
         "clip_count": len(clips),
         "clips": clips,
@@ -204,16 +264,147 @@ def run(args: argparse.Namespace) -> int:
             "noop_watermarker": watermarker_patched,
         },
     }
-    write_json(args.out_dir / "worker_report.json", report)
+    write_json(out_dir / "worker_report.json", report)
+
+
+def run(args: argparse.Namespace) -> int:
+    started_at = utc_now()
+    if not args.model_dir.exists():
+        raise WorkerError(f"Model directory not found: {args.model_dir}")
+    phrases = load_phrases(args.phrases)
+    configure_runtime_environment(args.cache_dir or args.out_dir)
+
+    model, torch_module, watermarker_patched, load_phases = load_model(args)
+    clips, _, gen_phases, _ = generate_phrases(
+        args,
+        model,
+        torch_module,
+        phrases,
+        args.out_dir,
+        args.reference,
+        None,
+        args.overwrite,
+    )
+    phases_ms = {**load_phases, **gen_phases}
+    write_report(args.out_dir, args, model, watermarker_patched, clips, phases_ms, started_at)
+    return 0
+
+
+def reply(stream: TextIO, payload: Dict[str, Any]) -> None:
+    stream.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    stream.flush()
+
+
+def serve(args: argparse.Namespace) -> int:
+    if not args.model_dir.exists():
+        raise WorkerError(f"Model directory not found: {args.model_dir}")
+    configure_runtime_environment(args.cache_dir or args.model_dir)
+
+    # Libraries print to stdout. Keep JSON replies on the original pipe.
+    replies = sys.stdout
+    sys.stdout = sys.stderr
+
+    model = None
+    torch_module = None
+    watermarker_patched = False
+    load_phases = {"imports": 0, "model_load": 0}
+    current_reference: Optional[Path] = None
+
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            reply(replies, {"ok": False, "id": None, "error": f"invalid json: {exc}"})
+            continue
+        if not isinstance(request, dict):
+            reply(replies, {"ok": False, "id": None, "error": "request must be an object"})
+            continue
+
+        request_id = request.get("id")
+        op = str(request.get("op") or "generate")
+        if op == "shutdown":
+            reply(replies, {"ok": True, "id": request_id, "op": "shutdown"})
+            return 0
+        if op != "generate":
+            reply(replies, {"ok": False, "id": request_id, "error": f"unknown op: {op}"})
+            continue
+
+        try:
+            started_at = utc_now()
+            phrases = normalize_phrases(request.get("phrases"))
+            reference = Path(str(request.get("reference") or "")).expanduser()
+            out_dir = Path(str(request.get("out_dir") or "")).expanduser()
+            if not str(reference) or not str(out_dir):
+                raise WorkerError("generate requires reference and out_dir")
+            overwrite = bool(request.get("overwrite", True))
+
+            reused_model = model is not None
+            if model is None:
+                model, torch_module, watermarker_patched, load_phases = load_model(args)
+
+            clips, current_reference, gen_phases, reused_voice = generate_phrases(
+                args,
+                model,
+                torch_module,
+                phrases,
+                out_dir,
+                reference.resolve(),
+                current_reference,
+                overwrite,
+            )
+            phases_ms = {
+                "imports": 0 if reused_model else load_phases["imports"],
+                "model_load": 0 if reused_model else load_phases["model_load"],
+                **gen_phases,
+            }
+            write_report(out_dir, args, model, watermarker_patched, clips, phases_ms, started_at)
+            reply(
+                replies,
+                {
+                    "ok": True,
+                    "id": request_id,
+                    "loaded": True,
+                    "reused_model": reused_model,
+                    "reused_voice": reused_voice,
+                    "phases_ms": phases_ms,
+                },
+            )
+        except WorkerError as exc:
+            reply(
+                replies,
+                {
+                    "ok": False,
+                    "id": request_id,
+                    "error": str(exc),
+                    "loaded": model is not None,
+                },
+            )
+        except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
+            reply(
+                replies,
+                {
+                    "ok": False,
+                    "id": request_id,
+                    "error": str(exc),
+                    "loaded": model is not None,
+                },
+            )
+            return 1
     return 0
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate Supervisor voice clips with Chatterbox Nano.")
+    parser.add_argument("--serve", action="store_true")
     parser.add_argument("--model-dir", type=Path, required=True)
-    parser.add_argument("--reference", type=Path, required=True)
-    parser.add_argument("--phrases", type=Path, required=True)
-    parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--reference", type=Path)
+    parser.add_argument("--phrases", type=Path)
+    parser.add_argument("--out-dir", type=Path)
+    parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--threads", type=int)
@@ -224,18 +415,48 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repetition-penalty", type=float, default=1.2)
     args = parser.parse_args(argv)
     args.model_dir = args.model_dir.expanduser().resolve()
+    if args.cache_dir:
+        args.cache_dir = args.cache_dir.expanduser().resolve()
+    if args.threads is not None and args.threads <= 0:
+        raise WorkerError("--threads must be greater than zero")
+    if args.serve:
+        return args
+    if not args.reference or not args.phrases or not args.out_dir:
+        raise WorkerError("--reference, --phrases, and --out-dir are required unless --serve")
     args.reference = args.reference.expanduser().resolve()
     args.phrases = args.phrases.expanduser().resolve()
     args.out_dir = args.out_dir.expanduser().resolve()
-    if args.threads is not None and args.threads <= 0:
-        raise WorkerError("--threads must be greater than zero")
     return args
+
+
+def self_check() -> int:
+    assert same_reference(None, Path("a.wav")) is False
+    assert same_reference(Path("a.wav"), Path("a.wav")) is True
+    phrases = normalize_phrases(
+        [{"id": "hi", "tone": "gentle", "text": "Back to the task."}]
+    )
+    assert phrases[0]["id"] == "hi"
+    try:
+        normalize_phrases([])
+        raise AssertionError("empty phrases should fail")
+    except WorkerError:
+        pass
+    request = json.loads(
+        '{"op":"generate","id":"1","reference":"ref.wav","out_dir":"out","phrases":[{"id":"a","tone":"gentle","text":"Hi."}]}'
+    )
+    assert request["op"] == "generate" and len(normalize_phrases(request["phrases"])) == 1
+    print("self-check ok")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     multiprocessing.freeze_support()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv == ["--self-check"]:
+        return self_check()
     try:
-        return run(parse_args(argv))
+        args = parse_args(argv)
+        return serve(args) if args.serve else run(args)
     except WorkerError as exc:
         print(f"voice worker error: {exc}", file=sys.stderr)
         if os.getenv("SUPERVISOR_VOICE_WORKER_DEBUG") and exc.__cause__ is not None:

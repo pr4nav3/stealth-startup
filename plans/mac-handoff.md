@@ -1,5 +1,7 @@
 # Mac handoff: things to test and fix on a real Mac
 
+**Original Mac checklist** from before website-identity supervision. Baseline now is `feat/window-supervision`: Windows reads the address bar, titles are never stored, `browser_macos.rs` is a stub. Do not implement window capture or title persistence from this file. Build, signing, permissions, RAM, shell surfaces, and webcam packaging below can still be useful.
+
 Nothing below has been compiled or run on macOS. All development so far was on Windows.
 Work through it on a Mac before any Mac release, and tick items off in this file.
 
@@ -43,6 +45,14 @@ compile). Nothing below has executed on a Mac.
       be more than 2% of total RAM (the old code counted only unused pages and was far too
       small).
 
+- [ ] Media keeps an idle user present (`keeps_display_awake` in `macos.rs`, IOKit
+      `IOPMCopyAssertionsByProcess`). With no input for 3+ minutes, the session must stay on
+      the site (not Away) while: a YouTube video plays in Chrome, in Safari, and in Firefox,
+      and during a Zoom or Teams call. It must go Away when the video is paused, when it plays
+      in a background tab, and when only music plays. If Safari's assertion is held by a
+      WebKit helper that does not set `AssertionOnBehalfOfPID` to Safari, Safari video will
+      read as Away: check `pmset -g assertions` while it plays.
+
 ## 3. Removed: parsing `ps` and `df`
 
 Replaced by the calls in section 2. Nothing left to swap. Still confirm voice cloning does
@@ -80,8 +90,9 @@ is ignored when it does not (the desktop). The login window gives no sample. Uti
       looks like the desktop and gets ignored. Confirm that, and whether the app should ask
       for Screen Recording before trusting this.
 - [ ] The login window must not record a sample.
-- [ ] Safari and Chrome window titles on macOS. The title cleanup only strips suffixes seen
-      on Windows (` - Google Chrome`). If Mac titles differ, they will be stored whole.
+- [ ] Safari and Chrome on macOS. Address-bar read is a stub, so identity falls back to
+      titles. Titles are not stored. Confirm the fallback is tolerable until
+      `browser_macos.rs` exists.
 
 ## 6b. Webcam packaging on a Mac
 

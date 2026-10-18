@@ -4,13 +4,21 @@ mod activity_normalize;
 #[cfg(target_os = "windows")]
 #[path = "activity_win32.rs"]
 mod activity_win32;
+// Each platform reads the browser address its own way behind the same `read_browser` shape.
+#[cfg(target_os = "macos")]
+#[path = "browser_macos.rs"]
+mod browser_macos;
+#[cfg(target_os = "windows")]
+#[path = "browser_win32.rs"]
+mod browser_win32;
 
 #[cfg(target_os = "windows")]
 use activity_normalize::idle_elapsed_seconds;
+#[cfg(not(target_os = "windows"))]
 use activity_normalize::normalize_title_text;
 
-pub use activity_normalize::mark_subject;
 use serde::Serialize;
+use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -19,8 +27,11 @@ pub struct ActivitySample {
     pub captured_at: String,
     pub platform: &'static str,
     pub app_name: String,
+    pub app_label: String,
     pub process_path: String,
     pub process_id: u64,
+    /// Read for attribution only; never sent to the UI or stored.
+    #[serde(skip)]
     pub window_title: Option<String>,
     pub window_id: String,
     pub bounds: Bounds,
@@ -28,6 +39,21 @@ pub struct ActivitySample {
     pub permissions: CapturePermissions,
     /// OS shell UI (Start, Search, Alt-Tab, taskbar...). Sessions keep the previous window.
     pub shell_surface: bool,
+    /// Set only when a browser is in front.
+    #[serde(skip)]
+    pub browser: Option<BrowserRead>,
+    /// The app in front is playing media, so a user who isn't typing may be watching or
+    /// listening. Looked up only once input has stopped; `false` until then.
+    #[serde(skip)]
+    pub media_playing: bool,
+}
+
+/// What the browser's address bar said. `address: None` means it could not be read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BrowserRead {
+    pub address: Option<String>,
+    /// The address bar has keyboard focus, so its text may be typing, not the page.
+    pub editing: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -47,18 +73,30 @@ pub struct CapturePermissions {
 #[serde(rename_all = "snake_case")]
 pub enum PermissionState {
     Granted,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Missing,
     #[allow(dead_code)]
     NotRequired,
 }
 
 pub fn current_activity_sample() -> Result<ActivitySample, String> {
-    let permissions = capture_permissions();
-    let idle_seconds = idle_seconds();
+    let mut sample = capture_foreground(capture_permissions(), idle_seconds())?;
+    let input_stopped = sample
+        .idle_seconds
+        .is_some_and(|seconds| seconds >= crate::focus::AWAY_AFTER_SECONDS as f64);
+    if input_stopped && !sample.shell_surface {
+        sample.media_playing = media_playing_in_front(&sample);
+    }
+    Ok(sample)
+}
 
+fn capture_foreground(
+    permissions: CapturePermissions,
+    idle_seconds: Option<f64>,
+) -> Result<ActivitySample, String> {
     #[cfg(target_os = "windows")]
     {
-        return activity_win32::capture_current(permissions, idle_seconds);
+        activity_win32::capture_current(permissions, idle_seconds)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -92,12 +130,46 @@ pub fn current_activity_sample() -> Result<ActivitySample, String> {
                 ForegroundDisposition::ShellSurface => sample.shell_surface = true,
                 ForegroundDisposition::Sample => {}
             }
+            if crate::website::is_browser(&sample.app_name.to_lowercase()) {
+                sample.browser = Some(browser_macos::read_browser(sample.process_id));
+            }
         }
 
         Ok(sample)
     }
 }
 
+/// Windows: the system media controls. macOS: a "keep the display awake" power assertion,
+/// which browsers hold only while video plays on screen and call apps hold during calls.
+#[cfg(target_os = "windows")]
+fn media_playing_in_front(sample: &ActivitySample) -> bool {
+    activity_win32::media_playing_in_front(sample)
+}
+
+#[cfg(target_os = "macos")]
+fn media_playing_in_front(sample: &ActivitySample) -> bool {
+    crate::macos::keeps_display_awake(sample.process_id)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn media_playing_in_front(_sample: &ActivitySample) -> bool {
+    false
+}
+
+/// Resolve old app keys against processes that Windows can still identify.
+pub fn running_app_labels(keys: &[String]) -> HashMap<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        activity_win32::running_app_labels(keys)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = keys;
+        HashMap::new()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 fn sample_from_active_window(
     active_window: active_win_pos_rs::ActiveWindow,
     captured_at: String,
@@ -107,6 +179,7 @@ fn sample_from_active_window(
     ActivitySample {
         captured_at,
         platform: platform(),
+        app_label: activity_normalize::app_label(&active_window.app_name, None),
         app_name: active_window.app_name,
         process_path: active_window.process_path.to_string_lossy().into_owned(),
         process_id: active_window.process_id,
@@ -121,13 +194,17 @@ fn sample_from_active_window(
         idle_seconds,
         permissions,
         shell_surface: false,
+        browser: None,
+        media_playing: false,
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn non_empty(value: String) -> Option<String> {
     normalize_title_text(&value)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn platform() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
@@ -192,10 +269,10 @@ fn macos_screen_recording_granted() -> bool {
 }
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
-    use active_win_pos_rs::WindowPosition;
-    use std::path::PathBuf;
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn normalizes_empty_title_to_none() {
         let sample = sample_from_active_window(
@@ -215,6 +292,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn trims_title_and_preserves_bounds() {
         let sample = sample_from_active_window(
@@ -238,29 +316,51 @@ mod tests {
         );
     }
 
-    #[cfg(all(test, target_os = "windows"))]
+    /// Switch between browsers, tabs, and apps while it runs:
+    /// `cargo test manual_foreground_probe -- --ignored --nocapture`
+    #[cfg(target_os = "windows")]
     #[test]
-    #[ignore = "manual: prints foreground samples every 500ms"]
+    #[ignore = "manual: prints what each sample resolves to, every 500ms for 30s"]
     fn manual_foreground_probe() {
-        use std::{thread, time::Duration};
+        use std::time::{Duration, Instant};
 
-        for _ in 0..20 {
+        let started = Instant::now();
+        let mut resolver = crate::attribution::Resolver::default();
+        let samples = std::env::var("PROBE_SAMPLES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(60);
+        for _ in 0..samples {
+            let before = Instant::now();
             match current_activity_sample() {
-                Ok(sample) => println!("{sample:#?}"),
+                Ok(sample) => {
+                    let took = before.elapsed();
+                    let activity = resolver.resolve(&sample, started.elapsed());
+                    println!(
+                        "{:>5}ms  {:<24} {:?} -> {:?} {} [{:?}]",
+                        took.as_millis(),
+                        sample.app_label,
+                        sample.browser,
+                        activity.kind,
+                        activity.label,
+                        activity.source,
+                    );
+                }
                 Err(error) => println!("ERR: {error}"),
             }
-            thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn active_window(title: &str) -> active_win_pos_rs::ActiveWindow {
         active_win_pos_rs::ActiveWindow {
             title: title.to_string(),
-            process_path: PathBuf::from("/Applications/Test.app"),
+            process_path: std::path::PathBuf::from("/Applications/Test.app"),
             app_name: "Test".to_string(),
             window_id: "window-1".to_string(),
             process_id: 42,
-            position: WindowPosition {
+            position: active_win_pos_rs::WindowPosition {
                 x: 10.0,
                 y: 20.0,
                 width: 800.0,

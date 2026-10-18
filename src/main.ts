@@ -4,7 +4,8 @@ import "./styles.css";
 
 type PermissionState = "granted" | "missing" | "not_required";
 type RuleClassification = "focused" | "neutral" | "distracting";
-type RuleTarget = "app_name" | "process_path" | "window_title";
+type RuleTarget = "app" | "website";
+type ActivityKind = "app" | "website" | "browser_pages" | "browser_local" | "other_websites";
 type RuleScope = "settings" | "preflight";
 type Strictness = "gentle" | "normal" | "strict";
 type SessionStatus = "idle" | "active" | "paused" | "snoozed" | "complete";
@@ -20,7 +21,6 @@ type VoiceBusy = "download-model" | "delete-model" | "generate-clips" | "delete-
 type ClipGeneratePhase = "working" | "ready" | "error";
 type ClipGenerate = {
   phraseId: string;
-  profileId: string;
   phase: ClipGeneratePhase;
   error: string;
 };
@@ -42,13 +42,20 @@ interface ActivitySample {
   captured_at: string;
   platform: string;
   app_name: string;
+  app_label: string;
   process_path: string;
   process_id: number;
-  window_title: string | null;
   window_id: string;
   bounds: Bounds;
   idle_seconds: number | null;
   permissions: CapturePermissions;
+}
+
+/** What is being supervised: an app, a website, or one of the browser's own rows. */
+interface Activity {
+  kind: ActivityKind;
+  key: string;
+  label: string;
 }
 
 interface AppRule {
@@ -59,6 +66,7 @@ interface AppRule {
 
 interface FocusSnapshot {
   sample: ActivitySample;
+  activity: Activity;
   state: FocusState;
   classification: RuleClassification;
   matched_rule: AppRule | null;
@@ -110,7 +118,10 @@ interface SessionSummary {
   goal: string;
   started_at: string;
   duration_seconds: number;
+  /** Relevant time only. */
   focus_seconds: number;
+  neutral_seconds: number;
+  unrated_seconds: number;
   distracted_seconds: number;
   idle_seconds: number;
   nudges: number;
@@ -121,20 +132,10 @@ interface ReportSpan {
   started_offset_seconds: number;
   seconds: number;
   app: string;
-  context: string | null;
-  category: string;
-  state: string;
-}
-
-interface CategoryTotal {
-  category: string;
-  seconds: number;
-}
-
-interface DriftEntry {
-  at_offset_seconds: number;
+  kind: ActivityKind;
+  activity_key: string;
   label: string;
-  seconds: number;
+  state: string;
 }
 
 interface ReportEvent {
@@ -154,6 +155,7 @@ interface SessionReport {
   duration_seconds: number;
   focus_percent: number;
   focused_seconds: number;
+  unrated_seconds: number;
   distracted_seconds: number;
   idle_seconds: number;
   away_seconds: number;
@@ -163,17 +165,8 @@ interface SessionReport {
   longest_stretch_seconds: number;
   median_stretch_seconds: number;
   spans: ReportSpan[];
-  category_totals: CategoryTotal[];
-  top_apps: string[];
-  top_drifts: DriftEntry[];
+  apps: RecapApp[];
   events: ReportEvent[];
-}
-
-interface TrendSession {
-  id: number;
-  started_at: string;
-  median_stretch_seconds: number;
-  focus_percent: number;
 }
 
 interface DailyFocus {
@@ -183,10 +176,12 @@ interface DailyFocus {
   session_count: number;
 }
 
-interface WeeklyStretch {
+interface TrendWeek {
   week_start: string;
-  median_stretch_seconds: number;
   session_count: number;
+  focus_seconds: number;
+  median_stretch_seconds: number;
+  recovery_median_seconds: number | null;
 }
 
 interface FocusRecap {
@@ -203,14 +198,17 @@ interface HistoryWeek {
 }
 
 interface TrendsData {
-  sessions: TrendSession[];
   daily_focus: DailyFocus[];
-  weekly_stretch: WeeklyStretch[];
+  /** Oldest first, ending with the current week. */
+  weeks: TrendWeek[];
+  full_weeks: number;
   week_recap: FocusRecap;
-  month_recap: FocusRecap;
 }
 
-type HistoryView = "list" | "report" | "recap";
+type HistoryView = "list" | "report" | "recap" | "trends";
+
+/** Trends need this many completed weeks before week-over-week lines mean anything. */
+const TRENDS_UNLOCK_WEEKS = 2;
 
 interface RecapBucket {
   label: string;
@@ -219,12 +217,16 @@ interface RecapBucket {
 
 interface RecapApp {
   group: string;
+  kind: ActivityKind;
+  key: string;
   label: string;
   seconds: number;
+  ratable: boolean;
+  rating: RuleClassification | null;
 }
 
 interface PeriodRecap {
-  kind: "week" | "month";
+  kind: "week";
   start: string;
   end: string;
   focus_seconds: number;
@@ -232,25 +234,32 @@ interface PeriodRecap {
   buckets: RecapBucket[];
   median_stretch_seconds: number;
   longest_stretch_seconds: number;
-  stretch_range_low: number | null;
-  stretch_range_high: number | null;
-  first_half_focus_percent: number | null;
-  second_half_focus_percent: number | null;
+  recovery_median_seconds: number | null;
+  recovery_count: number;
+  unrecovered_count: number;
+  previous_recovery_median_seconds: number | null;
   apps: RecapApp[];
 }
 
 interface HistoryConfirm {
-  kind: "delete-all" | "scrub" | "delete-session";
+  kind: "delete-all" | "delete-session";
   id?: number;
 }
 
-const REPORT_CATEGORIES = ["work", "comms", "browse", "media", "offscreen"] as const;
 
 interface SessionSnapshot {
   status: SessionStatus;
   settings: SessionSettings;
   current: CurrentSession | null;
   history: SessionSummary[];
+  /** The latest mark that rescored past sessions; `seq` grows with each one. */
+  rescore: { seq: number; sessions: number } | null;
+}
+
+interface RulesSaved {
+  rules: AppRule[];
+  /** Past sessions whose scores the save changed. */
+  rescored_sessions: number[];
 }
 
 interface RuleEditor {
@@ -259,7 +268,12 @@ interface RuleEditor {
   target: RuleTarget;
   classification: RuleClassification;
   value: string;
+  name: string;
+  nameTouched: boolean;
+  preview: RulePreview;
 }
+
+type RulePreview = { target: RuleTarget; value: string } | { error: string } | null;
 
 interface VoiceModelFileStatus {
   path: string;
@@ -433,14 +447,27 @@ window.addEventListener("storage", (event) => {
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeTopLayer();
+    return;
+  }
+  if (rating && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    const choice = ({ "1": "focused", "2": "neutral", "3": "distracting" } as const)[event.key as "1" | "2" | "3"];
+    if (choice) {
+      event.preventDefault();
+      void chooseRating(choice);
+    } else if (event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      advanceRating();
+    }
   }
 });
 
-const starterRules: AppRule[] = ["YouTube", "Netflix", "TikTok", "Instagram", "Reddit"].map((value) => ({
-  target: "window_title",
-  value,
-  classification: "distracting",
-}));
+const starterRules: AppRule[] = ["youtube.com", "netflix.com", "tiktok.com", "instagram.com", "reddit.com"].map(
+  (value) => ({
+    target: "website",
+    value,
+    classification: "distracting",
+  }),
+);
 
 const toneOrder: VoiceTone[] = ["gentle", "mom", "stern", "kind-reset"];
 
@@ -522,12 +549,13 @@ let settings: SessionSettings = {
 };
 let history: SessionSummary[] = [];
 const EMPTY_RECAP: FocusRecap = { start: "", end: "", focus_seconds: 0, session_count: 0 };
+/** Order of the groups `apps_from_spans` produces; they sum to the scores. */
+const APP_GROUPS = ["Focus", "Neutral", "Distracting", "Unclassified", "Away"];
 let trends: TrendsData = {
-  sessions: [],
   daily_focus: [],
-  weekly_stretch: [],
+  weeks: [],
+  full_weeks: 0,
   week_recap: EMPTY_RECAP,
-  month_recap: EMPTY_RECAP,
 };
 let historyWeekStart = "";
 let historyWeek: HistoryWeek | null = null;
@@ -553,6 +581,25 @@ let lastOverlayFit = "";
 const OVERLAY_CORNER_WIDTH = 228;
 const OVERLAY_INTERRUPT_WIDTH = 520;
 let ruleEditor: RuleEditor | null = null;
+let rulePreviewTimer: number | null = null;
+let siteNames: Record<string, string> = {};
+let appNames: Record<string, string> = {};
+let editingRecapNames = false;
+let historyRename: { kind: "app" | "website"; key: string; value: string } | null = null;
+/** Rating apps from history: a short queue walked one app at a time. */
+let rating: {
+  queue: RecapApp[];
+  index: number;
+  rated: number;
+  where: string;
+  rescored: Set<number>;
+  last: { label: string; choice: RuleClassification } | null;
+} | null = null;
+/** Rescore notices this window has seen; `null` until the first snapshot. */
+let seenRescoreSeq: number | null = null;
+/** A rescore notice not yet merged into a mark's own toast. */
+let freshRescoreNote = "";
+const RESCORE_TOAST_MS = 3200;
 let customPhrases: PhraseDefinition[] = [];
 let customPhraseSets: string[] = [];
 let phraseOverrides: Record<string, PhraseDefinition> = {};
@@ -564,8 +611,8 @@ let clipsVoiceId = "starter-female";
 let clipsVoiceTouched = false;
 let readyClipsOnly = false;
 let clipGenerate: ClipGenerate | null = null;
-let clipGenerateTickId: number | null = null;
-let clipGenerateStatusIndex = 0;
+let ignoreVoiceWorkerError = false;
+const clipAssetRevision = new Map<string, number>();
 let createVoiceOpen = true;
 let modelDeleteOpen = false;
 let voiceBackend: VoiceBackendStatus | null = null;
@@ -620,13 +667,17 @@ function getAppRoot(): HTMLDivElement {
 async function init(): Promise<void> {
   render();
   try {
-    const [loadedSettings, loadedHistory, loadedRules, loadedPhraseLibrary] = await Promise.all([
+    const [loadedSettings, loadedHistory, loadedRules, loadedPhraseLibrary, loadedSiteNames, loadedAppNames] = await Promise.all([
       invoke<SessionSettings>("get_settings"),
       invoke<SessionSummary[]>("get_history"),
       invoke<AppRule[]>("get_rules"),
       invoke<PhraseLibraryState>("get_phrase_library"),
+      invoke<Record<string, string>>("get_site_names"),
+      invoke<Record<string, string>>("get_app_names"),
     ]);
     settings = loadedSettings;
+    siteNames = loadedSiteNames;
+    appNames = loadedAppNames;
     history = loadedHistory;
     permanentRules = loadedRules;
     customPhraseSets = loadedPhraseLibrary.custom_tones;
@@ -710,6 +761,7 @@ async function refreshSnapshot(): Promise<void> {
     snapshot = await invoke<SessionSnapshot>("get_session_snapshot");
     settings = snapshot.settings;
     history = snapshot.history;
+    noteRescore(snapshot);
     if (!snapshot.current) {
       sessionRulesOpen = false;
       if (ruleEditor?.scope === "preflight") {
@@ -735,7 +787,7 @@ async function refreshSnapshot(): Promise<void> {
   if (!webcamOpen) {
     const current = snapshot?.current ?? null;
     if (editorIsOpen() || viewKey() === paintedViewKey) {
-      paintClock(current);
+      paintLive(current);
     } else {
       render();
     }
@@ -749,15 +801,23 @@ function closeTopLayer(): void {
     return;
   }
   if (clipGenerate?.phase === "working") {
+    void cancelClipGenerate();
     return;
   }
   if (clipGenerate) {
-    stopClipGenerateStatus();
-    clipGenerate = null;
-    render();
+    void discardClipGenerate();
     return;
   }
   if (voiceBusy) {
+    return;
+  }
+  if (rating) {
+    finishRating();
+    return;
+  }
+  if (historyRename) {
+    historyRename = null;
+    render();
     return;
   }
   if (ruleEditor) {
@@ -812,7 +872,7 @@ function closeTopLayer(): void {
     render();
     return;
   }
-  if (historyView === "report" || historyView === "recap") {
+  if (historyView === "report" || historyView === "recap" || historyView === "trends") {
     historyView = "list";
     sessionReport = null;
     periodRecap = null;
@@ -835,6 +895,7 @@ function editorIsOpen(): boolean {
     preflightOpen ||
     sessionRulesOpen ||
     ruleEditor !== null ||
+    historyRename !== null ||
     phraseEditor !== null ||
     phraseSetPickerOpen ||
     recordingOpen ||
@@ -868,7 +929,7 @@ function sessionViewKey(current: CurrentSession | null): string {
     focus?.should_nudge ? 1 : 0,
     focus?.matched_rule?.value ?? "",
     sample?.app_name ?? "",
-    sample?.window_title ?? "",
+    focus?.activity.key ?? "",
     current.metrics.nudges,
     rules,
   ].join("\u001f");
@@ -883,7 +944,9 @@ function viewKey(): string {
     historyView,
     periodRecap?.kind ?? "",
     periodRecap?.start ?? "",
-    sessionViewKey(current),
+    // Other tabs show the session only in the status chip (painted in place) and the
+    // permission notice, so a focus change doesn't rebuild History or Settings.
+    appView === "overlay" || activeTab === "session" ? sessionViewKey(current) : permissionNotice(current),
     settings.status_window_on_top ? 1 : 0,
     settings.status_window_enabled ? 1 : 0,
     draft.voiceId,
@@ -900,9 +963,14 @@ function viewKey(): string {
   ].join("\u001f");
 }
 
-function paintClock(current: CurrentSession | null): void {
+/** The parts of a live session that change between rebuilds, painted in place. */
+function paintLive(current: CurrentSession | null): void {
   if (!current) {
     return;
+  }
+  const chip = document.querySelector<HTMLElement>(".status-chip");
+  if (chip) {
+    chip.textContent = statusChip(current);
   }
   const label = formatDuration(current.remaining_seconds);
   const percent = current.duration_seconds
@@ -1013,6 +1081,7 @@ function render(): void {
       ${activeTab === "history" ? renderHistory() : ""}
       ${renderVoiceDialogs()}
       ${renderHistoryConfirm()}
+      ${renderRatingModal()}
     </main>
   `;
 
@@ -1132,7 +1201,7 @@ function renderSessionRuleSet(
   rules: AppRule[],
 ): string {
   const shown = rules.slice().reverse().slice(0, 4);
-  const chips = shown.map((rule) => `<span>${escapeHtml(rule.value)}</span>`);
+  const chips = shown.map((rule) => `<span>${escapeHtml(ruleName(rule))}</span>`);
   if (rules.length > shown.length && chips.length) {
     const last = chips.pop();
     chips.push(`<span class="session-rule-tail">${last}<span class="session-rule-more">...</span></span>`);
@@ -1149,10 +1218,10 @@ function renderSessionRuleSet(
 }
 
 function renderActiveSessionControls(current: CurrentSession): string {
-  const held = current.status === "paused" || current.status === "snoozed";
+  const held = current.status === "paused";
   return `
     <div class="active-session-controls">
-      <button class="${held ? "primary session-resume" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${held ? "Resume" : "Pause"}</button>
+      <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${held ? "Resume" : "Pause"}</button>
       <button class="danger" type="button" data-action="stop">End session</button>
     </div>
   `;
@@ -1180,14 +1249,14 @@ function renderOverlay(current: CurrentSession | null): string {
   if (distractionIsActive()) {
     return renderDistractionOverlay(current as CurrentSession);
   }
-  const paused = current?.status === "paused";
-  const snoozed = current?.status === "snoozed";
-  const held = paused || snoozed;
-  const nudgesMuted = snoozed || (paused && current?.snoozed_until_seconds != null);
+  // Muting keeps recording; only Pause holds the timer.
+  const held = current?.status === "paused";
+  const nudgesMuted = current?.status === "snoozed";
   const pinned = settings.status_window_on_top;
   return `
     <main class="overlay-shell">
       <section class="state-slab overlay-slab ${stateClass(current)}" aria-live="polite">
+        ${nudgesMuted ? `<span class="overlay-muted-tag" title="Nudges muted. Still tracking.">Muted</span>` : ""}
         <h2>${escapeHtml(stateTitle(current))}</h2>
         <p>${escapeHtml(current?.goal || stateCopy(current))}</p>
         ${current ? renderOverlayProgress(current) : ""}
@@ -1203,9 +1272,9 @@ function renderOverlay(current: CurrentSession | null): string {
               <summary>More settings</summary>
               <div class="overlay-more-body">
                 <label class="overlay-mute">
-                  <span>Mute nudges</span>
+                  <span>Mute nudges for 5 min</span>
                   <span class="toggle-field">
-                    <input id="overlay-snooze" class="toggle-input" type="checkbox" ${nudgesMuted ? "checked" : ""} aria-label="Mute nudges" />
+                    <input id="overlay-snooze" class="toggle-input" type="checkbox" ${nudgesMuted ? "checked" : ""} ${held ? "disabled" : ""} aria-label="Mute nudges for 5 minutes" />
                     <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
                   </span>
                 </label>
@@ -1255,15 +1324,12 @@ function renderDistractionOverlay(current: CurrentSession): string {
 }
 
 function distractionLabel(current: CurrentSession): string {
-  const sample = current.focus?.sample;
-  const title = sample?.window_title?.trim();
-  const appName = sample?.app_name?.trim();
-  return title || appName || "This app";
+  return current.focus?.activity.label || "This app";
 }
 
 function distractionIdentity(current: CurrentSession): string {
-  const sample = current.focus?.sample;
-  return `${sample?.process_id ?? ""}|${sample?.app_name ?? ""}|${sample?.window_title ?? ""}`;
+  const activity = current.focus?.activity;
+  return `${activity?.kind ?? ""}|${activity?.key ?? ""}`;
 }
 
 function distractionIsActive(): boolean {
@@ -1599,8 +1665,8 @@ function renderRuleGroup(
         ${items
           .map(
             ({ rule, index }) => `
-              <button class="rule-chip rule-chip-${classification}" type="button" data-rule-action="edit" data-rule-scope="${scope}" data-rule-index="${index}">
-                ${escapeHtml(rule.value)}
+              <button class="rule-chip rule-chip-${classification}" type="button" data-rule-action="edit" data-rule-scope="${scope}" data-rule-index="${index}"${rule.target === "website" ? ` title="${attr(rule.value)}"` : ""}>
+                ${escapeHtml(ruleName(rule))}
               </button>
             `,
           )
@@ -1611,17 +1677,54 @@ function renderRuleGroup(
   `;
 }
 
-function renderRuleEditor(editor: RuleEditor): string {
+function siteName(key: string): string {
+  return siteNames[key] ?? key;
+}
+
+function ruleName(rule: AppRule): string {
+  return rule.target === "website" ? siteName(rule.value) : appNames[rule.value.toLowerCase()] ?? rule.value;
+}
+
+function previewSite(editor: RuleEditor): string | null {
+  const preview = editor.preview;
+  return preview && "value" in preview && preview.target === "website" ? preview.value : null;
+}
+
+function renderRulePreview(editor: RuleEditor): string {
+  const preview = editor.preview;
+  if (!editor.value.trim() || !preview) {
+    return `<span class="rule-preview-note">Supervisor will show what this rule matches before you save.</span>`;
+  }
+  if ("error" in preview) {
+    return `<span class="rule-preview-error">${escapeHtml(preview.error)}</span>`;
+  }
+  const site = preview.target === "website";
+  const value = site ? preview.value : appNames[preview.value.toLowerCase()] ?? preview.value;
   return `
-    <form class="rule-editor" data-rule-form="${editor.scope}">
+    <span class="rule-kind">${site ? "Site" : "App"}</span>
+    <strong class="rule-preview-value">${escapeHtml(value)}</strong>
+    <span class="rule-preview-note">${site ? "Every page on this site" : "App windows; browser websites use site rules"}</span>
+  `;
+}
+
+function renderRuleEditor(editor: RuleEditor): string {
+  const site = previewSite(editor);
+  return `
+    <form class="rule-editor" data-rule-form="${editor.scope}" autocomplete="off">
       <label>
         <span>Mode</span>
-        <select name="classification">${ruleClassificationOptions(editor.classification)}</select>
+        <select id="rule-classification" name="classification">${ruleClassificationOptions(editor.classification)}</select>
       </label>
       <label>
-        <span>App/website name</span>
-        <input name="value" maxlength="120" value="${attr(editor.value)}" placeholder="YouTube" />
+        <span>Website or app</span>
+        <input id="rule-value" name="value" maxlength="300" spellcheck="false" value="${attr(editor.value)}" placeholder="youtube.com or Spotify" />
       </label>
+      <p class="rule-entry-help">Paste a web address to match every page on that site, or enter an app name to match its windows. Check the match below before saving.</p>
+      <label class="rule-name-field" ${site ? "" : "hidden"}>
+        <span>Shown as</span>
+        <input id="rule-name" name="name" maxlength="60" value="${attr(editor.name)}" placeholder="${attr(site ?? "")}" />
+      </label>
+      <p class="rule-preview" id="rule-preview" aria-live="polite">${renderRulePreview(editor)}</p>
       <div class="rule-editor-actions">
         <button class="primary" type="submit">Save</button>
         ${
@@ -1867,6 +1970,9 @@ function renderPhraseEditor(): string {
   if (!editor) {
     return "";
   }
+  const regenerate = Boolean(editor.phraseId);
+  const canSubmit = !regenerate || canGenerateClip(clipsVoice());
+  const lockTitle = regenerate ? clipGenerateLockTitle(clipsVoice()) : "";
 
   return `
     <form class="phrase-editor" id="phrase-editor">
@@ -1879,7 +1985,7 @@ function renderPhraseEditor(): string {
         <input name="text" maxlength="140" value="${attr(editor.text)}" placeholder="Back to the task." />
       </label>
       <div class="rule-editor-actions">
-        <button class="primary" type="submit">${editor.phraseId ? "Regenerate" : "Add phrase"}</button>
+        <button class="primary" type="submit" ${canSubmit ? "" : "disabled"}${lockTitle ? ` title="${attr(lockTitle)}"` : ""}>${regenerate ? "Regenerate" : "Add phrase"}</button>
         <button type="button" data-action="cancel-phrase-editor">Cancel</button>
       </div>
     </form>
@@ -2010,21 +2116,13 @@ function renderHistoryConfirm(): string {
           confirm: "Delete all",
           danger: true,
         }
-      : historyConfirm.kind === "scrub"
-        ? {
-            eyebrow: "HISTORY",
-            title: "Forget app names?",
-            body: "Saved sessions will keep their times. App and page names will be cleared.",
-            confirm: "Forget names",
-            danger: false,
-          }
-        : {
-            eyebrow: "HISTORY",
-            title: "Delete this session?",
-            body: "This session will be removed from this computer. You cannot undo this.",
-            confirm: "Delete session",
-            danger: true,
-          };
+      : {
+          eyebrow: "HISTORY",
+          title: "Delete this session?",
+          body: "This session will be removed from this computer. You cannot undo this.",
+          confirm: "Delete session",
+          danger: true,
+        };
 
   return `
     <div class="modal-backdrop" role="presentation">
@@ -2189,31 +2287,54 @@ function renderClipGenerateModal(): string {
   const phrase = effectivePhrases().find((item) => item.id === job.phraseId);
   const voice = clipsVoice();
   const clip = phrase ? clipForPhrase(voice, phrase) : null;
-  const working = job.phase === "working";
-  const modelName = voiceBackend?.model.display_name || "Chatterbox-Nano voice cloning model";
-  const status = working
-    ? "Model loading"
-    : job.phase === "error"
-      ? job.error || "The local worker could not generate this clip."
-      : "Clip generated";
+  const meta = [voice.name, phrase ? toneLabel(phrase.tone) : ""].filter(Boolean).join(" · ");
+  const body =
+    job.phase === "working"
+      ? `<div class="clip-generate-wait" aria-live="polite">
+          <p class="clip-generate-progress">
+            Generating clip
+            <span class="clip-generate-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+          </p>
+          <p class="clip-generate-eta">About 60-90 seconds left</p>
+          <p class="clip-generate-eta-note">The first clip takes the longest, because the model has to load. After that, new clips come faster.</p>
+        </div>`
+      : job.phase === "error"
+        ? `<div class="clip-generate-error" role="alert">
+            <p class="clip-generate-eta">Could not generate this clip</p>
+            <p class="clip-generate-eta-note">${escapeHtml(job.error || "The local worker could not generate this clip.")}</p>
+          </div>
+          <div class="clip-generate-actions is-two">
+            <button type="button" data-action="regenerate-clip">Try again</button>
+            <button type="button" data-action="close-clip-generate">Close</button>
+          </div>`
+        : `<p class="clip-generate-ready">Clip Generated</p>
+          <div class="clip-generate-player">
+            <button class="voice-preview-play" type="button" data-action="toggle-voice-preview" ${clip ? "" : "disabled"} aria-label="Play">
+              <span class="voice-preview-icon" aria-hidden="true"></span>
+            </button>
+            <div class="voice-info-wave">
+              <canvas id="voice-preview-wave" width="320" height="56" data-wave-path="${attr(clip?.path ?? "")}" data-wave-bars="40"></canvas>
+              <input id="voice-preview-bar" type="range" min="0" max="1" value="0" step="0.01" ${clip ? "" : "disabled"} aria-label="Playback" />
+              <div class="voice-info-times">
+                <span id="voice-preview-elapsed">0:00</span>
+                <span id="voice-preview-total">0:00</span>
+              </div>
+            </div>
+          </div>
+          <p class="clip-generate-hint">Listen before keeping this clip.</p>
+          <div class="clip-generate-actions">
+            <button type="button" data-action="regenerate-clip">Try again</button>
+            <button class="primary" type="button" data-action="keep-clip">Keep clip</button>
+            <button type="button" data-action="close-clip-generate">Close</button>
+          </div>`;
 
   return `
     <div class="modal-backdrop busy-backdrop" role="presentation">
-      <section class="modal-panel busy-panel" role="dialog" aria-modal="true" aria-live="polite">
-        <p class="eyebrow">VOICE WORKER</p>
-        <h2>${escapeHtml(phrase?.text ?? "Voice clip")}</h2>
-        <p class="quiet">${escapeHtml(modelName)}${phrase ? ` · ${escapeHtml(toneLabel(phrase.tone))}` : ""} · ${escapeHtml(voice.name)}</p>
-        <p class="busy-note" id="clip-generate-status">${escapeHtml(status)}</p>
-        ${working ? `<div class="loading-bar"><span></span></div>` : ""}
-        <div class="modal-actions">
-          ${
-            working
-              ? ""
-              : `${clip ? `<button type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}">Play</button>` : ""}
-                 <button type="button" data-action="regenerate-clip">Try again</button>
-                 <button type="button" data-action="close-clip-generate">Close</button>`
-          }
-        </div>
+      <section class="modal-panel clip-generate-panel" role="dialog" aria-modal="true" aria-labelledby="clip-generate-title">
+        <p class="eyebrow">VOICE CLIP</p>
+        <h2 id="clip-generate-title">${escapeHtml(phrase?.text ?? "Voice clip")}</h2>
+        <p class="clip-generate-meta">${escapeHtml(meta)}</p>
+        ${body}
       </section>
     </div>
   `;
@@ -2298,6 +2419,9 @@ function renderHistory(): string {
   if (historyView === "recap" && periodRecap) {
     return renderPeriodRecap(periodRecap);
   }
+  if (historyView === "trends") {
+    return renderTrends();
+  }
 
   const weekStart = historyWeek?.week_start || historyWeekStart || thisMondayKey();
   const sessions = historyWeek?.sessions ?? [];
@@ -2321,7 +2445,6 @@ function renderHistory(): string {
               <button type="button" data-action="history-week-next" ${nextDisabled ? "disabled" : ""} aria-label="Next week">›</button>
             </div>
             <div class="history-tools">
-              <button type="button" data-action="ask-scrub">Forget names</button>
               <button class="danger" type="button" data-action="ask-delete-all">Delete all</button>
             </div>
           </div>
@@ -2334,7 +2457,10 @@ function renderHistory(): string {
                   .map(
                     (group) => `
               <section class="history-day">
-                <p class="eyebrow">${escapeHtml(group.label)}</p>
+                <div class="history-day-head">
+                  <p class="eyebrow">${escapeHtml(group.label)}</p>
+                  <p class="history-day-total">${escapeHtml(dayTotalLine(group.items))}</p>
+                </div>
                 ${group.items.map(renderHistoryItem).join("")}
               </section>
             `,
@@ -2357,7 +2483,11 @@ function renderHistoryItem(item: SessionSummary): string {
       </div>
       <div class="history-item-stats">
         <dl>
-          <div><dt>Focus</dt><dd>${focusPercent(item)}%</dd></div>
+          <div><dt>Focus</dt><dd>${
+            scoreAwaitsClassifying(item.unrated_seconds, item.idle_seconds, item.duration_seconds)
+              ? `<span title="Mostly unclassified. Open it to classify apps.">—</span>`
+              : `${focusPercent(item)}%`
+          }</dd></div>
           <div><dt>Duration</dt><dd>${formatDuration(item.duration_seconds)}</dd></div>
           <div><dt>Nudges</dt><dd>${item.nudges}</dd></div>
         </dl>
@@ -2368,54 +2498,84 @@ function renderHistoryItem(item: SessionSummary): string {
 }
 
 function renderHistoryOverview(): string {
-  const weeks = trends.weekly_stretch;
+  const weeks = trends.weeks.slice(-5);
+  const empty = weeks.length === 0;
   const current = weeks[weeks.length - 1];
-  const currentLabel = current?.session_count
-    ? formatMinutes(current.median_stretch_seconds)
-    : "—";
+  const thisWeek = !empty && current.session_count > 0;
+  const currentLabel = empty
+    ? "No sessions yet"
+    : thisWeek
+      ? formatMinutes(current.median_stretch_seconds)
+      : "No sessions this week";
+  const caption = empty
+    ? "Your attention span will appear after your first session."
+    : thisWeek
+      ? "Typical uninterrupted stretch this week"
+      : "This week's attention span will appear after your first session.";
   return `
     <div class="history-overview">
       <section class="panel span-card">
         <p class="eyebrow">Attention span</p>
         <p class="span-value">${escapeHtml(currentLabel)}</p>
-        <p class="span-caption">Typical uninterrupted stretch this week</p>
-        ${renderSpanPlot(weeks)}
+        <p class="span-caption">${escapeHtml(caption)}</p>
+        ${renderWeekPlot(
+          weeks.map((week) => ({
+            weekStart: week.week_start,
+            value: week.session_count > 0 ? week.median_stretch_seconds / 60 : null,
+            chip: formatStretchChip(week.median_stretch_seconds),
+          })),
+          "Typical stretch for the last five weeks",
+        )}
       </section>
       <div class="history-recaps">
-        ${renderRecapCard("Weekly recap", trends.week_recap, "week")}
-        ${renderRecapCard("Monthly recap", trends.month_recap, "month")}
+        ${renderRecapCard(trends.week_recap)}
+        ${renderTrendsCard()}
       </div>
     </div>
   `;
 }
 
-function renderRecapCard(title: string, recap: FocusRecap, kind: "week" | "month"): string {
-  const range =
-    kind === "week"
-      ? formatWeekRange(recap.start || thisMondayKey())
-      : formatMonthLabel(recap.start || dayKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1)));
+function renderRecapCard(recap: FocusRecap): string {
   const sessions =
     recap.session_count === 1 ? "1 session" : `${recap.session_count} sessions`;
   return `
     <section class="panel recap-card">
-      <p class="eyebrow">${escapeHtml(title)}</p>
+      <p class="eyebrow">Weekly recap</p>
       <p class="recap-value">${escapeHtml(formatHours(recap.focus_seconds))} focused</p>
-      <p class="recap-meta">${escapeHtml(range)} · ${escapeHtml(sessions)}</p>
-      <button type="button" data-action="${kind === "week" ? "open-week-recap" : "open-month-recap"}">View recap ›</button>
+      <p class="recap-meta">${escapeHtml(formatWeekRange(recap.start || thisMondayKey()))} · ${escapeHtml(sessions)}</p>
+      <button type="button" data-action="open-week-recap">View recap ›</button>
     </section>
   `;
 }
 
+function renderTrendsCard(): string {
+  const locked = trends.full_weeks < TRENDS_UNLOCK_WEEKS;
+  const [previous, last] = completedWeeks();
+  let value = "Unlocks after 2 full weeks";
+  let meta = `${Math.min(trends.full_weeks, TRENDS_UNLOCK_WEEKS)} of ${TRENDS_UNLOCK_WEEKS} full weeks so far`;
+  if (!locked) {
+    const change = last && previous ? last.focus_seconds - previous.focus_seconds : 0;
+    value = Math.abs(change) < 60 ? "Steady focused time" : `${change > 0 ? "↑" : "↓"} ${formatHours(Math.abs(change))} focused`;
+    meta = "Last week vs the week before";
+  }
+  return `
+    <section class="panel recap-card">
+      <p class="eyebrow">Trends</p>
+      <p class="recap-value">${escapeHtml(value)}</p>
+      <p class="recap-meta">${escapeHtml(meta)}</p>
+      <button type="button" data-action="open-trends">View trends ›</button>
+    </section>
+  `;
+}
+
+/** The two most recent completed weeks (oldest first); the current week is still running. */
+function completedWeeks(): [TrendWeek | undefined, TrendWeek | undefined] {
+  const done = trends.weeks.slice(0, -1);
+  return [done[done.length - 2], done[done.length - 1]];
+}
+
 function renderPeriodRecap(recap: PeriodRecap): string {
-  const week = recap.kind === "week";
-  const todayMonday = thisMondayKey();
-  const weekStart = week
-    ? recap.start
-    : todayMonday >= recap.start && todayMonday <= recap.end
-      ? todayMonday
-      : recap.start;
-  const monthStart = `${recap.start.slice(0, 8)}01`;
-  const range = week ? formatWeekRange(recap.start) : formatMonthLabel(recap.start);
+  const range = formatWeekRange(recap.start);
   const sessions =
     recap.session_count === 1 ? "1 recorded session" : `${recap.session_count} recorded sessions`;
   const typical = recap.median_stretch_seconds
@@ -2424,11 +2584,6 @@ function renderPeriodRecap(recap: PeriodRecap): string {
   const longest = recap.longest_stretch_seconds
     ? `Longest stretch · ${formatMinutes(recap.longest_stretch_seconds)}`
     : "No stretch recorded";
-  const rangeLine =
-    recap.stretch_range_low != null && recap.stretch_range_high != null
-      ? `${formatMinutes(recap.stretch_range_low).replace(" min", "")} → ${formatMinutes(recap.stretch_range_high)} across full weeks`
-      : "";
-  const maxApp = Math.max(...recap.apps.map((app) => app.seconds), 1);
   const maxBucket = Math.max(...recap.buckets.map((bucket) => bucket.focus_seconds), 1);
 
   return `
@@ -2437,13 +2592,9 @@ function renderPeriodRecap(recap: PeriodRecap): string {
         <button type="button" data-action="close-recap">Back</button>
         <div>
           <p class="eyebrow">History</p>
-          <h2>${week ? "Weekly recap" : "Monthly recap"}</h2>
+          <h2>Weekly recap</h2>
         </div>
-        <div class="recap-switch">
-          <button type="button" class="${week ? "active" : ""}" data-action="open-week-recap" data-start="${attr(weekStart)}">Week</button>
-          <button type="button" class="${week ? "" : "active"}" data-action="open-month-recap" data-start="${attr(monthStart)}">Month</button>
-          <button type="button" data-action="export-recap-pdf">Export PDF</button>
-        </div>
+        ${renderHistorySwitch("week")}
       </div>
 
       <div class="recap-layout">
@@ -2455,7 +2606,7 @@ function renderPeriodRecap(recap: PeriodRecap): string {
             ${recap.buckets
               .map((bucket) => {
                 const on = bucket.focus_seconds > 0;
-                const height = on ? Math.max(18, Math.round((bucket.focus_seconds / maxBucket) * 100)) : 12;
+                const height = barHeight(bucket.focus_seconds, maxBucket, 12);
                 const focused = formatHours(bucket.focus_seconds);
                 return `
                   <button type="button" class="recap-bar-col" aria-label="${attr(bucket.label)}, ${attr(focused)} focused">
@@ -2477,115 +2628,541 @@ function renderPeriodRecap(recap: PeriodRecap): string {
             <p class="eyebrow">Sustained attention</p>
             <p class="recap-stat-value">${escapeHtml(typical)}</p>
             <p class="recap-caption">Typical uninterrupted stretch</p>
-            <p class="recap-stat-note">${escapeHtml(week ? longest : rangeLine || longest)}</p>
+            <p class="recap-stat-note">${escapeHtml(longest)}</p>
           </section>
-          <section class="panel recap-stat-card">
-            <p class="eyebrow">Focus retention</p>
-            <p class="recap-caption">Focused share by session half</p>
-            ${renderRecapHalf("First half", recap.first_half_focus_percent)}
-            ${renderRecapHalf("Second half", recap.second_half_focus_percent)}
-          </section>
+          ${renderRecoveryCard(recap)}
         </div>
       </div>
 
       <section class="panel recap-apps">
         <p class="eyebrow">Apps & sites</p>
         <h2>Where session time went</h2>
+        <p class="recap-caption">Only Relevant time counts as focus. Unclassified time follows how you classify it now; decisions made during a session keep.</p>
+        ${renderRatePrompt(recap.apps, "this week")}
+        ${
+          recap.apps.some((item) => item.kind === "app" || item.kind === "website")
+            ? `<div class="recap-name-tools">
+                <p>Unfamiliar name? Give apps and sites your own names to make history easier to read.</p>
+                <button type="button" data-action="toggle-recap-names">${editingRecapNames ? "Done naming" : "Edit names"}</button>
+              </div>`
+            : recap.apps.length
+              ? `<p class="recap-caption">Unidentified browser time has no site name to edit.</p>`
+              : ""
+        }
         ${
           recap.apps.length === 0
             ? `<p class="empty">No app time in this recap.</p>`
-            : `<div class="recap-app-list">
-                ${["Focus", "Neutral", "Distracting", "Miscellaneous"]
-                  .map((group) => {
-                    const items = recap.apps.filter((app) => app.group === group);
-                    if (items.length === 0) {
-                      return "";
-                    }
-                    return `
-                      <div class="recap-app-block">
-                        <p class="eyebrow">${escapeHtml(group)}</p>
-                        <div class="recap-app-group">
-                          ${items
-                            .map((app) => {
-                              const shownMinutes = Math.round(app.seconds / 60);
-                              const width = shownMinutes > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
-                              return `
-                                <div class="recap-app-row">
-                                  <span class="recap-app-name">${escapeHtml(app.label)}</span>
-                                  <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
-                                  <strong>${escapeHtml(app.seconds >= 3600 ? formatHours(app.seconds) : formatMinutes(app.seconds))}</strong>
-                                </div>
-                              `;
-                            })
-                            .join("")}
-                        </div>
-                      </div>
-                    `;
-                  })
-                  .join("")}
-              </div>`
+            : renderAppGroups(recap.apps, APP_GROUPS)
         }
       </section>
     </section>
   `;
 }
 
-function renderRecapHalf(labelText: string, percent: number | null): string {
-  const value = percent == null ? "—" : `${percent}%`;
-  const width = percent == null ? 0 : percent;
+function ratingLabel(classification: RuleClassification): string {
+  return { focused: "Relevant", neutral: "Neutral", distracting: "Distracting" }[classification];
+}
+
+function unratedApps(apps: RecapApp[]): RecapApp[] {
+  return apps.filter((app) => app.ratable && !app.rating).sort((a, b) => b.seconds - a.seconds);
+}
+
+function ratingSourceApps(): RecapApp[] {
+  if (historyView === "report" && sessionReport) {
+    return sessionReport.apps;
+  }
+  return historyView === "recap" && periodRecap ? periodRecap.apps : [];
+}
+
+/** One quiet line, only when something is unrated. The rows themselves stay clean. */
+function renderRatePrompt(apps: RecapApp[], where: string): string {
+  const unrated = unratedApps(apps);
+  if (unrated.length === 0 || editingRecapNames) {
+    return "";
+  }
+  const count = unrated.length === 1 ? "1 app isn't classified" : `${unrated.length} apps aren't classified`;
   return `
-    <div class="recap-half">
-      <span>${escapeHtml(labelText)}</span>
-      <span class="recap-half-track"><span style="width: ${width}%"></span></span>
-      <strong>${escapeHtml(value)}</strong>
+    <div class="recap-name-tools rate-prompt">
+      <p><i class="unrated-dot" aria-hidden="true"></i>${escapeHtml(count)} yet. Unclassified time doesn't count as focus.</p>
+      <button type="button" data-action="rate-apps" data-where="${attr(where)}">Classify ${unrated.length === 1 ? "it" : "them"}</button>
     </div>
   `;
 }
 
-function renderSpanPlot(weeks: WeeklyStretch[]): string {
-  if (weeks.length === 0) {
-    return `<p class="empty">Not enough weeks to plot yet.</p>`;
+function renderRatingModal(): string {
+  const app = rating?.queue[rating.index];
+  if (!rating || !app) {
+    return "";
   }
+  const step = rating.queue.length > 1 ? `CLASSIFY · ${rating.index + 1} OF ${rating.queue.length}` : "CLASSIFY";
+  const time = `${app.seconds >= 3600 ? formatHours(app.seconds) : formatMinutes(app.seconds)}${rating.where ? ` ${rating.where}` : ""}`;
+  const current = app.rating ? `Currently ${ratingLabel(app.rating)}` : "Not classified yet";
+  const choices: RuleClassification[] = ["focused", "neutral", "distracting"];
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel rate-panel" role="dialog" aria-modal="true" aria-labelledby="rate-title">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">${escapeHtml(step)}</p>
+            <h2 id="rate-title">${escapeHtml(app.label)}</h2>
+          </div>
+          <button class="small-button" type="button" data-action="close-rating">Done</button>
+        </div>
+        <p class="rate-meta">${escapeHtml(time)} · ${escapeHtml(current)}</p>
+        <div class="rate-choices">
+          ${choices
+            .map(
+              (choice) => `
+                <button type="button" class="rate-choice rate-${choice} ${app.rating === choice ? "is-current" : ""}" data-action="rate-choice" data-choice="${choice}">
+                  ${escapeHtml(ratingLabel(choice))}
+                </button>
+              `,
+            )
+            .join("")}
+        </div>
+        <div class="rate-foot">
+          <p>Applies to future sessions and to past time that wasn't classified.</p>
+          ${rating.queue.length > 1 ? `<button class="small-button" type="button" data-action="rate-skip">Skip</button>` : ""}
+        </div>
+      </section>
+    </div>
+  `;
+}
 
-  const width = 680;
-  const height = 268;
+function startRating(queue: RecapApp[], where: string): void {
+  if (queue.length === 0) {
+    return;
+  }
+  rating = { queue, index: 0, rated: 0, where, rescored: new Set(), last: null };
+  render();
+}
+
+function advanceRating(): void {
+  if (!rating) {
+    return;
+  }
+  rating.index += 1;
+  if (rating.index >= rating.queue.length) {
+    finishRating();
+    return;
+  }
+  render();
+}
+
+function finishRating(): void {
+  const rated = rating?.rated ?? 0;
+  const rescored = rating?.rescored.size ?? 0;
+  const last = rating?.last;
+  rating = null;
+  render();
+  if (rated > 0) {
+    if (rescored === 0) {
+      showFeedback(rated === 1 ? "Rule saved" : `${rated} rules saved`);
+    } else {
+      const saved = rated === 1 && last ? `${last.label} is now ${ratingLabel(last.choice)}` : `${rated} apps classified`;
+      showFeedback(`${saved} · ${rescoredText(rescored)}`, RESCORE_TOAST_MS);
+    }
+    // A rating rescores past unrated time: rows move groups and every score can change.
+    if (historyView === "recap" && periodRecap) {
+      void openPeriodRecap("week", periodRecap.start);
+    } else if (historyView === "report" && sessionReport) {
+      void openHistoryReport(sessionReport.id);
+    }
+    void refreshTrends(false);
+    void refreshHistoryWeek(false);
+  }
+}
+
+async function chooseRating(classification: RuleClassification): Promise<void> {
+  const app = rating?.queue[rating.index];
+  if (!rating || !app) {
+    return;
+  }
+  const target: RuleTarget = app.kind === "website" ? "website" : "app";
+  const previous = cloneRules(permanentRules);
+  const others = permanentRules.filter(
+    (rule) => !(rule.target === target && rule.value.toLowerCase() === app.key.toLowerCase()),
+  );
+  try {
+    const saved = await invoke<RulesSaved>("update_rules", {
+      rules: [{ target, value: app.key, classification }, ...others],
+    });
+    permanentRules = saved.rules;
+    saved.rescored_sessions.forEach((id) => rating?.rescored.add(id));
+    rating.last = { label: app.label, choice: classification };
+  } catch (error) {
+    permanentRules = previous;
+    showFeedback(errorText(error));
+    return;
+  }
+  for (const row of [...(sessionReport?.apps ?? []), ...(periodRecap?.apps ?? [])]) {
+    if (row.kind === app.kind && row.key === app.key) {
+      row.rating = classification;
+    }
+  }
+  rating.rated += 1;
+  advanceRating();
+}
+
+function renderAppGroups(apps: RecapApp[], groups: string[]): string {
+  const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
+  return `<div class="recap-app-list">
+    ${groups
+      .map((group) => {
+        const items = apps.filter((app) => app.group === group);
+        if (items.length === 0) {
+          return "";
+        }
+        return `
+          <div class="recap-app-block">
+            <p class="eyebrow">${escapeHtml(group)}</p>
+            <div class="recap-app-group">
+              ${items
+                .map((app) => {
+                  const shownMinutes = Math.round(app.seconds / 60);
+                  const width = shownMinutes > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
+                  // Decisions made during a session keep; say when today's rule differs.
+                  const ruledGroup = app.rating ? { focused: "Focus", neutral: "Neutral", distracting: "Distracting" }[app.rating] : null;
+                  const changed = ruledGroup && ruledGroup !== app.group && app.group !== "Away"
+                    ? `<span class="rating-changed">now ${escapeHtml(ratingLabel(app.rating as RuleClassification))}</span>`
+                    : "";
+                  const cells = `
+                    <span class="recap-app-name-wrap">${renderRecapAppName(app)}${changed}</span>
+                    <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
+                    <strong>${escapeHtml(app.seconds >= 3600 ? formatHours(app.seconds) : formatMinutes(app.seconds))}</strong>
+                  `;
+                  if (!app.ratable || editingRecapNames) {
+                    return `<div class="recap-app-row">${cells}</div>`;
+                  }
+                  const state = app.rating ? `Classified ${ratingLabel(app.rating)}` : "Not classified";
+                  return `
+                    <button type="button" class="recap-app-row is-ratable ${app.rating ? "" : "is-unrated"}" data-action="rate-app" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}" title="${attr(`${state} · click to change`)}">
+                      ${cells}
+                    </button>
+                  `;
+                })
+                .join("")}
+            </div>
+          </div>
+        `;
+      })
+      .join("")}
+  </div>`;
+}
+
+function renderRecapAppName(app: RecapApp): string {
+  if ((app.kind !== "website" && app.kind !== "app") || app.key === "untracked" || app.key === "supervisor") {
+    return `<span class="recap-app-name">${escapeHtml(app.label)}</span>`;
+  }
+  if (historyRename?.key === app.key && historyRename.kind === app.kind) {
+    return `
+      <span class="recap-app-name recap-rename">
+        <input id="history-rename" maxlength="60" value="${attr(historyRename.value)}" placeholder="${attr(app.label)}" aria-label="Name for ${attr(app.key)}" />
+      </span>
+    `;
+  }
+  if (!editingRecapNames) {
+    return `<span class="recap-app-name">${escapeHtml(app.label)}</span>`;
+  }
+  return `
+    <span class="recap-app-name recap-site-name">
+      <span>${escapeHtml(app.label)}</span>
+      <button class="recap-rename-button" type="button" data-history-rename="${attr(app.key)}" data-rename-kind="${app.kind}" aria-label="Rename ${attr(app.label)}" title="Rename · ${attr(app.key)}">Rename</button>
+    </span>
+  `;
+}
+
+function renderHistorySwitch(active: "week" | "trends"): string {
+  return `
+    <div class="recap-switch">
+      <button type="button" class="${active === "week" ? "active" : ""}" data-action="open-week-recap" data-start="${attr(active === "week" ? periodRecap?.start ?? thisMondayKey() : thisMondayKey())}">Week</button>
+      <button type="button" class="${active === "trends" ? "active" : ""}" data-action="open-trends">Trends</button>
+    </div>
+  `;
+}
+
+function renderRecoveryCard(recap: PeriodRecap): string {
+  const typical = recap.recovery_median_seconds;
+  const stuck = recap.unrecovered_count;
+  const stuckNote = stuck === 0 ? "" : `${stuck} drift${stuck === 1 ? "" : "s"} lasted until the session ended`;
+  let value = "—";
+  let caption = "Typical time to get back on task after a drift";
+  let note = stuckNote;
+  if (typical == null && stuck === 0) {
+    value = recap.session_count === 0 ? "—" : "No drifts";
+    caption = recap.session_count === 0 ? caption : "Nothing pulled you off task this week";
+  } else if (typical != null) {
+    value = formatRecovery(typical);
+    const before = recap.previous_recovery_median_seconds;
+    const pace =
+      before == null
+        ? `${recap.recovery_count} drift${recap.recovery_count === 1 ? "" : "s"} this week`
+        : recoveryChange(typical, before);
+    note = [pace, stuckNote].filter(Boolean).join(" · ");
+  }
+  return `
+    <section class="panel recap-stat-card">
+      <p class="eyebrow">Recovery</p>
+      <p class="recap-stat-value">${escapeHtml(value)}</p>
+      <p class="recap-caption">${escapeHtml(caption)}</p>
+      ${note ? `<p class="recap-stat-note">${escapeHtml(note)}</p>` : ""}
+    </section>
+  `;
+}
+
+/** Lower is better: say faster or slower, never just a signed number. */
+function recoveryChange(now: number, before: number): string {
+  const change = now - before;
+  if (Math.abs(change) < 5) {
+    return "Same pace as the week before";
+  }
+  return `${formatRecovery(Math.abs(change))} ${change < 0 ? "faster" : "slower"} than the week before`;
+}
+
+function formatRecovery(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  if (seconds >= 3600) {
+    return formatHours(seconds);
+  }
+  const rest = seconds % 60;
+  return rest ? `${Math.floor(seconds / 60)}m ${rest}s` : `${seconds / 60}m`;
+}
+
+function renderTrends(): string {
+  const locked = trends.full_weeks < TRENDS_UNLOCK_WEEKS;
+  return `
+    <section class="history-page recap-page">
+      <div class="subpage-head recap-head">
+        <button type="button" data-action="close-recap">Back</button>
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>Trends</h2>
+        </div>
+        ${renderHistorySwitch("trends")}
+      </div>
+      ${locked ? renderTrendsLocked() : renderTrendRows()}
+    </section>
+  `;
+}
+
+function renderTrendsLocked(): string {
+  const have = Math.min(trends.full_weeks, TRENDS_UNLOCK_WEEKS);
+  return `
+    <section class="panel span-card trends-slab trends-locked">
+      <p class="eyebrow">Trends</p>
+      <p class="span-value">Unlocks after two full weeks</p>
+      <p class="span-caption">Week-over-week lines for focused time, attention span, and recovery need a couple of complete weeks before they mean anything.</p>
+      <div class="trend-pips" role="img" aria-label="${have} of ${TRENDS_UNLOCK_WEEKS} full weeks">
+        ${Array.from({ length: TRENDS_UNLOCK_WEEKS }, (_, index) => `<span class="${index < have ? "is-on" : ""}"></span>`).join("")}
+        <strong>${have} of ${TRENDS_UNLOCK_WEEKS} full weeks</strong>
+      </div>
+    </section>
+  `;
+}
+
+function renderTrendRows(): string {
+  const weeks = trends.weeks;
+  const [previous, last] = completedWeeks();
+  const has = (week: TrendWeek | undefined): week is TrendWeek => Boolean(week && week.session_count > 0);
+  const lastRecovery = has(last) ? last.recovery_median_seconds : null;
+  const previousRecovery = has(previous) ? previous.recovery_median_seconds : null;
+  const noLast = has(last) ? "" : "No sessions last week";
+
+  const focus = trendCompare(
+    has(last) ? last.focus_seconds : null,
+    has(previous) ? previous.focus_seconds : null,
+    60,
+    formatHours,
+    false,
+  );
+  const span = trendCompare(
+    has(last) ? last.median_stretch_seconds : null,
+    has(previous) ? previous.median_stretch_seconds : null,
+    30,
+    formatMinutes,
+    false,
+  );
+  const recovery = trendCompare(lastRecovery, previousRecovery, 5, formatRecovery, true);
+
+  return `
+    <div class="trends-grid">
+      ${renderTrendCard({
+        tone: "focus",
+        title: "Focused time",
+        value: has(last) ? formatHours(last.focus_seconds) : "—",
+        compare: noLast || focus,
+        plot: renderWeekPlot(
+          weeks.map((week) => ({
+            weekStart: week.week_start,
+            value: week.session_count > 0 ? week.focus_seconds / 3600 : null,
+            chip: formatHours(week.focus_seconds),
+          })),
+          "Focused hours per week",
+          { unit: "HRS", width: 1040, height: 230, bars: true, partialLast: true },
+        ),
+      })}
+      ${renderTrendCard({
+        tone: "span",
+        title: "Attention span",
+        value: has(last) ? formatMinutes(last.median_stretch_seconds) : "—",
+        compare: noLast || span,
+        plot: renderWeekPlot(
+          weeks.map((week) => ({
+            weekStart: week.week_start,
+            value: week.session_count > 0 ? week.median_stretch_seconds / 60 : null,
+            chip: formatStretchChip(week.median_stretch_seconds),
+          })),
+          "Typical uninterrupted stretch per week",
+          { unit: "MIN", width: 440, height: 250, partialLast: true },
+        ),
+      })}
+      ${renderTrendCard({
+        tone: "recovery",
+        title: "Recovery",
+        hint: "lower is better",
+        value: lastRecovery == null ? "—" : formatRecovery(lastRecovery),
+        compare: noLast || (lastRecovery == null ? { line: "No drifts last week" } : recovery),
+        plot: renderWeekPlot(
+          weeks.map((week) => ({
+            weekStart: week.week_start,
+            value: week.recovery_median_seconds == null ? null : week.recovery_median_seconds / 60,
+            chip: week.recovery_median_seconds == null ? "" : formatRecovery(week.recovery_median_seconds),
+          })),
+          "Typical time back on task after a drift, per week",
+          { unit: "MIN", width: 440, height: 250, partialLast: true },
+        ),
+      })}
+    </div>
+  `;
+}
+
+interface TrendComparison {
+  /** Short change for the pill, e.g. "↑ 42m"; absent when there is nothing to compare. */
+  pill?: string;
+  good?: boolean;
+  line: string;
+}
+
+function trendCompare(
+  now: number | null,
+  before: number | null,
+  threshold: number,
+  format: (seconds: number) => string,
+  lowerIsBetter: boolean,
+): TrendComparison {
+  if (now == null) {
+    return { line: "No data last week" };
+  }
+  if (before == null) {
+    return { line: "First full week on record" };
+  }
+  const change = now - before;
+  const baseline = `vs ${format(before)} the week before`;
+  if (Math.abs(change) < threshold) {
+    return { pill: "Steady", good: true, line: baseline };
+  }
+  const up = change > 0;
+  const amount = format(Math.abs(change));
+  const pill = lowerIsBetter ? `${amount} ${up ? "slower" : "faster"}` : `${up ? "↑" : "↓"} ${amount}`;
+  return { pill, good: lowerIsBetter ? !up : up, line: baseline };
+}
+
+function renderTrendCard(card: {
+  tone: "focus" | "span" | "recovery";
+  title: string;
+  hint?: string;
+  value: string;
+  compare: TrendComparison | string;
+  plot: string;
+}): string {
+  const compare = typeof card.compare === "string" ? { line: card.compare } : card.compare;
+  return `
+    <section class="panel trend-card trend-${card.tone}">
+      <div class="trend-head">
+        <p class="eyebrow">${escapeHtml(card.title)}${card.hint ? ` <span class="trend-hint">· ${escapeHtml(card.hint)}</span>` : ""}</p>
+        <div class="trend-figure">
+          <p class="trend-value">${escapeHtml(card.value)}</p>
+          ${compare.pill ? `<span class="trend-pill ${compare.good ? "is-good" : "is-bad"}">${escapeHtml(compare.pill)}</span>` : ""}
+        </div>
+        <p class="trend-line">Last full week · ${escapeHtml(compare.line)}</p>
+      </div>
+      ${card.plot}
+    </section>
+  `;
+}
+
+interface WeekPoint {
+  weekStart: string;
+  /** In axis units (minutes, hours); null when the week has nothing to plot. */
+  value: number | null;
+  chip: string;
+}
+
+interface WeekPlotOptions {
+  unit?: string;
+  height?: number;
+  width?: number;
+  /** Volumes (hours) read better as bars; rates and durations as a line. */
+  bars?: boolean;
+  /** Draw the running week as a hollow, unconnected dot so a partial week never looks like a drop. */
+  partialLast?: boolean;
+}
+
+function renderWeekPlot(weeks: WeekPoint[], ariaLabel: string, options: WeekPlotOptions = {}): string {
+  const { unit = "", height = 268, width = 680, bars = false, partialLast = false } = options;
   const left = 64;
   const right = 22;
   const top = 36;
   const bottom = 56;
-  const inset = 36;
   const plotW = width - left - right;
   const plotH = height - top - bottom;
-  const minutes = weeks.map((week) => Math.round(week.median_stretch_seconds / 60));
-  const { max: axisMax, step } = spanAxis(Math.max(0, ...minutes));
+  const { max: axisMax, step } = niceAxis(Math.max(0, ...weeks.map((week) => week.value ?? 0)));
   const ticks: number[] = [];
-  for (let tick = 0; tick <= axisMax; tick += step) {
+  for (let tick = 0; tick <= axisMax + step / 1000; tick += step) {
     ticks.push(tick);
   }
   const last = weeks.length - 1;
-  const innerW = plotW - inset;
-  const xAt = (index: number) =>
-    weeks.length === 1 ? left + inset + innerW / 2 : left + inset + (index / last) * innerW;
+  const xAt = (index: number) => left + ((index + 0.5) / weeks.length) * plotW;
   const yAt = (value: number) => top + plotH - (value / axisMax) * plotH;
   const points = weeks.map((week, index) => ({
     x: xAt(index),
-    y: yAt(minutes[index]),
+    y: yAt(week.value ?? 0),
+    hasData: week.value != null,
     current: index === last,
-    label: formatStretchChip(week.median_stretch_seconds),
-    weekLabel: formatWeekStart(week.week_start),
+    label: week.chip,
+    weekLabel: formatWeekStart(week.weekStart),
   }));
-  const line = points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
+  const line = bars
+    ? ""
+    : spanLineRibbon(
+        points.map((point) => ({ ...point, hasData: point.hasData && !(partialLast && point.current) })),
+        8,
+      );
+  const baseline = yAt(0);
+  const barWidth = Math.min(46, (plotW / weeks.length) * 0.58);
+  // Eight labels crowd the axis; keep every other one, always ending on this week.
+  const showLabel = (index: number) => weeks.length <= 6 || (last - index) % 2 === 0;
+  const tickLabel = (tick: number) => (step < 1 ? tick.toFixed(1) : String(Math.round(tick)));
   const grid = ticks
     .map((tick) => {
       const y = yAt(tick);
       return `
         <line class="span-grid" x1="${left}" y1="${y.toFixed(1)}" x2="${width - right}" y2="${y.toFixed(1)}" />
-        <text class="span-axis" x="${left - 10}" y="${y.toFixed(1)}" text-anchor="end" dominant-baseline="middle">${tick}</text>
+        <text class="span-axis" x="${left - 10}" y="${y.toFixed(1)}" text-anchor="end" dominant-baseline="middle">${tickLabel(tick)}</text>
       `;
     })
     .join("");
+  const unitLabel = unit
+    ? `<text class="span-axis-sub" x="${left - 10}" y="${top - 22}" text-anchor="end">${escapeHtml(unit)}</text>`
+    : "";
   const xLabels = points
-    .map((point) => {
+    .map((point, index) => {
+      if (!showLabel(index)) {
+        return "";
+      }
       const currentNote = point.current
         ? `<text class="span-axis-sub" x="${point.x.toFixed(1)}" y="${height - 8}" text-anchor="middle">so far</text>`
         : "";
@@ -2596,14 +3173,20 @@ function renderSpanPlot(weeks: WeeklyStretch[]): string {
     })
     .join("");
   const hits = points
+    .filter((point) => point.hasData)
     .map((point) => {
       const tipY = point.y - 28;
+      const tipWidth = Math.max(44, point.label.length * 9 + 16);
+      const partial = partialLast && point.current ? "is-partial" : "";
+      const mark = bars
+        ? `<rect class="span-bar ${partial}" x="${(point.x - barWidth / 2).toFixed(1)}" y="${Math.min(point.y, baseline - 3).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${Math.max(3, baseline - point.y).toFixed(1)}" rx="3" />`
+        : `<rect class="span-dot ${partial}" x="${(point.x - 7).toFixed(1)}" y="${(point.y - 7).toFixed(1)}" width="14" height="14" />`;
       return `
         <g class="span-hit" tabindex="0">
           <circle class="span-hotspot" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="22" />
-          <rect class="span-dot${point.current ? " is-now" : ""}" x="${(point.x - 7).toFixed(1)}" y="${(point.y - 7).toFixed(1)}" width="14" height="14" />
+          ${mark}
           <g class="span-tip" transform="translate(${point.x.toFixed(1)} ${tipY.toFixed(1)})">
-            <rect x="-22" y="-16" width="44" height="24" rx="6" />
+            <rect x="${-tipWidth / 2}" y="-16" width="${tipWidth}" height="24" rx="6" />
             <text y="1" text-anchor="middle" dominant-baseline="middle">${escapeHtml(point.label)}</text>
           </g>
         </g>
@@ -2612,26 +3195,54 @@ function renderSpanPlot(weeks: WeeklyStretch[]): string {
     .join("");
 
   return `
-    <svg class="span-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="Typical stretch for the last five weeks">
+    <svg class="span-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="${attr(ariaLabel)}">
       ${grid}
-      <polyline class="span-line" points="${line}" />
+      ${unitLabel}
+      ${line ? `<path class="span-line" d="${line}" />` : ""}
       ${xLabels}
       ${hits}
     </svg>
   `;
 }
 
-function spanAxis(maxMinutes: number): { max: number; step: number } {
-  if (maxMinutes <= 15) {
-    return { max: 15, step: 5 };
+function spanLineRibbon(points: { x: number; y: number; hasData: boolean }[], width: number): string {
+  const r = width / 2;
+  const p = (x: number, y: number) => `${x.toFixed(2)} ${y.toFixed(2)}`;
+  const parts: string[] = [];
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const a = points[i];
+    const b = points[i + 1];
+    if (!a.hasData || !b.hasData) {
+      continue;
+    }
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.01) {
+      continue;
+    }
+    const nx = (-dy / len) * r;
+    const ny = (dx / len) * r;
+    parts.push(
+      `M${p(a.x + nx, a.y + ny)}L${p(b.x + nx, b.y + ny)}A${r} ${r} 0 0 1 ${p(b.x - nx, b.y - ny)}L${p(a.x - nx, a.y - ny)}A${r} ${r} 0 0 1 ${p(a.x + nx, a.y + ny)}Z`,
+    );
   }
-  const max = Math.max(30, Math.ceil(maxMinutes / 10) * 10);
-  return { max, step: 10 };
+  return parts.join("");
+}
+
+/** Three even steps that cover `max`, on round numbers (0.25, 0.5, 1, 2, 5, 10…). */
+function niceAxis(max: number): { max: number; step: number } {
+  const raw = Math.max(max, 0.0001) / 3;
+  const steps = [0.25, 0.5, 1, 2, 5, 10, 15, 20, 30, 60, 120];
+  const step = steps.find((candidate) => candidate >= raw) ?? Math.ceil(raw / 60) * 60;
+  return { max: step * 3, step };
 }
 
 function renderMiniTimeline(item: SessionSummary): string {
   const parts = [
     { cls: "state-focused", seconds: item.focus_seconds },
+    { cls: "state-neutral", seconds: item.neutral_seconds },
+    { cls: "state-unrated", seconds: item.unrated_seconds },
     { cls: "state-distracted", seconds: item.distracted_seconds },
     { cls: "state-idle", seconds: item.idle_seconds },
   ].filter((part) => part.seconds > 0);
@@ -2646,6 +3257,8 @@ function renderMiniTimeline(item: SessionSummary): string {
 }
 
 function renderSessionReport(report: SessionReport): string {
+  const recorded = report.spans.reduce((sum, span) => sum + span.seconds, 0);
+  const unrecorded = report.spans.length > 0 && recorded + 1 < timelineSeconds(report);
   return `
     <section class="history-page">
       <div class="report-toolbar">
@@ -2658,22 +3271,50 @@ function renderSessionReport(report: SessionReport): string {
           <p class="report-headline">${escapeHtml(reportHeadline(report))}</p>
           <p class="report-started">${escapeHtml(new Date(report.started_at).toLocaleString())} · ${escapeHtml(label(report.strictness))}</p>
           ${renderReportTimeline(report)}
-          <div class="report-inset">${renderTimelineLegend()}</div>
+          <div class="report-inset">${renderTimelineLegend(report, unrecorded)}</div>
         </section>
         <aside class="report-stats" aria-label="Session stats">
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds))}
-          ${reportStat("Focus and Neutral", `${report.focus_percent}%`)}
+          ${renderFocusStat(report)}
           ${reportStat("Nudges", String(report.nudge_count))}
         </aside>
       </div>
-      <section class="panel categories-card">
+      <section class="panel recap-apps">
         <p class="eyebrow">WHERE IT WENT</p>
-        <h2>Categories</h2>
-        ${renderCategoryBars(report)}
-        <p class="hint-line">${escapeHtml(report.top_apps.join(" / ") || "No apps recorded")}</p>
+        <h2>Apps & sites</h2>
+        <p class="recap-caption">Only Relevant time counts as focus. Unclassified time follows how you classify it now; decisions made during a session keep.</p>
+        ${renderRatePrompt(report.apps, "this session")}
+        ${
+          report.apps.length === 0
+            ? `<p class="empty">No app time recorded.</p>`
+            : renderAppGroups(report.apps, APP_GROUPS)
+        }
       </section>
     </section>
   `;
+}
+
+/**
+ * While most of a session is unclassified, a percentage would mostly measure what hasn't been
+ * classified yet (a first session reads 0%). The slot asks for the classifying instead.
+ */
+function renderFocusStat(report: SessionReport): string {
+  const unclassified = unratedApps(report.apps).length;
+  if (unclassified === 0 || !scoreAwaitsClassifying(report.unrated_seconds, report.idle_seconds, report.duration_seconds)) {
+    return reportStat("Focused", `${report.focus_percent}%`);
+  }
+  return `
+    <button class="report-stat report-stat-action" type="button" data-action="rate-apps" data-where="this session">
+      <span>Focused</span>
+      <strong>Classify ${unclassified === 1 ? "1 app" : `${unclassified} apps`} to see it</strong>
+    </button>
+  `;
+}
+
+/** Unclassified time is most of the time the user was there. */
+function scoreAwaitsClassifying(unratedSeconds: number, idleSeconds: number, durationSeconds: number): boolean {
+  const present = Math.max(durationSeconds - idleSeconds, 0);
+  return unratedSeconds > 0 && unratedSeconds * 2 > present;
 }
 
 function reportStat(labelText: string, value: string): string {
@@ -2685,8 +3326,15 @@ function reportStat(labelText: string, value: string): string {
   `;
 }
 
+/** Span offsets include pauses, so the bar can be longer than the timer duration. */
+function timelineSeconds(report: SessionReport): number {
+  const spanEnd = report.spans.reduce((end, span) => Math.max(end, span.started_offset_seconds + span.seconds), 0);
+  const eventEnd = report.events.reduce((end, event) => Math.max(end, event.at_offset_seconds), 0);
+  return Math.max(report.duration_seconds, 1, spanEnd, eventEnd);
+}
+
 function renderReportTimeline(report: SessionReport): string {
-  const duration = Math.max(report.duration_seconds, 1);
+  const duration = timelineSeconds(report);
   const nudges = report.events.filter((event) => event.kind === "nudge");
   if (report.spans.length === 0) {
     return `<p class="empty">No timeline for this session.</p>`;
@@ -2696,8 +3344,10 @@ function renderReportTimeline(report: SessionReport): string {
       <div class="timeline-bar" role="img" aria-label="Session timeline">
         ${report.spans
           .map((span) => {
-            const title = `${span.app}${span.context ? ` · ${span.context}` : ""} · ${formatDuration(span.seconds)}`;
-            return `<span class="timeline-span state-${escapeHtml(span.state)}" style="flex: ${Math.max(span.seconds, 1)} 1 0" title="${attr(title)}"></span>`;
+            const title = `${span.label} · ${formatDuration(span.seconds)}`;
+            const left = (span.started_offset_seconds / duration) * 100;
+            const width = (span.seconds / duration) * 100;
+            return `<span class="timeline-span state-${escapeHtml(span.state)}" style="left: ${left.toFixed(3)}%; width: ${width.toFixed(3)}%" title="${attr(title)}"></span>`;
           })
           .join("")}
         ${nudges
@@ -2711,13 +3361,19 @@ function renderReportTimeline(report: SessionReport): string {
   `;
 }
 
-function renderTimelineLegend(): string {
+function renderTimelineLegend(report: SessionReport, unrecorded: boolean): string {
+  const has = (state: string) => report.spans.some((span) => span.state === state);
   const items = [
     ["state-focused", "Focused"],
     ["state-neutral", "Neutral"],
+    ...(has("unrated") ? [["state-unrated", "Unclassified"]] : []),
     ["state-suspicious", "Slipping"],
     ["state-distracted", "Distracted"],
-    ["state-idle", "Idle"],
+    // Idle (no input) and device asleep / unknown are one "Away"; hovering a segment says which.
+    ["state-idle", "Away"],
+    ...(has("paused") ? [["state-paused", "Paused"]] : []),
+    // Only sessions recorded before the gap-free recorder can have these.
+    ...(unrecorded ? [["state-unrecorded", "Not recorded"]] : []),
   ];
   return `
     <ul class="legend-swatches">
@@ -2735,26 +3391,6 @@ function renderTimelineLegend(): string {
   `;
 }
 
-function renderCategoryBars(report: SessionReport): string {
-  const totals = new Map(report.category_totals.map((row) => [row.category, row.seconds]));
-  const max = Math.max(...REPORT_CATEGORIES.map((category) => totals.get(category) ?? 0), 1);
-  return `
-    <div class="category-bars">
-      ${REPORT_CATEGORIES.map((category) => {
-        const seconds = totals.get(category) ?? 0;
-        const width = Math.round((seconds / max) * 100);
-        return `
-          <div class="category-row">
-            <span>${escapeHtml(category)}</span>
-            <div class="category-track"><span class="category-${category}" style="width: ${width}%"></span></div>
-            <strong>${formatMinutes(seconds)}</strong>
-          </div>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
-
 function bindEvents(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2768,6 +3404,9 @@ function bindEvents(): void {
       }
       activeTab = next;
       if (next !== "settings") {
+        if (settingsView === "voice") {
+          leaveVoiceScreen();
+        }
         settingsView = "home";
         ruleEditor = null;
       }
@@ -2801,6 +3440,54 @@ function bindEvents(): void {
     });
   });
 
+  document.getElementById("rule-value")?.addEventListener("input", (event) => {
+    if (ruleEditor) {
+      ruleEditor.value = (event.currentTarget as HTMLInputElement).value;
+      paintRuleEditorLive();
+      scheduleRulePreview();
+    }
+  });
+
+  document.getElementById("rule-name")?.addEventListener("input", (event) => {
+    if (ruleEditor) {
+      ruleEditor.name = (event.currentTarget as HTMLInputElement).value;
+      ruleEditor.nameTouched = true;
+    }
+  });
+
+  document.getElementById("rule-classification")?.addEventListener("change", (event) => {
+    if (ruleEditor) {
+      ruleEditor.classification = (event.currentTarget as HTMLSelectElement).value as RuleClassification;
+      paintRuleEditorLive();
+    }
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-history-rename]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.historyRename ?? "";
+      const kind = button.dataset.renameKind as "app" | "website";
+      historyRename = { kind, key, value: kind === "website" ? siteNames[key] ?? "" : appNames[key] ?? "" };
+      render();
+      (document.getElementById("history-rename") as HTMLInputElement | null)?.select();
+    });
+  });
+
+  const renameInput = document.getElementById("history-rename") as HTMLInputElement | null;
+  renameInput?.addEventListener("input", () => {
+    if (historyRename) {
+      historyRename.value = renameInput.value;
+    }
+  });
+  renameInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveHistoryRename();
+    }
+  });
+  renameInput?.addEventListener("blur", () => {
+    void saveHistoryRename();
+  });
+
   document.getElementById("phrase-editor")?.addEventListener("submit", (event) => {
     event.preventDefault();
     void savePhraseForm(event.currentTarget as HTMLFormElement);
@@ -2818,10 +3505,6 @@ function bindEvents(): void {
 
   document.getElementById("overlay-snooze")?.addEventListener("change", (event) => {
     const mute = (event.target as HTMLInputElement).checked;
-    if (!mute && snapshot?.current?.status === "paused") {
-      void invokeSnapshot("clear_snooze");
-      return;
-    }
     void invokeSnapshot(mute ? "snooze_session" : "resume_session");
   });
 
@@ -2919,13 +3602,69 @@ function bindEvents(): void {
 
   bindVoicePreview();
   bindVoiceWaveforms();
-  bindClipGenerateStatus();
 }
 
 function bindDraftField(id: string, key: "goal"): void {
   document.getElementById(id)?.addEventListener("input", (event) => {
     draft[key] = (event.target as HTMLTextAreaElement).value;
   });
+}
+
+function releaseVoiceWorker(): void {
+  void invoke("release_voice_worker").catch(() => null);
+}
+
+function leaveVoiceScreen(): void {
+  if (clipGenerate?.phase === "working") {
+    stopVoicePreview();
+  } else if (clipGenerate) {
+    void discardClipGenerate();
+  } else {
+    stopVoicePreview();
+  }
+  releaseVoiceWorker();
+}
+
+async function cancelClipGenerate(): Promise<void> {
+  if (voiceBusy === "generate-clips") {
+    ignoreVoiceWorkerError = true;
+  }
+  try {
+    await invoke("cancel_voice_generation");
+  } catch {
+    // worker may already be gone
+  }
+  dismissClipGenerate();
+}
+
+function dismissClipGenerate(): void {
+  stopVoicePreview();
+  clipGenerate = null;
+  render();
+}
+
+async function discardClipGenerate(): Promise<void> {
+  const job = clipGenerate;
+  const voice = clipsVoice();
+  const phrase =
+    job?.phase === "ready" ? effectivePhrases().find((item) => item.id === job.phraseId) : undefined;
+  const clip = phrase ? clipForPhrase(voice, phrase) : null;
+  const profileId = voice.profile?.profile_id;
+  dismissClipGenerate();
+  if (job?.phase !== "ready" || !clip || !profileId) {
+    return;
+  }
+  try {
+    upsertProfile(
+      await invoke<VoiceProfileSummary>("delete_voice_clip", {
+        input: { profile_id: profileId, clip_id: clip.clip_id },
+      }),
+    );
+    bumpClipAsset(clip.path);
+    render();
+  } catch (error) {
+    showFeedback(`Could not discard clip: ${errorText(error)}`);
+  }
 }
 
 async function startSession(): Promise<boolean> {
@@ -3036,21 +3775,31 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "open-month-recap") {
-    const raw = source?.dataset.start || trends.month_recap.start;
-    const start = raw ? `${raw.slice(0, 8)}01` : dayKey(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
-    await openPeriodRecap("month", start);
+  if (action === "open-trends") {
+    historyView = "trends";
+    periodRecap = null;
+    sessionReport = null;
+    editingRecapNames = false;
+    historyRename = null;
+    await refreshTrends(false);
+    render();
     return;
   }
 
   if (action === "close-recap") {
     historyView = "list";
     periodRecap = null;
+    void refreshTrends();
+    editingRecapNames = false;
+    historyRename = null;
     render();
     return;
   }
 
-  if (action === "export-recap-pdf") {
+  if (action === "toggle-recap-names") {
+    editingRecapNames = !editingRecapNames;
+    historyRename = null;
+    render();
     return;
   }
 
@@ -3067,6 +3816,37 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
       historyWeekStart = next;
       await refreshHistoryWeek();
     }
+    return;
+  }
+
+  if (action === "rate-apps") {
+    startRating(unratedApps(ratingSourceApps()), source?.dataset.where || "");
+    return;
+  }
+
+  if (action === "rate-app") {
+    const app = ratingSourceApps().find((row) => row.kind === source?.dataset.kind && row.key === source?.dataset.key);
+    if (app) {
+      startRating([app], historyView === "report" ? "this session" : "");
+    }
+    return;
+  }
+
+  if (action === "rate-choice") {
+    const choice = source?.dataset.choice as RuleClassification | undefined;
+    if (choice) {
+      await chooseRating(choice);
+    }
+    return;
+  }
+
+  if (action === "rate-skip") {
+    advanceRating();
+    return;
+  }
+
+  if (action === "close-rating") {
+    finishRating();
     return;
   }
 
@@ -3101,12 +3881,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "ask-scrub") {
-    historyConfirm = { kind: "scrub" };
-    render();
-    return;
-  }
-
   if (action === "cancel-history-confirm") {
     historyConfirm = null;
     render();
@@ -3135,10 +3909,14 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "back-settings") {
     const leavingWebcam = settingsView === "webcam";
+    const leavingVoice = settingsView === "voice";
     settingsView = "home";
     phraseEditor = null;
     phraseSetPickerOpen = false;
     dismissVoiceInfo();
+    if (leavingVoice) {
+      leaveVoiceScreen();
+    }
     render();
     if (leavingWebcam) {
       await stopWebcamPreview();
@@ -3382,10 +4160,13 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "keep-clip") {
+    dismissClipGenerate();
+    return;
+  }
+
   if (action === "close-clip-generate") {
-    stopClipGenerateStatus();
-    clipGenerate = null;
-    render();
+    await discardClipGenerate();
     return;
   }
 
@@ -3410,11 +4191,21 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  const markable = snapshot?.current?.focus?.activity;
+  if (action.startsWith("mark-") && markable && markable.kind !== "app" && markable.kind !== "website") {
+    showFeedback(`${markable.label} can't be marked. Mark a website or an app.`);
+    return;
+  }
+  freshRescoreNote = "";
   const ok = await invokeSnapshot(command, undefined, !action.startsWith("mark-"));
   if (ok && action.startsWith("mark-")) {
-    const sample = snapshot?.current?.focus?.sample;
-    const name = sample?.window_title?.trim() || sample?.app_name?.trim() || "last window";
-    showFeedback(`${action === "mark-relevant" ? "Relevant" : "Distracting"}: ${name}`);
+    const name = snapshot?.current?.focus?.activity.label || "last window";
+    const note = freshRescoreNote;
+    freshRescoreNote = "";
+    showFeedback(
+      `${action === "mark-relevant" ? "Relevant" : "Distracting"}: ${name}${note ? ` · ${note}` : ""}`,
+      note ? RESCORE_TOAST_MS : undefined,
+    );
   }
   if (ok && action === "stop" && history[0]) {
     await openHistoryReport(history[0].id);
@@ -3432,13 +4223,17 @@ async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
     ruleEditor = {
       scope,
       index: null,
-      target: "window_title",
+      target: "website",
       classification:
         (button.dataset.ruleClassification as RuleClassification | undefined) ??
         (scope === "preflight" ? "focused" : "distracting"),
       value: "",
+      name: "",
+      nameTouched: false,
+      preview: null,
     };
     render();
+    document.getElementById("rule-value")?.focus();
     return;
   }
 
@@ -3455,7 +4250,15 @@ async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
   }
 
   if (action === "edit") {
-    ruleEditor = { scope, index, ...rules[index] };
+    const rule = rules[index];
+    ruleEditor = {
+      scope,
+      index,
+      ...rule,
+      name: rule.target === "website" ? siteNames[rule.value] ?? "" : "",
+      nameTouched: false,
+      preview: { target: rule.target, value: rule.value },
+    };
     render();
     return;
   }
@@ -3482,14 +4285,36 @@ async function saveRuleForm(form: HTMLFormElement): Promise<void> {
     return;
   }
 
-  const rule: AppRule = {
-    target: "window_title",
-    classification: formValue(form, "classification") as RuleClassification,
-    value: formValue(form, "value").trim(),
-  };
-
-  if (!rule.value) {
-    showFeedback("Enter an app or website name");
+  const text = formValue(form, "value").trim();
+  if (!text) {
+    showFeedback("Enter a website or an app name");
+    return;
+  }
+  let rule: AppRule;
+  try {
+    rule = await invoke<AppRule>("resolve_rule_input", {
+      text,
+      classification: formValue(form, "classification") as RuleClassification,
+    });
+  } catch (error) {
+    showFeedback(errorText(error));
+    return;
+  }
+  if (ruleEditor?.scope !== scope) {
+    return;
+  }
+  if (rule.target === "website" && previewSite(ruleEditor) === rule.value) {
+    const name = formValue(form, "name").trim();
+    if (name !== (siteNames[rule.value] ?? "")) {
+      try {
+        siteNames = await invoke<Record<string, string>>("set_site_name", { key: rule.value, name });
+      } catch (error) {
+        showFeedback(errorText(error));
+        return;
+      }
+    }
+  }
+  if (ruleEditor?.scope !== scope) {
     return;
   }
 
@@ -3510,10 +4335,102 @@ async function saveRuleForm(form: HTMLFormElement): Promise<void> {
   }
 }
 
+function scheduleRulePreview(delay = 140): void {
+  if (rulePreviewTimer !== null) {
+    window.clearTimeout(rulePreviewTimer);
+  }
+  rulePreviewTimer = window.setTimeout(() => {
+    rulePreviewTimer = null;
+    void resolveRulePreview();
+  }, delay);
+}
+
+async function resolveRulePreview(): Promise<void> {
+  const editor = ruleEditor;
+  if (!editor) {
+    return;
+  }
+  const text = editor.value.trim();
+  let preview: RulePreview = null;
+  if (text) {
+    try {
+      const rule = await invoke<AppRule>("resolve_rule_input", { text, classification: editor.classification });
+      preview = { target: rule.target, value: rule.value };
+    } catch (error) {
+      preview = { error: errorText(error) };
+    }
+  }
+  if (ruleEditor !== editor || editor.value.trim() !== text) {
+    return;
+  }
+  const before = previewSite(editor);
+  editor.preview = preview;
+  const site = previewSite(editor);
+  if (site !== before) {
+    editor.nameTouched = false;
+  }
+  if (!editor.nameTouched) {
+    editor.name = site ? siteNames[site] ?? "" : "";
+  }
+  paintRuleEditorLive();
+}
+
+function paintRuleEditorLive(): void {
+  const editor = ruleEditor;
+  if (!editor) {
+    return;
+  }
+  const preview = document.getElementById("rule-preview");
+  const nameInput = document.getElementById("rule-name") as HTMLInputElement | null;
+  if (preview) {
+    preview.innerHTML = renderRulePreview(editor);
+  }
+  if (nameInput) {
+    const site = previewSite(editor);
+    const field = nameInput.closest("label");
+    if (field) {
+      field.hidden = !site;
+    }
+    nameInput.placeholder = site ?? "";
+    if (!editor.nameTouched) {
+      nameInput.value = editor.name;
+    }
+  }
+}
+
+async function saveHistoryRename(): Promise<void> {
+  const rename = historyRename;
+  if (!rename) {
+    return;
+  }
+  historyRename = null;
+  try {
+    if (rename.kind === "website") {
+      siteNames = await invoke<Record<string, string>>("set_site_name", { key: rename.key, name: rename.value });
+    } else {
+      appNames = await invoke<Record<string, string>>("set_app_name", { key: rename.key, name: rename.value });
+    }
+    periodRecap?.apps.forEach((app) => {
+      if (app.kind === rename.kind && app.key === rename.key) {
+        app.label = rename.kind === "website" ? siteName(rename.key) : appNames[rename.key] ?? app.label;
+      }
+    });
+  } catch (error) {
+    showFeedback(errorText(error));
+  }
+  render();
+}
+
 async function persistPermanentRuleChanges(previous: AppRule[]): Promise<void> {
   try {
-    permanentRules = await invoke<AppRule[]>("update_rules", { rules: permanentRules });
+    const saved = await invoke<RulesSaved>("update_rules", { rules: permanentRules });
+    permanentRules = saved.rules;
     lastError = "";
+    render();
+    if (saved.rescored_sessions.length > 0) {
+      showFeedback(`Rules saved · ${rescoredText(saved.rescored_sessions.length)}`, RESCORE_TOAST_MS);
+    }
+    return;
   } catch (error) {
     permanentRules = previous;
     lastError = errorText(error);
@@ -3524,10 +4441,15 @@ async function persistPermanentRuleChanges(previous: AppRule[]): Promise<void> {
 async function applyRulesPermanently(): Promise<void> {
   const previous = cloneRules(permanentRules);
   try {
-    permanentRules = await invoke<AppRule[]>("update_rules", { rules: cloneRules(preflightRules) });
+    const saved = await invoke<RulesSaved>("update_rules", { rules: cloneRules(preflightRules) });
+    permanentRules = saved.rules;
     lastError = "";
     render();
-    showFeedback("Saved for every session");
+    const rescored = saved.rescored_sessions.length;
+    showFeedback(
+      `Saved for every session${rescored ? ` · ${rescoredText(rescored)}` : ""}`,
+      rescored ? RESCORE_TOAST_MS : undefined,
+    );
     return;
   } catch (error) {
     permanentRules = previous;
@@ -3556,6 +4478,10 @@ async function savePhraseForm(form: HTMLFormElement): Promise<void> {
   }
 
   const editor = phraseEditor ? { ...phraseEditor } : null;
+  if (editor?.phraseId && !canGenerateClip(clipsVoice())) {
+    showFeedback(clipGenerateLockTitle(clipsVoice()));
+    return;
+  }
   const previousCustomPhrases = customPhrases.map((phrase) => ({ ...phrase }));
   const previousPhraseOverrides = { ...phraseOverrides };
   const text = formValue(form, "text").trim();
@@ -3627,6 +4553,7 @@ async function invokeSnapshot(command: string, args?: Record<string, unknown>, p
     snapshot = await invoke<SessionSnapshot>(command, args);
     settings = snapshot.settings;
     history = snapshot.history;
+    noteRescore(snapshot);
     history.forEach((item) => knownHistoryIds.add(item.id));
     lastError = "";
   } catch (error) {
@@ -3832,9 +4759,14 @@ async function runVoiceBusy(kind: Exclude<VoiceBusy, null>, task: () => Promise<
     voiceError = "";
     return true;
   } catch (error) {
+    if (ignoreVoiceWorkerError) {
+      ignoreVoiceWorkerError = false;
+      return false;
+    }
     voiceError = errorText(error);
     return false;
   } finally {
+    ignoreVoiceWorkerError = false;
     voiceBusy = null;
     render();
   }
@@ -3957,6 +4889,9 @@ async function saveRecordedVoice(): Promise<void> {
 }
 
 async function generateOneClip(phraseId: string): Promise<boolean> {
+  if (clipGenerate?.phase === "working" || voiceBusy !== null) {
+    return false;
+  }
   const voice = clipsVoice();
   const profile = voice.profile;
   const phrase = effectivePhrases().find((item) => item.id === phraseId);
@@ -3971,8 +4906,8 @@ async function generateOneClip(phraseId: string): Promise<boolean> {
     return false;
   }
 
-  stopClipGenerateStatus();
-  clipGenerate = { phraseId, profileId: profile.profile_id, phase: "working", error: "" };
+  dismissVoiceInfo();
+  clipGenerate = { phraseId, phase: "working", error: "" };
   const ok = await runVoiceBusy("generate-clips", async () => {
     const generated = await invoke<VoiceProfileSummary>("generate_voice_clips", {
       input: {
@@ -3987,15 +4922,26 @@ async function generateOneClip(phraseId: string): Promise<boolean> {
     upsertProfile(generated);
     await refreshVoiceStatus(false);
     clipsVoiceId = voiceIdForProfile(generated.profile_id);
+    if (!clipGenerate || clipGenerate.phraseId !== phraseId) {
+      return;
+    }
+    const ready = clipForPhrase(clipsVoice(), phrase);
+    if (ready) {
+      bumpClipAsset(ready.path);
+    }
+    clipGenerate = { ...clipGenerate, phase: "ready", error: "" };
   });
   if (!clipGenerate || clipGenerate.phraseId !== phraseId) {
     return true;
   }
-  stopClipGenerateStatus();
-  clipGenerate = ok
-    ? { ...clipGenerate, phase: "ready", error: "" }
-    : { ...clipGenerate, phase: "error", error: voiceError || "The local worker could not generate this clip." };
-  render();
+  if (!ok && clipGenerate.phase !== "ready") {
+    clipGenerate = {
+      ...clipGenerate,
+      phase: "error",
+      error: voiceError || "The local worker could not generate this clip.",
+    };
+    render();
+  }
   return true;
 }
 
@@ -4152,7 +5098,7 @@ function paintFeedback(): void {
   toast.textContent = feedbackMessage;
 }
 
-function showFeedback(message: string): void {
+function showFeedback(message: string, durationMs = 1400): void {
   feedbackMessage = message;
   paintFeedback();
 
@@ -4164,7 +5110,24 @@ function showFeedback(message: string): void {
     feedbackMessage = "";
     feedbackTimer = null;
     paintFeedback();
-  }, 1400);
+  }, durationMs);
+}
+
+function rescoredText(sessions: number): string {
+  return sessions === 1 ? "1 past session re-scored" : `${sessions} past sessions re-scored`;
+}
+
+/**
+ * A mark during a session (from either window) rescored history; the main window says so once.
+ * The first snapshot only sets the baseline, so reopening the window repeats nothing.
+ */
+function noteRescore(next: SessionSnapshot): void {
+  const seq = next.rescore?.seq ?? 0;
+  if (appView === "main" && next.rescore && seenRescoreSeq !== null && seq > seenRescoreSeq) {
+    freshRescoreNote = rescoredText(next.rescore.sessions);
+    showFeedback(freshRescoreNote, RESCORE_TOAST_MS);
+  }
+  seenRescoreSeq = seq;
 }
 
 function paintRecordingClock(): void {
@@ -4435,7 +5398,7 @@ function statusChip(current: CurrentSession | null): string {
   }
 
   if (current.status === "snoozed") {
-    return "SNOOZED";
+    return "MUTED";
   }
 
   return current.focus?.should_nudge ? "PAY ATTENTION" : "LIVE";
@@ -4448,10 +5411,6 @@ function stateTitle(current: CurrentSession | null): string {
 
   if (current.status === "paused") {
     return "Paused";
-  }
-
-  if (current.status === "snoozed") {
-    return "Snoozed";
   }
 
   switch (current.focus?.state) {
@@ -4479,10 +5438,6 @@ function stateCopy(current: CurrentSession | null): string {
     return "No judgment recorded.";
   }
 
-  if (current.status === "snoozed") {
-    return "Nudges muted.";
-  }
-
   if (current.focus?.should_nudge) {
     return "You have been here long enough. Pay attention.";
   }
@@ -4497,10 +5452,6 @@ function stateClass(current: CurrentSession | null): string {
 
   if (current.status === "paused") {
     return "state-paused";
-  }
-
-  if (current.status === "snoozed") {
-    return "state-muted";
   }
 
   return `state-${current.focus?.state ?? "neutral"}`;
@@ -4661,10 +5612,20 @@ function ensureVoicePreviewAudio(path: string): HTMLAudioElement {
   return audio;
 }
 
+function transportPreviewClip(): VoiceClipSummary | null {
+  const job = clipGenerate;
+  if (job?.phase === "ready") {
+    const phrase = effectivePhrases().find((item) => item.id === job.phraseId);
+    return phrase ? clipForPhrase(clipsVoice(), phrase) : null;
+  }
+  const voice = availableVoices().find((item) => item.id === voiceInfoId);
+  return voice ? previewClipForVoice(voice) : null;
+}
+
 function bindVoicePreview(): void {
   const bar = document.getElementById("voice-preview-bar") as HTMLInputElement | null;
   if (!bar) {
-    if (!voiceInfoId) {
+    if (!voiceInfoId && clipGenerate?.phase !== "ready") {
       stopVoicePreview();
     } else {
       voicePreviewAudio?.pause();
@@ -4672,8 +5633,7 @@ function bindVoicePreview(): void {
     return;
   }
 
-  const voice = availableVoices().find((item) => item.id === voiceInfoId);
-  const clip = voice ? previewClipForVoice(voice) : null;
+  const clip = transportPreviewClip();
   if (clip) {
     ensureVoicePreviewAudio(clip.path);
   } else {
@@ -4898,11 +5858,7 @@ function drawWaveform(canvas: HTMLCanvasElement, peaks: number[], progress: numb
 }
 
 async function toggleVoicePreview(): Promise<void> {
-  const voice = availableVoices().find((item) => item.id === voiceInfoId);
-  if (!voice) {
-    return;
-  }
-  const clip = previewClipForVoice(voice);
+  const clip = transportPreviewClip();
   if (!clip) {
     return;
   }
@@ -5038,41 +5994,6 @@ function clipGenerateLockTitle(voice: VoiceOption): string {
     return "Pick a cloned voice under Clips for.";
   }
   return "";
-}
-
-function clipGenerateStatusText(): string {
-  return clipGenerateStatusIndex % 2 === 0 ? "Model loading" : "Model generating";
-}
-
-function stopClipGenerateStatus(): void {
-  if (clipGenerateTickId !== null) {
-    window.clearInterval(clipGenerateTickId);
-    clipGenerateTickId = null;
-  }
-  clipGenerateStatusIndex = 0;
-}
-
-function paintClipGenerateStatus(): void {
-  const status = document.getElementById("clip-generate-status");
-  if (!status || clipGenerate?.phase !== "working") {
-    return;
-  }
-  status.textContent = clipGenerateStatusText();
-}
-
-function bindClipGenerateStatus(): void {
-  if (clipGenerate?.phase !== "working") {
-    stopClipGenerateStatus();
-    return;
-  }
-  paintClipGenerateStatus();
-  if (clipGenerateTickId !== null) {
-    return;
-  }
-  clipGenerateTickId = window.setInterval(() => {
-    clipGenerateStatusIndex += 1;
-    paintClipGenerateStatus();
-  }, 1600);
 }
 
 function canEditPhrases(): boolean {
@@ -5243,12 +6164,29 @@ function recordingDurationSeconds(): number {
   return recordedVoice?.seconds ?? 0;
 }
 
-function clipAssetUrl(path: string): string {
-  try {
-    return convertFileSrc(path);
-  } catch {
-    return path;
+function bumpClipAsset(path: string): void {
+  clipAssetRevision.set(path, Date.now());
+  for (const key of [...waveformPeaks.keys()]) {
+    if (key.startsWith(`${path}:`)) {
+      waveformPeaks.delete(key);
+    }
   }
+  waveformBuffers.delete(path);
+  waveformPending.delete(path);
+  if (voicePreviewPath === path) {
+    stopVoicePreview();
+  }
+}
+
+function clipAssetUrl(path: string): string {
+  let src = path;
+  try {
+    src = convertFileSrc(path);
+  } catch {
+    src = path;
+  }
+  const rev = clipAssetRevision.get(path);
+  return rev ? `${src}?v=${rev}` : src;
 }
 
 function voiceBusyTitle(): string {
@@ -5356,11 +6294,15 @@ function noteNewHistory(items: SessionSummary[]): number | null {
   return newest;
 }
 
-async function openPeriodRecap(period: "week" | "month", start: string): Promise<void> {
+async function openPeriodRecap(period: "week", start: string): Promise<void> {
   try {
-    periodRecap = await invoke<PeriodRecap>("get_period_recap", { period, start });
+    [periodRecap, appNames] = await Promise.all([
+      invoke<PeriodRecap>("get_period_recap", { period, start }),
+      invoke<Record<string, string>>("get_app_names"),
+    ]);
     historyView = "recap";
     sessionReport = null;
+    historyRename = null;
     lastError = "";
   } catch (error) {
     lastError = errorText(error);
@@ -5409,13 +6351,6 @@ async function confirmHistoryAction(): Promise<void> {
     sessionReport = null;
     periodRecap = null;
     render();
-    return;
-  }
-  await runHistoryCommand("scrub_span_context", undefined, "Names forgotten");
-  if (sessionReport) {
-    await openHistoryReport(sessionReport.id);
-  } else if (periodRecap) {
-    await openPeriodRecap(periodRecap.kind, periodRecap.start);
   }
 }
 
@@ -5441,7 +6376,7 @@ async function runHistoryCommand(
 }
 
 function reportHeadline(report: SessionReport): string {
-  return `${formatMinutes(report.duration_seconds)} · ${report.focus_percent}% focused · typical stretch ${formatMinutes(report.median_stretch_seconds)}`;
+  return `Typical attention span · ${formatMinutes(report.median_stretch_seconds)}`;
 }
 
 
@@ -5453,11 +6388,15 @@ function focusPercent(item: SessionSummary): number {
 }
 
 function formatMinutes(totalSeconds: number): string {
+  if (totalSeconds > 0 && totalSeconds < 60) return "<1 min";
   return `${Math.max(0, Math.round(totalSeconds / 60))} min`;
 }
 
 function formatStretchChip(totalSeconds: number): string {
-  const minutes = Math.max(0, Math.round(totalSeconds / 60));
+  if (totalSeconds < 60) {
+    return "<1m";
+  }
+  const minutes = Math.round(totalSeconds / 60);
   if (minutes >= 60) {
     const hours = Math.floor(minutes / 60);
     const rest = minutes % 60;
@@ -5571,10 +6510,6 @@ function formatWeekStart(startKey: string): string {
   return parseDayKey(startKey).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function formatMonthLabel(startKey: string): string {
-  return parseDayKey(startKey).toLocaleDateString(undefined, { month: "long", year: "numeric" });
-}
-
 function groupSessionsByDay(items: SessionSummary[]): { label: string; items: SessionSummary[] }[] {
   const groups: { key: string; label: string; items: SessionSummary[] }[] = [];
   for (const item of items) {
@@ -5594,15 +6529,29 @@ function groupSessionsByDay(items: SessionSummary[]): { label: string; items: Se
   return groups;
 }
 
-function barHeight(value: number, max: number): number {
-  const floor = 16;
-  if (value <= 0 || max <= 0) {
-    return floor;
+function dayTotalLine(items: SessionSummary[]): string {
+  const focused = items.reduce((sum, item) => sum + item.focus_seconds, 0);
+  const sessions = items.length === 1 ? "1 session" : `${items.length} sessions`;
+  return `${formatHours(focused)} focused · ${sessions}`;
+}
+
+/** Daily focus bars share one scale: the busiest day, but never less than an hour, so a
+ * 20-second day stays a sliver instead of filling the chart. */
+const BAR_MIN_SCALE_SECONDS = 3600;
+
+function barHeight(value: number, max: number, empty = 16): number {
+  if (value <= 0) {
+    return empty;
   }
-  return Math.round(floor + (value / max) * (100 - floor));
+  const lowest = empty + 4;
+  const scale = Math.max(max, BAR_MIN_SCALE_SECONDS);
+  return Math.round(lowest + Math.min(1, value / scale) * (100 - lowest));
 }
 
 function formatHours(totalSeconds: number): string {
+  if (totalSeconds > 0 && totalSeconds < 60) {
+    return "<1m";
+  }
   const minutes = Math.round(Math.max(0, totalSeconds) / 60);
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;

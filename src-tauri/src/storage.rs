@@ -1,18 +1,24 @@
-use crate::focus::{starter_rules, AppRule, RuleClassification, RuleTarget};
+use crate::activity;
+use crate::attribution::{Activity, PAUSED_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
+use crate::focus::{matching_rule, starter_rules, AppRule, RuleClassification, RuleTarget};
 use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, HISTORY_CACHE_LIMIT};
+use crate::website;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i32 = 2;
-const STRETCH_WEEK_COUNT: usize = 5;
+const SCHEMA_VERSION: i32 = 8;
+/// Weeks of history the Trends page and the attention-span chart can draw.
+const TREND_WEEK_COUNT: usize = 8;
 const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
 
 /// How long a `session` row's timer actually ran. Sessions that never closed cleanly have no
 /// timer value; their tracked span time is the best record of how long they ran.
 const RUN_SECONDS_SQL: &str = "COALESCE(session.elapsed_seconds,
-    (SELECT COALESCE(SUM(span.seconds), 0) FROM span WHERE span.session_id = session.id))";
+    (SELECT COALESCE(SUM(span.seconds), 0) FROM span
+     WHERE span.session_id = session.id AND span.state != 'paused'))";
 
 const WEBCAM_SETTING_KEYS: &[&str] = &[
     "webcam.enabled",
@@ -23,6 +29,11 @@ const WEBCAM_SETTING_KEYS: &[&str] = &[
 pub struct SessionStorage {
     conn: Connection,
     failure: RefCell<Option<String>>,
+    site_names: RefCell<HashMap<String, String>>,
+    app_names: RefCell<HashMap<String, String>>,
+    native_app_names: RefCell<HashMap<String, String>>,
+    /// Seconds of timeline holes filled at close. The recorder should keep this at zero.
+    repaired_seconds: std::cell::Cell<u64>,
 }
 
 /// What the user must be told about history storage for this run.
@@ -67,7 +78,8 @@ pub fn open_or_reset(
     };
     let reason = match SessionStorage::open(&path) {
         Ok(opened) => return (Some(opened), None),
-        Err(reason) if path.exists() => reason,
+        Err(reason) if path.exists() && matches!(reason.as_str(),
+            "file is not a database" | "database disk image is malformed") => reason,
         Err(reason) => return (None, Some(StorageNotice::Off { reason })),
     };
     let moved_to = match move_aside(&path) {
@@ -104,33 +116,17 @@ fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
     Ok(moved)
 }
 
-#[derive(Clone, Debug)]
-pub struct StoredRule {
-    pub rule: AppRule,
-    pub source: String,
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub struct ReportSpan {
     pub started_offset_seconds: u64,
     pub seconds: u64,
+    /// The program that was in front (a browser for website rows).
     pub app: String,
-    pub context: Option<String>,
-    pub category: String,
-    pub state: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CategoryTotal {
-    pub category: String,
-    pub seconds: u64,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct DriftEntry {
-    pub at_offset_seconds: u64,
+    pub kind: String,
+    pub activity_key: String,
     pub label: String,
-    pub seconds: u64,
+    pub source: String,
+    pub state: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +148,8 @@ pub struct SessionReport {
     pub duration_seconds: u64,
     pub focus_percent: u64,
     pub focused_seconds: u64,
+    /// Time on apps and sites with no rule; it counts once the user rates them.
+    pub unrated_seconds: u64,
     pub distracted_seconds: u64,
     pub idle_seconds: u64,
     pub away_seconds: u64,
@@ -161,18 +159,9 @@ pub struct SessionReport {
     pub longest_stretch_seconds: u64,
     pub median_stretch_seconds: u64,
     pub spans: Vec<ReportSpan>,
-    pub category_totals: Vec<CategoryTotal>,
-    pub top_apps: Vec<String>,
-    pub top_drifts: Vec<DriftEntry>,
+    /// Time per app/site, grouped like the timeline (see `rated_state`).
+    pub apps: Vec<RecapApp>,
     pub events: Vec<ReportEvent>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct TrendSession {
-    pub id: u64,
-    pub started_at: String,
-    pub median_stretch_seconds: u64,
-    pub focus_percent: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -183,11 +172,14 @@ pub struct DailyFocus {
     pub session_count: u64,
 }
 
+/// One calendar week, from every span recorded in it (not averages of session averages).
 #[derive(Clone, Debug, Serialize)]
-pub struct WeeklyStretch {
+pub struct TrendWeek {
     pub week_start: String,
-    pub median_stretch_seconds: u64,
     pub session_count: u64,
+    pub focus_seconds: u64,
+    pub median_stretch_seconds: u64,
+    pub recovery_median_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -200,11 +192,12 @@ pub struct FocusRecap {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TrendsData {
-    pub sessions: Vec<TrendSession>,
     pub daily_focus: Vec<DailyFocus>,
-    pub weekly_stretch: Vec<WeeklyStretch>,
+    /// Oldest first, ending with the current week; starts at the first week with data.
+    pub weeks: Vec<TrendWeek>,
+    /// Completed weeks (not this one) that have at least one session.
+    pub full_weeks: u64,
     pub week_recap: FocusRecap,
-    pub month_recap: FocusRecap,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,8 +216,14 @@ pub struct RecapBucket {
 #[derive(Clone, Debug, Serialize)]
 pub struct RecapApp {
     pub group: String,
+    pub kind: String,
+    pub key: String,
     pub label: String,
     pub seconds: u64,
+    /// Whether a rule can name exactly this row (not Supervisor, Away, or browser catch-alls).
+    pub ratable: bool,
+    /// The current rule's decision; `None` means unrated, which does not count as focus.
+    pub rating: Option<RuleClassification>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -237,11 +236,35 @@ pub struct PeriodRecap {
     pub buckets: Vec<RecapBucket>,
     pub median_stretch_seconds: u64,
     pub longest_stretch_seconds: u64,
-    pub stretch_range_low: Option<u64>,
-    pub stretch_range_high: Option<u64>,
-    pub first_half_focus_percent: Option<u64>,
-    pub second_half_focus_percent: Option<u64>,
+    /// Typical time from leaving focus to being back on task; `None` when nothing drifted.
+    pub recovery_median_seconds: Option<u64>,
+    pub recovery_count: u64,
+    /// Drifts still going when their session ended.
+    pub unrecovered_count: u64,
+    /// The same figure for the period before, so the page can say faster or slower.
+    pub previous_recovery_median_seconds: Option<u64>,
     pub apps: Vec<RecapApp>,
+}
+
+/// Attention figures pooled from the spans of every session in a period.
+#[derive(Default)]
+struct SpanStats {
+    stretches: Vec<u64>,
+    recoveries: Vec<u64>,
+    unrecovered: u64,
+}
+
+impl SpanStats {
+    fn add(&mut self, spans: &[ReportSpan]) {
+        self.stretches.extend(focused_stretches(spans));
+        let (recoveries, unrecovered) = drift_recoveries(spans);
+        self.recoveries.extend(recoveries);
+        self.unrecovered += unrecovered;
+    }
+
+    fn recovery_median(&self) -> Option<u64> {
+        (!self.recoveries.is_empty()).then(|| median(&self.recoveries))
+    }
 }
 
 struct RecapSession {
@@ -249,8 +272,6 @@ struct RecapSession {
     day: String,
     focused_seconds: u64,
     longest_stretch_seconds: u64,
-    median_stretch_seconds: u64,
-    duration_seconds: u64,
 }
 
 impl SessionStorage {
@@ -278,11 +299,163 @@ impl SessionStorage {
         let storage = Self {
             conn,
             failure: RefCell::new(None),
+            site_names: RefCell::default(),
+            app_names: RefCell::default(),
+            native_app_names: RefCell::default(),
+            repaired_seconds: std::cell::Cell::new(0),
         };
         storage.apply_pragmas()?;
         storage.migrate()?;
         storage.seed_webcam_setting_keys()?;
+        storage.load_site_names()?;
+        storage.load_app_names()?;
         Ok(storage)
+    }
+
+    fn load_site_names(&self) -> Result<(), String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, name FROM site_name")
+            .map_err(|error| error.to_string())?;
+        let names = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<HashMap<String, String>, _>>()
+            .map_err(|error| error.to_string())?;
+        *self.site_names.borrow_mut() = names;
+        Ok(())
+    }
+
+    fn load_app_names(&self) -> Result<(), String> {
+        let mut stmt = self.conn.prepare("SELECT key, name FROM app_name")
+            .map_err(|error| error.to_string())?;
+        let names = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<HashMap<String, String>, _>>()
+            .map_err(|error| error.to_string())?;
+        *self.app_names.borrow_mut() = names;
+        Ok(())
+    }
+
+    /// Website labels are looked up at read time, so a rename reaches old history too.
+    fn display_label(&self, kind: &str, key: &str, stored: String) -> String {
+        match kind {
+            "website" => self.site_label(key),
+            "app" => self.app_label(key, self.native_app_names.borrow().get(key).map(String::as_str).unwrap_or(&stored)),
+            _ => stored,
+        }
+    }
+
+    fn refresh_native_app_names(&self) -> Result<(), String> {
+        let mut stmt = self.conn.prepare(
+            "SELECT activity_key, label FROM span WHERE id IN (
+                 SELECT MAX(id) FROM span
+                 WHERE kind = 'app' AND source != 'none' AND activity_key != ''
+                 GROUP BY activity_key)",
+        ).map_err(|error| error.to_string())?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut names: HashMap<String, String> = rows.into_iter()
+            .filter(|(key, _)| !legacy_unidentified_window(key))
+            .collect();
+        let keys: Vec<String> = names.keys().cloned().collect();
+        names.extend(activity::running_app_labels(&keys));
+        *self.native_app_names.borrow_mut() = names;
+        Ok(())
+    }
+
+    pub fn app_label(&self, key: &str, fallback: &str) -> String {
+        self.app_names.borrow().get(key).cloned().unwrap_or_else(|| fallback.to_string())
+    }
+
+    /// Observed app labels plus the user's names, for rule chips and name editing.
+    pub fn app_names(&self) -> Result<HashMap<String, String>, String> {
+        self.refresh_native_app_names()?;
+        let mut names = HashMap::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT activity_key, label FROM span
+             WHERE kind = 'app' AND source != 'none' AND activity_key != ''
+             ORDER BY id DESC",
+        ).map_err(|error| error.to_string())?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (key, label) = row.map_err(|error| error.to_string())?;
+            if !legacy_unidentified_window(&key) {
+                names.entry(key).or_insert(label);
+            }
+        }
+        names.extend(self.native_app_names.borrow().clone());
+        names.extend(self.app_names.borrow().iter()
+            .filter(|(key, _)| !legacy_unidentified_window(key))
+            .map(|(key, name)| (key.clone(), name.clone())));
+        Ok(names)
+    }
+
+    pub fn set_app_name(&self, key: &str, name: &str) -> Result<(), String> {
+        let key = key.trim().to_lowercase();
+        let name: String = name.trim().chars().take(60).collect();
+        if key.is_empty() {
+            return Err("No app to name".to_string());
+        }
+        if name.is_empty() {
+            self.conn.execute("DELETE FROM app_name WHERE key = ?1", [&key])
+                .map_err(|error| error.to_string())?;
+            self.app_names.borrow_mut().remove(&key);
+        } else {
+            self.conn.execute(
+                "INSERT INTO app_name (key, name) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET name = excluded.name",
+                [&key, &name],
+            ).map_err(|error| error.to_string())?;
+            self.app_names.borrow_mut().insert(key, name);
+        }
+        Ok(())
+    }
+
+    /// The user's name for a site, then the built-in name, then the domain.
+    pub fn site_label(&self, key: &str) -> String {
+        self.site_names
+            .borrow()
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| website::site_label(key))
+    }
+
+    /// Every site with a name other than its domain: built-in names overlaid by the user's.
+    pub fn site_names(&self) -> HashMap<String, String> {
+        let mut names: HashMap<String, String> = website::preset_names()
+            .map(|(key, label)| (key.to_string(), label.to_string()))
+            .collect();
+        names.extend(self.site_names.borrow().clone());
+        names
+    }
+
+    /// An empty name, or the built-in name, clears the user's name.
+    pub fn set_site_name(&self, key: &str, name: &str) -> Result<(), String> {
+        let key = key.trim().to_lowercase();
+        let name: String = name.trim().chars().take(60).collect();
+        if key.is_empty() {
+            return Err("No website to name".to_string());
+        }
+        if name.is_empty() || name == website::site_label(&key) {
+            self.conn
+                .execute("DELETE FROM site_name WHERE key = ?1", [&key])
+                .map_err(|error| error.to_string())?;
+            self.site_names.borrow_mut().remove(&key);
+        } else {
+            self.conn
+                .execute(
+                    "INSERT INTO site_name (key, name) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET name = excluded.name",
+                    [&key, &name],
+                )
+                .map_err(|error| error.to_string())?;
+            self.site_names.borrow_mut().insert(key, name);
+        }
+        Ok(())
     }
 
     fn apply_pragmas(&self) -> Result<(), String> {
@@ -398,7 +571,119 @@ impl SessionStorage {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        if version < 3 {
+            self.migrate_to_activity_identity()
+                .map_err(|error| error.to_string())?;
+        }
+        if version < 4 {
+            // Names the user gave sites. Kept apart from rules so deleting a rule keeps the name.
+            self.conn
+                .execute_batch(
+                    "
+                    BEGIN;
+                    CREATE TABLE site_name (key TEXT PRIMARY KEY, name TEXT NOT NULL);
+                    PRAGMA user_version = 4;
+                    COMMIT;
+                    ",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        if version < 5 {
+            self.conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE app_name (key TEXT PRIMARY KEY, name TEXT NOT NULL);
+                 PRAGMA user_version = 5;
+                 COMMIT;",
+            ).map_err(|error| error.to_string())?;
+        }
+        if version < 6 {
+            // v6 recomputed stretches; v7 below recomputes every metric, so only the version moves.
+            self.conn.execute_batch("PRAGMA user_version = 6;").map_err(|error| error.to_string())?;
+        }
+        if version < 7 {
+            // The score becomes Relevant time only, and unrated time gets its own total.
+            let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            tx.execute_batch(
+                "ALTER TABLE session ADD COLUMN neutral_seconds INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE session ADD COLUMN unrated_seconds INTEGER NOT NULL DEFAULT 0;",
+            ).map_err(|error| error.to_string())?;
+            self.rescore_history(&self.scoring_rules()?)?;
+            tx.execute_batch("PRAGMA user_version = 7;").map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+        }
+        if version < 8 {
+            // Supervisor's own window stopped counting as focus (see `rated_state`).
+            let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            self.rescore_history(&self.scoring_rules()?)?;
+            tx.execute_batch("PRAGMA user_version = 8;").map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+        }
         Ok(())
+    }
+
+    /// v3: spans name an app or website key instead of keeping window titles, and rules
+    /// target an app or a website. Old browser time can't be split by site, so it becomes
+    /// Other websites; title rules that don't name a site or an app are dropped.
+    fn migrate_to_activity_identity(&self) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let browsers = website::BROWSERS
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tx.execute_batch(&format!(
+            "
+            ALTER TABLE span ADD COLUMN kind TEXT NOT NULL DEFAULT 'app';
+            ALTER TABLE span ADD COLUMN activity_key TEXT NOT NULL DEFAULT '';
+            ALTER TABLE span ADD COLUMN label TEXT NOT NULL DEFAULT '';
+            ALTER TABLE span ADD COLUMN source TEXT NOT NULL DEFAULT 'app';
+            UPDATE span SET activity_key = lower(app), label = app;
+            UPDATE span SET source = 'none' WHERE app = 'Untracked';
+            UPDATE span SET kind = 'other_websites', activity_key = 'other-websites',
+                            label = 'Other websites', source = 'none'
+              WHERE lower(app) IN ({browsers});
+            ALTER TABLE span DROP COLUMN context;
+            "
+        ))?;
+
+        let legacy = {
+            let mut stmt = tx.prepare("SELECT target, value, classification, source FROM rule ORDER BY id")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.execute("DELETE FROM rule", [])?;
+        let mut seen = std::collections::HashSet::new();
+        for (target, value, classification, source) in legacy {
+            let classification = parse_classification(classification);
+            let rule = match target.as_str() {
+                "app_name" => Some(AppRule::app(&value, classification)),
+                "window_title" => AppRule::from_input(&value, classification),
+                _ => None,
+            };
+            let Some(rule) = rule.filter(|rule| !rule.value.is_empty()) else {
+                continue;
+            };
+            if seen.insert(rule.value.to_lowercase()) {
+                tx.execute(
+                    "INSERT INTO rule (target, value, classification, source) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        rule_target_key(&rule.target),
+                        rule.value,
+                        classification_key(rule.classification),
+                        source
+                    ],
+                )?;
+            }
+        }
+        tx.pragma_update(None, "user_version", 3)?;
+        tx.commit()
     }
 
     fn seed_webcam_setting_keys(&self) -> Result<(), String> {
@@ -512,29 +797,41 @@ impl SessionStorage {
     }
 
     pub fn load_rules(&self) -> Result<Vec<AppRule>, String> {
-        let stored = self.load_rules_with_source()?;
-        if stored.is_empty() {
-            let starter = starter_rules();
-            self.replace_rules(&starter)?;
-            return Ok(starter);
+        match self.saved_rules()? {
+            Some(rules) => Ok(rules),
+            None => {
+                let starter = starter_rules();
+                self.replace_rules(&starter)?;
+                Ok(starter)
+            }
         }
-        Ok(stored.into_iter().map(|entry| entry.rule).collect())
     }
 
-    fn load_rules_with_source(&self) -> Result<Vec<StoredRule>, String> {
+    /// `None` until rules are first saved, so an emptied rule list stays empty.
+    fn saved_rules(&self) -> Result<Option<Vec<AppRule>>, String> {
+        let stored = self.read_rules()?;
+        let initialized: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM setting WHERE key = 'rules.initialized')", [], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        Ok((initialized || !stored.is_empty()).then_some(stored))
+    }
+
+    /// The rules history is scored with. Never writes, so it is safe inside a transaction.
+    fn scoring_rules(&self) -> Result<Vec<AppRule>, String> {
+        Ok(self.saved_rules()?.unwrap_or_else(starter_rules))
+    }
+
+    fn read_rules(&self) -> Result<Vec<AppRule>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT target, value, classification, source FROM rule ORDER BY id ASC")
+            .prepare("SELECT target, value, classification FROM rule ORDER BY id ASC")
             .map_err(|error| error.to_string())?;
         let rows = stmt
             .query_map([], |row| {
-                Ok(StoredRule {
-                    rule: AppRule {
+                Ok(AppRule {
                         target: parse_rule_target(row.get(0)?),
                         value: row.get(1)?,
                         classification: parse_classification(row.get(2)?),
-                    },
-                    source: row.get(3)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -542,7 +839,8 @@ impl SessionStorage {
             .map_err(|error| error.to_string())
     }
 
-    pub fn replace_rules(&self, rules: &[AppRule]) -> Result<(), String> {
+    /// Returns the finished sessions whose scores the new rules changed.
+    pub fn replace_rules(&self, rules: &[AppRule]) -> Result<Vec<u64>, String> {
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM rule", [])
             .map_err(|error| error.to_string())?;
@@ -559,8 +857,31 @@ impl SessionStorage {
             )
             .map_err(|error| error.to_string())?;
         }
+        tx.execute("INSERT OR REPLACE INTO setting (key, value) VALUES ('rules.initialized', 'true')", [])
+            .map_err(|error| error.to_string())?;
+        // A rating reaches past unrated time, so every saved score is redone with the new rules.
+        let changed = self.rescore_history(rules)?;
         tx.commit().map_err(|error| error.to_string())?;
-        Ok(())
+        Ok(changed)
+    }
+
+    /// Recomputes the cached metrics of every finished session and returns the ones that
+    /// changed. Callers hold a transaction.
+    fn rescore_history(&self, rules: &[AppRule]) -> Result<Vec<u64>, String> {
+        let ids = {
+            let mut stmt = self.conn.prepare("SELECT id FROM session WHERE ended_at IS NOT NULL")
+                .map_err(|error| error.to_string())?;
+            let rows = stmt.query_map([], |row| row.get::<_, u64>(0))
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+        };
+        let mut changed = Vec::new();
+        for id in ids {
+            if self.recompute_session_metrics(id, rules)? {
+                changed.push(id);
+            }
+        }
+        Ok(changed)
     }
 
     pub fn insert_session(
@@ -587,23 +908,24 @@ impl SessionStorage {
         ended_reason: &str,
         elapsed_seconds: u64,
     ) -> Result<(), String> {
-        self.conn
+        let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        tx
             .execute(
                 "UPDATE session SET ended_at = ?1, ended_reason = ?2, elapsed_seconds = ?3
                  WHERE id = ?4",
                 params![ended_at, ended_reason, elapsed_seconds, id],
             )
             .map_err(|error| error.to_string())?;
-        self.recompute_session_metrics(id)?;
+        self.fill_span_holes(id)?;
+        self.recompute_session_metrics(id, &self.scoring_rules()?)?;
+        tx.commit().map_err(|error| error.to_string())?;
         Ok(())
     }
 
     pub fn insert_span(
         &self,
         session_id: u64,
-        app: &str,
-        context: Option<&str>,
-        category: &str,
+        activity: &Activity,
         state: &str,
         started_offset_seconds: u64,
         seconds: u64,
@@ -611,15 +933,19 @@ impl SessionStorage {
         if seconds == 0 {
             return Ok(());
         }
+        // `category` is a retired column kept so older databases stay readable.
         self.conn
             .execute(
-                "INSERT INTO span (session_id, app, context, category, state, started_offset_seconds, seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO span (session_id, app, kind, activity_key, label, source, category, state,
+                                   started_offset_seconds, seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9)",
                 params![
                     session_id,
-                    app,
-                    context,
-                    category,
+                    activity.app_id,
+                    activity.kind.key(),
+                    activity.key,
+                    activity.label,
+                    activity.source.key(),
                     state,
                     started_offset_seconds,
                     seconds
@@ -646,6 +972,31 @@ impl SessionStorage {
         Ok(())
     }
 
+    /// Refresh the unfinished span in place; repeated checkpoints do not add history rows.
+    pub fn checkpoint_span(
+        &self,
+        session_id: u64,
+        activity: &Activity,
+        state: &str,
+        started_offset_seconds: u64,
+        seconds: u64,
+    ) -> Result<(), String> {
+        if seconds == 0 {
+            return Ok(());
+        }
+        let changed = self.conn.execute(
+            "UPDATE span SET app = ?2, kind = ?3, activity_key = ?4, label = ?5,
+                 source = ?6, state = ?7, seconds = ?9
+             WHERE session_id = ?1 AND started_offset_seconds = ?8",
+            params![session_id, activity.app_id, activity.kind.key(), activity.key,
+                activity.label, activity.source.key(), state, started_offset_seconds, seconds],
+        ).map_err(|error| error.to_string())?;
+        if changed == 0 {
+            self.insert_span(session_id, activity, state, started_offset_seconds, seconds)?;
+        }
+        Ok(())
+    }
+
     pub fn recover_orphans(&self) -> Result<(), String> {
         let ids: Vec<i64> = {
             let mut stmt = self
@@ -666,24 +1017,66 @@ impl SessionStorage {
                     params![ended_at, id],
                 )
                 .map_err(|error| error.to_string())?;
-            self.recompute_session_metrics(id as u64)?;
+            self.fill_span_holes(id as u64)?;
+            self.recompute_session_metrics(id as u64, &self.scoring_rules()?)?;
         }
         Ok(())
     }
 
-    pub fn recompute_session_metrics(&self, session_id: u64) -> Result<(), String> {
-        let spans = self.load_spans_for_session(session_id)?;
+    /// Safety net: a session's spans must tile it. Any hole left by a recorder bug becomes
+    /// lost time instead of a blank in the report, and is logged so it gets fixed.
+    fn fill_span_holes(&self, session_id: u64) -> Result<(), String> {
+        let mut cursor = 0u64;
+        for span in self.load_spans_for_session(session_id, &[])? {
+            if span.started_offset_seconds > cursor {
+                let gap = span.started_offset_seconds - cursor;
+                eprintln!("supervisor: session {session_id} had a {gap}s timeline hole at {cursor}s");
+                self.repaired_seconds.set(self.repaired_seconds.get() + gap);
+                self.insert_span(session_id, &Activity::unknown(), "unknown", cursor, gap)?;
+            }
+            cursor = cursor.max(span.started_offset_seconds + span.seconds);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn repaired_seconds(&self) -> u64 {
+        self.repaired_seconds.get()
+    }
+
+    fn attach_ratings(&self, apps: &mut [RecapApp], rules: &[AppRule]) {
+        for app in apps {
+            app.ratable = matches!(app.kind.as_str(), "app" | "website")
+                && ![SUPERVISOR_KEY, UNKNOWN_KEY, PAUSED_KEY].contains(&app.key.as_str());
+            if !app.ratable {
+                continue;
+            }
+            // Display overrides must never become rule-matching identities.
+            let rule_label = self.native_app_names.borrow().get(&app.key).cloned()
+                .unwrap_or_else(|| app.key.clone());
+            let activity = Activity::from_stored(&app.kind, &app.key, &rule_label, &app.key);
+            app.rating = matching_rule(rules, &activity).map(|rule| rule.classification);
+        }
+    }
+
+    /// Returns whether any saved figure changed; unchanged sessions are not rewritten.
+    pub fn recompute_session_metrics(&self, session_id: u64, rules: &[AppRule]) -> Result<bool, String> {
+        let spans = self.load_spans_for_session(session_id, rules)?;
         let events = self.load_events_for_session(session_id)?;
 
         let mut focused_seconds = 0u64;
+        let mut neutral_seconds = 0u64;
+        let mut unrated_seconds = 0u64;
         let mut distracted_seconds = 0u64;
         let mut idle_seconds = 0u64;
 
         for span in &spans {
             match span.state.as_str() {
-                "focused" | "neutral" => focused_seconds += span.seconds,
+                "focused" => focused_seconds += span.seconds,
+                "neutral" => neutral_seconds += span.seconds,
+                "unrated" => unrated_seconds += span.seconds,
                 "suspicious" | "distracted" => distracted_seconds += span.seconds,
-                "idle" => idle_seconds += span.seconds,
+                "idle" | "unknown" => idle_seconds += span.seconds,
                 _ => {}
             }
         }
@@ -698,6 +1091,29 @@ impl SessionStorage {
         let longest_stretch_seconds = stretches.iter().copied().max().unwrap_or(0);
         let median_stretch_seconds = median(&stretches);
 
+        let metrics = [
+            focused_seconds,
+            distracted_seconds,
+            idle_seconds,
+            drift_count,
+            nudge_count,
+            longest_stretch_seconds,
+            median_stretch_seconds,
+            neutral_seconds,
+            unrated_seconds,
+        ];
+        let saved = self.conn.query_row(
+            "SELECT focused_seconds, distracted_seconds, idle_seconds, drift_count, nudge_count,
+                    longest_stretch_seconds, median_stretch_seconds, neutral_seconds, unrated_seconds
+             FROM session WHERE id = ?1",
+            [session_id],
+            |row| (0..metrics.len()).map(|index| row.get::<_, i64>(index).map(|value| value as u64))
+                .collect::<rusqlite::Result<Vec<u64>>>(),
+        ).map_err(|error| error.to_string())?;
+        if saved == metrics {
+            return Ok(false);
+        }
+
         self.conn
             .execute(
                 "UPDATE session SET
@@ -707,7 +1123,9 @@ impl SessionStorage {
                     drift_count = ?4,
                     nudge_count = ?5,
                     longest_stretch_seconds = ?6,
-                    median_stretch_seconds = ?7
+                    median_stretch_seconds = ?7,
+                    neutral_seconds = ?9,
+                    unrated_seconds = ?10
                  WHERE id = ?8",
                 params![
                     focused_seconds,
@@ -717,51 +1135,31 @@ impl SessionStorage {
                     nudge_count,
                     longest_stretch_seconds,
                     median_stretch_seconds,
-                    session_id
+                    session_id,
+                    neutral_seconds,
+                    unrated_seconds
                 ],
             )
             .map_err(|error| error.to_string())?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn list_history(&self, limit: usize) -> Result<Vec<SessionSummary>, String> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, goal, started_at, focused_seconds, distracted_seconds,
-                        idle_seconds, nudge_count
-                 FROM session
+            .prepare(&format!(
+                "{SUMMARY_SELECT}
                  WHERE ended_at IS NOT NULL
                  ORDER BY started_at DESC
-                 LIMIT ?1",
-            )
+                 LIMIT ?1"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map([limit as i64], |row| {
-                let id: i64 = row.get(0)?;
-                let goal: String = row.get(1)?;
-                let started_at: String = row.get(2)?;
-                let focused_seconds: i64 = row.get(3)?;
-                let distracted_seconds: i64 = row.get(4)?;
-                let idle_seconds: i64 = row.get(5)?;
-                let nudges: i64 = row.get(6)?;
-                Ok((id, goal, started_at, focused_seconds, distracted_seconds, idle_seconds, nudges))
-            })
+            .query_map([limit as i64], summary_from_row)
             .map_err(|error| error.to_string())?;
-
         let mut summaries = Vec::new();
         for row in rows {
-            let (id, goal, started_at, focused_seconds, distracted_seconds, idle_seconds, nudges) =
-                row.map_err(|error| error.to_string())?;
-            summaries.push(self.summary_from_row(
-                id,
-                goal,
-                started_at,
-                focused_seconds,
-                distracted_seconds,
-                idle_seconds,
-                nudges,
-            )?);
+            summaries.push(self.complete_summary(row.map_err(|error| error.to_string())?)?);
         }
         Ok(summaries)
     }
@@ -782,20 +1180,23 @@ impl SessionStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT app, context, SUM(seconds) AS total
+                "SELECT kind, activity_key, MAX(label), SUM(seconds) AS total
                  FROM span
-                 WHERE session_id = ?1
-                 GROUP BY app, context
-                 ORDER BY total DESC, app ASC
+                 WHERE session_id = ?1 AND state NOT IN ('paused', 'unknown')
+                   AND NOT (kind = 'app' AND activity_key IN ('untracked', 'supervisor'))
+                   AND state != 'idle'
+                 GROUP BY kind, activity_key
+                 ORDER BY total DESC, activity_key ASC
                  LIMIT 3",
             )
             .map_err(|error| error.to_string())?;
         let rows = stmt
             .query_map([session_id], |row| {
-                let app: String = row.get(0)?;
-                let context: Option<String> = row.get(1)?;
-                let total: i64 = row.get(2)?;
-                Ok((hint_label(&app, context.as_deref()), total))
+                let kind: String = row.get(0)?;
+                let key: String = row.get(1)?;
+                let label: String = row.get(2)?;
+                let total: i64 = row.get(3)?;
+                Ok((self.display_label(&kind, &key, label), total))
             })
             .map_err(|error| error.to_string())?;
         let mut hints = Vec::new();
@@ -807,12 +1208,14 @@ impl SessionStorage {
     }
 
     pub fn get_session_report(&self, id: u64) -> Result<SessionReport, String> {
+        self.refresh_native_app_names()?;
         let row = self
             .conn
             .query_row(
                 "SELECT goal, strictness, started_at, ended_at, ended_reason, planned_seconds,
                         focused_seconds, distracted_seconds, idle_seconds, away_seconds, phone_seconds,
-                        drift_count, nudge_count, longest_stretch_seconds, median_stretch_seconds
+                        drift_count, nudge_count, longest_stretch_seconds, median_stretch_seconds,
+                        unrated_seconds
                  FROM session WHERE id = ?1",
                 [id],
                 |row| {
@@ -832,6 +1235,7 @@ impl SessionStorage {
                         row.get::<_, i64>(12)?,
                         row.get::<_, i64>(13)?,
                         row.get::<_, i64>(14)?,
+                        row.get::<_, i64>(15)?,
                     ))
                 },
             )
@@ -853,19 +1257,20 @@ impl SessionStorage {
             nudge_count,
             longest_stretch_seconds,
             median_stretch_seconds,
+            unrated_seconds,
         ) = row;
 
         let duration_seconds = self.session_duration_seconds(id)?;
         let focus_percent = if duration_seconds == 0 {
             0
         } else {
-            (focused_seconds as u64 * 100) / duration_seconds
+            rounded_percent(focused_seconds as u64, duration_seconds)
         };
 
-        let spans = self.load_spans_for_session(id)?;
-        let category_totals = category_totals_from_spans(&spans);
-        let top_apps = top_apps_from_spans(&spans, 3);
-        let top_drifts = top_drifts_from_spans(&spans, 5);
+        let rules = self.scoring_rules()?;
+        let spans = self.load_spans_for_session(id, &rules)?;
+        let mut apps = apps_from_spans(&spans);
+        self.attach_ratings(&mut apps, &rules);
         let events = self.load_events_for_session(id)?;
 
         Ok(SessionReport {
@@ -879,6 +1284,7 @@ impl SessionStorage {
             duration_seconds,
             focus_percent,
             focused_seconds: focused_seconds as u64,
+            unrated_seconds: unrated_seconds as u64,
             distracted_seconds: distracted_seconds as u64,
             idle_seconds: idle_seconds as u64,
             away_seconds: away_seconds as u64,
@@ -888,53 +1294,12 @@ impl SessionStorage {
             longest_stretch_seconds: longest_stretch_seconds as u64,
             median_stretch_seconds: median_stretch_seconds as u64,
             spans,
-            category_totals,
-            top_apps,
-            top_drifts,
+            apps,
             events,
         })
     }
 
     pub fn get_trends(&self) -> Result<TrendsData, String> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, started_at, median_stretch_seconds, focused_seconds
-                 FROM session
-                 WHERE ended_at IS NOT NULL
-                 ORDER BY started_at DESC
-                 LIMIT 14",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
-            .map_err(|error| error.to_string())?;
-
-        let mut sessions = Vec::new();
-        for row in rows {
-            let (id, started_at, median_stretch_seconds, focused_seconds) =
-                row.map_err(|error| error.to_string())?;
-            let duration = self.session_duration_seconds(id as u64)?;
-            let focus_percent = if duration == 0 {
-                0
-            } else {
-                (focused_seconds as u64 * 100) / duration
-            };
-            sessions.push(TrendSession {
-                id: id as u64,
-                started_at,
-                median_stretch_seconds: median_stretch_seconds as u64,
-                focus_percent,
-            });
-        }
-
         let mut daily_stmt = self
             .conn
             .prepare(&format!(
@@ -984,16 +1349,19 @@ impl SessionStorage {
             .collect();
 
         let monday = this_monday();
-        let today = local_today();
+        let weeks = self.trend_weeks(monday)?;
+        let full_weeks = weeks
+            .iter()
+            .filter(|week| week.session_count > 0 && week.week_start < format_day(monday))
+            .count() as u64;
         Ok(TrendsData {
-            sessions,
             daily_focus,
-            weekly_stretch: self.weekly_stretch(monday)?,
+            weeks,
+            full_weeks,
             week_recap: self.focus_recap(
                 monday,
                 monday.saturating_add(time::Duration::days(7)),
             )?,
-            month_recap: self.focus_recap(first_of_month(today), next_month_start(today))?,
         })
     }
 
@@ -1008,6 +1376,7 @@ impl SessionStorage {
     }
 
     pub fn get_period_recap(&self, period: &str, start: &str) -> Result<PeriodRecap, String> {
+        self.refresh_native_app_names()?;
         let day = parse_day(start)?;
         match period {
             "week" => {
@@ -1034,60 +1403,25 @@ impl SessionStorage {
     ) -> Result<PeriodRecap, String> {
         let sessions = self.recap_sessions(&format_day(start), &format_day(end_exclusive))?;
         let mut by_day = std::collections::HashMap::<String, u64>::new();
-        let mut stretch_samples = Vec::new();
+        let mut stats = SpanStats::default();
         let mut longest_stretch_seconds = 0u64;
         let mut focus_seconds = 0u64;
-        let mut first_focus = 0u64;
-        let mut first_total = 0u64;
-        let mut second_focus = 0u64;
-        let mut second_total = 0u64;
-        let mut app_totals = std::collections::HashMap::<(String, String), u64>::new();
-        let rules = self.load_rules().unwrap_or_default();
+        let mut all_spans = Vec::new();
+        let rules = self.scoring_rules()?;
 
         for session in &sessions {
             focus_seconds += session.focused_seconds;
             longest_stretch_seconds = longest_stretch_seconds.max(session.longest_stretch_seconds);
-            if session.median_stretch_seconds > 0 {
-                stretch_samples.push(session.median_stretch_seconds);
-            }
             *by_day.entry(session.day.clone()).or_insert(0) += session.focused_seconds;
-            let spans = self.load_spans_for_session(session.id)?;
-            let halves = half_focus(&spans, session.duration_seconds);
-            first_focus += halves.0;
-            first_total += halves.1;
-            second_focus += halves.2;
-            second_total += halves.3;
-            for span in spans {
-                let group = recap_app_group(&rules, &span.app, span.context.as_deref());
-                let label = recap_activity_label(&span.app, span.context.as_deref());
-                *app_totals
-                    .entry((group.to_string(), label))
-                    .or_insert(0) += span.seconds;
-            }
+            let spans = self.load_spans_for_session(session.id, &rules)?;
+            stats.add(&spans);
+            all_spans.extend(spans);
         }
+        let mut apps = apps_from_spans(&all_spans);
+        self.attach_ratings(&mut apps, &rules);
 
-        const GROUP_ORDER: [&str; 4] = ["Focus", "Neutral", "Distracting", "Miscellaneous"];
-        let mut apps: Vec<RecapApp> = app_totals
-            .into_iter()
-            .map(|((group, label), seconds)| RecapApp {
-                group,
-                label,
-                seconds,
-            })
-            .collect();
-        apps.sort_by(|a, b| {
-            let left = GROUP_ORDER.iter().position(|group| *group == a.group).unwrap_or(9);
-            let right = GROUP_ORDER.iter().position(|group| *group == b.group).unwrap_or(9);
-            left.cmp(&right)
-                .then_with(|| b.seconds.cmp(&a.seconds))
-                .then_with(|| a.label.cmp(&b.label))
-        });
-
-        let (stretch_range_low, stretch_range_high) = if kind == "month" {
-            full_week_stretch_range(start, end_exclusive, &sessions)
-        } else {
-            (None, None)
-        };
+        let length = end_exclusive - start;
+        let previous = self.span_stats(start.saturating_sub(length), start, &rules)?;
 
         Ok(PeriodRecap {
             kind: kind.to_string(),
@@ -1096,12 +1430,12 @@ impl SessionStorage {
             focus_seconds,
             session_count: sessions.len() as u64,
             buckets: recap_buckets(kind, start, end_exclusive, &by_day),
-            median_stretch_seconds: median(&stretch_samples),
+            median_stretch_seconds: median(&stats.stretches),
             longest_stretch_seconds,
-            stretch_range_low,
-            stretch_range_high,
-            first_half_focus_percent: percent(first_focus, first_total),
-            second_half_focus_percent: percent(second_focus, second_total),
+            recovery_median_seconds: stats.recovery_median(),
+            recovery_count: stats.recoveries.len() as u64,
+            unrecovered_count: stats.unrecovered,
+            previous_recovery_median_seconds: previous.recovery_median(),
             apps,
         })
     }
@@ -1115,7 +1449,7 @@ impl SessionStorage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, started_at, focused_seconds, longest_stretch_seconds, median_stretch_seconds
+                "SELECT id, started_at, focused_seconds, longest_stretch_seconds
                  FROM session
                  WHERE ended_at IS NOT NULL
                    AND substr(started_at, 1, 10) >= ?1
@@ -1130,26 +1464,21 @@ impl SessionStorage {
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            let (id, started_at, focused_seconds, longest, median_stretch) =
-                row.map_err(|error| error.to_string())?;
+            let (id, started_at, focused_seconds, longest) = row.map_err(|error| error.to_string())?;
             let Some(day) = local_day_in(&started_at, start_day, end_day) else {
                 continue;
             };
-            let duration_seconds = self.session_duration_seconds(id as u64)?;
             sessions.push(RecapSession {
                 id: id as u64,
                 day,
                 focused_seconds: focused_seconds as u64,
                 longest_stretch_seconds: longest as u64,
-                median_stretch_seconds: median_stretch as u64,
-                duration_seconds,
             });
         }
         Ok(sessions)
@@ -1159,73 +1488,33 @@ impl SessionStorage {
         let (from, to) = padded_day_bounds(start_day, end_day);
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, goal, started_at, focused_seconds, distracted_seconds,
-                        idle_seconds, nudge_count
-                 FROM session
+            .prepare(&format!(
+                "{SUMMARY_SELECT}
                  WHERE ended_at IS NOT NULL
                    AND substr(started_at, 1, 10) >= ?1
                    AND substr(started_at, 1, 10) < ?2
-                 ORDER BY started_at DESC",
-            )
+                 ORDER BY started_at DESC"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map(params![from, to], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                ))
-            })
+            .query_map(params![from, to], summary_from_row)
             .map_err(|error| error.to_string())?;
 
         let mut summaries = Vec::new();
         for row in rows {
-            let (id, goal, started_at, focused_seconds, distracted_seconds, idle_seconds, nudges) =
-                row.map_err(|error| error.to_string())?;
-            if local_day_in(&started_at, start_day, end_day).is_none() {
+            let summary = row.map_err(|error| error.to_string())?;
+            if local_day_in(&summary.started_at, start_day, end_day).is_none() {
                 continue;
             }
-            summaries.push(self.summary_from_row(
-                id,
-                goal,
-                started_at,
-                focused_seconds,
-                distracted_seconds,
-                idle_seconds,
-                nudges,
-            )?);
+            summaries.push(self.complete_summary(summary)?);
         }
         Ok(summaries)
     }
 
-    fn summary_from_row(
-        &self,
-        id: i64,
-        goal: String,
-        started_at: String,
-        focused_seconds: i64,
-        distracted_seconds: i64,
-        idle_seconds: i64,
-        nudges: i64,
-    ) -> Result<SessionSummary, String> {
-        let top_hints = self.top_hints_for_session(id as u64)?;
-        let duration_seconds = self.session_duration_seconds(id as u64)?;
-        Ok(SessionSummary {
-            id: id as u64,
-            goal,
-            started_at,
-            duration_seconds,
-            focus_seconds: focused_seconds as u64,
-            distracted_seconds: distracted_seconds as u64,
-            idle_seconds: idle_seconds as u64,
-            nudges: nudges as u64,
-            top_hints,
-        })
+    fn complete_summary(&self, mut summary: SessionSummary) -> Result<SessionSummary, String> {
+        summary.top_hints = self.top_hints_for_session(summary.id)?;
+        summary.duration_seconds = self.session_duration_seconds(summary.id)?;
+        Ok(summary)
     }
 
     fn oldest_session_day(&self) -> Result<Option<String>, String> {
@@ -1246,59 +1535,41 @@ impl SessionStorage {
         Ok(oldest)
     }
 
-    fn weekly_stretch(&self, monday: time::Date) -> Result<Vec<WeeklyStretch>, String> {
-        let oldest = monday.saturating_sub(time::Duration::days(
-            ((STRETCH_WEEK_COUNT - 1) * 7) as i64,
-        ));
-        let range_start = format_day(oldest);
-        let range_end = format_day(monday.saturating_add(time::Duration::days(7)));
-        let (from, to) = padded_day_bounds(&range_start, &range_end);
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT started_at, median_stretch_seconds
-                 FROM session
-                 WHERE ended_at IS NOT NULL
-                   AND substr(started_at, 1, 10) >= ?1
-                   AND substr(started_at, 1, 10) < ?2",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = stmt
-            .query_map([from, to], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|error| error.to_string())?;
-
-        let mut buckets = vec![Vec::<u64>::new(); STRETCH_WEEK_COUNT];
-        for row in rows {
-            let (started_at, stretch) = row.map_err(|error| error.to_string())?;
-            if stretch <= 0 {
-                continue;
-            }
-            let Some(day) = local_day_in(&started_at, &range_start, &range_end) else {
-                continue;
-            };
-            let date = parse_day(&day)?;
-            let days_from_oldest = (date - oldest).whole_days();
-            if days_from_oldest < 0 {
-                continue;
-            }
-            let index = (days_from_oldest / 7) as usize;
-            if let Some(bucket) = buckets.get_mut(index) {
-                bucket.push(stretch as u64);
-            }
+    fn span_stats(
+        &self,
+        start: time::Date,
+        end_exclusive: time::Date,
+        rules: &[AppRule],
+    ) -> Result<SpanStats, String> {
+        let mut stats = SpanStats::default();
+        for session in self.recap_sessions(&format_day(start), &format_day(end_exclusive))? {
+            stats.add(&self.load_spans_for_session(session.id, rules)?);
         }
+        Ok(stats)
+    }
 
-        Ok((0..STRETCH_WEEK_COUNT)
-            .map(|index| {
-                let week_start = oldest.saturating_add(time::Duration::days(index as i64 * 7));
-                WeeklyStretch {
-                    week_start: format_day(week_start),
-                    median_stretch_seconds: median(&buckets[index]),
-                    session_count: buckets[index].len() as u64,
-                }
-            })
-            .collect())
+    fn trend_weeks(&self, monday: time::Date) -> Result<Vec<TrendWeek>, String> {
+        let oldest = monday.saturating_sub(time::Duration::days(((TREND_WEEK_COUNT - 1) * 7) as i64));
+        let mut weeks = Vec::with_capacity(TREND_WEEK_COUNT);
+        let rules = self.scoring_rules()?;
+        for index in 0..TREND_WEEK_COUNT {
+            let start = oldest.saturating_add(time::Duration::days(index as i64 * 7));
+            let end = start.saturating_add(time::Duration::days(7));
+            let sessions = self.recap_sessions(&format_day(start), &format_day(end))?;
+            let mut stats = SpanStats::default();
+            for session in &sessions {
+                stats.add(&self.load_spans_for_session(session.id, &rules)?);
+            }
+            weeks.push(TrendWeek {
+                week_start: format_day(start),
+                session_count: sessions.len() as u64,
+                focus_seconds: sessions.iter().map(|session| session.focused_seconds).sum(),
+                median_stretch_seconds: median(&stats.stretches),
+                recovery_median_seconds: stats.recovery_median(),
+            });
+        }
+        let first = weeks.iter().position(|week| week.session_count > 0);
+        Ok(first.map(|index| weeks.split_off(index)).unwrap_or_default())
     }
 
     fn focus_recap(
@@ -1375,18 +1646,12 @@ impl SessionStorage {
         Ok(())
     }
 
-    pub fn scrub_span_context(&self) -> Result<(), String> {
-        self.conn
-            .execute("UPDATE span SET context = NULL", [])
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
-    fn load_spans_for_session(&self, session_id: u64) -> Result<Vec<ReportSpan>, String> {
+    /// Spans with `rated_state` applied. Pass no rules when only the offsets matter.
+    fn load_spans_for_session(&self, session_id: u64, rules: &[AppRule]) -> Result<Vec<ReportSpan>, String> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT started_offset_seconds, seconds, app, context, category, state
+                "SELECT started_offset_seconds, seconds, app, kind, activity_key, label, source, state
                  FROM span
                  WHERE session_id = ?1
                  ORDER BY started_offset_seconds ASC",
@@ -1394,13 +1659,35 @@ impl SessionStorage {
             .map_err(|error| error.to_string())?;
         let rows = stmt
             .query_map([session_id], |row| {
+                let kind: String = row.get(3)?;
+                let mut activity_key: String = row.get(4)?;
+                let stored: String = row.get(5)?;
+                let legacy_shell = kind == "app" && legacy_unidentified_window(&activity_key);
+                if legacy_shell {
+                    activity_key = "untracked".to_string();
+                }
+                let lost_time = kind == "app" && activity_key == UNKNOWN_KEY;
+                let app: String = if legacy_shell { "untracked".to_string() } else { row.get(2)? };
+                // Rules match the stored capture, never a display name the user chose.
+                let state = if lost_time {
+                    "unknown".to_string()
+                } else {
+                    rated_state(rules, &kind, &activity_key, &stored, &app, row.get(7)?)
+                };
+                let label = if lost_time {
+                    UNKNOWN_LABEL.to_string()
+                } else {
+                    self.display_label(&kind, &activity_key, stored)
+                };
                 Ok(ReportSpan {
                     started_offset_seconds: row.get::<_, i64>(0)? as u64,
                     seconds: row.get::<_, i64>(1)? as u64,
-                    app: row.get(2)?,
-                    context: row.get(3)?,
-                    category: row.get(4)?,
-                    state: row.get(5)?,
+                    app,
+                    kind,
+                    activity_key,
+                    label,
+                    source: if legacy_shell { "none".to_string() } else { row.get(6)? },
+                    state,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -1432,43 +1719,18 @@ impl SessionStorage {
     }
 }
 
-pub fn span_category(
-    app: &str,
-    context: Option<&str>,
-    state: &str,
-    classification: RuleClassification,
-) -> &'static str {
-    if state == "idle" {
-        return "offscreen";
+/// The inverse of `focus_state_key`. `None` for markers that are not focus states
+/// ("paused", "unknown") and for read-time states ("unrated").
+pub fn focus_state_from_key(key: &str) -> Option<crate::focus::FocusState> {
+    use crate::focus::FocusState;
+    match key {
+        "focused" => Some(FocusState::Focused),
+        "neutral" => Some(FocusState::Neutral),
+        "suspicious" => Some(FocusState::Suspicious),
+        "distracted" => Some(FocusState::Distracted),
+        "idle" => Some(FocusState::Idle),
+        _ => None,
     }
-
-    let app_lower = app.to_lowercase();
-    let context_lower = context.map(|value| value.to_lowercase()).unwrap_or_default();
-    let combined = format!("{app_lower} {context_lower}");
-
-    if is_media_signal(&combined) {
-        return "media";
-    }
-    if is_comms_app(&app_lower) {
-        return "comms";
-    }
-    if state == "focused" || classification == RuleClassification::Focused {
-        return "work";
-    }
-    if state == "distracted" || classification == RuleClassification::Distracting {
-        return if is_media_signal(&combined) {
-            "media"
-        } else {
-            "browse"
-        };
-    }
-    if is_work_app(&app_lower) {
-        return "work";
-    }
-    if is_browser_app(&app_lower) {
-        return "browse";
-    }
-    "browse"
 }
 
 pub fn focus_state_key(state: crate::focus::FocusState) -> &'static str {
@@ -1482,136 +1744,51 @@ pub fn focus_state_key(state: crate::focus::FocusState) -> &'static str {
     }
 }
 
-fn is_media_signal(combined: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "youtube",
-        "netflix",
-        "tiktok",
-        "instagram",
-        "reddit",
-        "spotify",
-        "twitch",
-        "hulu",
-        "disney+",
-        "prime video",
-    ];
-    MARKERS.iter().any(|marker| combined.contains(marker))
-}
-
-fn is_comms_app(app_lower: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "slack",
-        "discord",
-        "teams",
-        "zoom",
-        "outlook",
-        "mail",
-        "messages",
-        "telegram",
-        "whatsapp",
-    ];
-    MARKERS.iter().any(|marker| app_lower.contains(marker))
-}
-
-fn is_work_app(app_lower: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "code",
-        "cursor",
-        "visual studio",
-        "devenv",
-        "xcode",
-        "intellij",
-        "webstorm",
-        "pycharm",
-        "terminal",
-        "iterm",
-        "windows terminal",
-        "notion",
-        "obsidian",
-        "figma",
-    ];
-    MARKERS.iter().any(|marker| app_lower.contains(marker))
-}
-
-fn is_browser_app(app_lower: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "chrome",
-        "firefox",
-        "edge",
-        "brave",
-        "safari",
-        "opera",
-        "arc",
-    ];
-    MARKERS.iter().any(|marker| app_lower.contains(marker))
-}
-
-fn hint_label(app: &str, context: Option<&str>) -> String {
-    context
-        .filter(|title| !title.trim().is_empty())
-        .map(|title| title.to_string())
-        .unwrap_or_else(|| app.to_string())
-}
-
-fn recap_activity_label(app: &str, context: Option<&str>) -> String {
-    if is_browser_app(&app.to_lowercase()) {
-        context
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(|title| title.to_string())
-            .unwrap_or_else(|| "Browser · site unknown".to_string())
-    } else {
-        app.to_string()
+/// Time recorded as neutral had no rule then (or a Neutral one), so today's rating decides it:
+/// rating an app reaches its past unrated time. Relevant and distracting decisions made during a
+/// session keep, since they may come from that session's own rules and it may have nudged.
+fn rated_state(rules: &[AppRule], kind: &str, key: &str, label: &str, app: &str, state: String) -> String {
+    if key == SUPERVISOR_KEY {
+        // Supervisor's own window is never rated. Older sessions recorded it as focus.
+        return if state == "focused" { "neutral".to_string() } else { state };
     }
-}
-
-fn recap_app_group(rules: &[AppRule], app: &str, context: Option<&str>) -> &'static str {
-    match rules
-        .iter()
-        .find(|rule| rule.matches_app(app, context))
-        .map(|rule| rule.classification)
-    {
-        Some(RuleClassification::Focused) => "Focus",
-        Some(RuleClassification::Neutral) => "Neutral",
-        Some(RuleClassification::Distracting) => "Distracting",
-        None => "Miscellaneous",
+    if state != "neutral" {
+        return state;
     }
+    let activity = Activity::from_stored(kind, key, label, app);
+    match matching_rule(rules, &activity).map(|rule| rule.classification) {
+        Some(RuleClassification::Focused) => "focused",
+        Some(RuleClassification::Distracting) => "distracted",
+        Some(RuleClassification::Neutral) => "neutral",
+        // Browser pages and Other websites can't be rated on their own.
+        None if matches!(kind, "app" | "website") => "unrated",
+        None => "neutral",
+    }
+    .to_string()
 }
 
-fn percent(part: u64, total: u64) -> Option<u64> {
+/// Spans that are not drift: they extend a focus stretch and end a drift.
+fn on_task(state: &str) -> bool {
+    matches!(state, "focused" | "neutral" | "unrated")
+}
+
+/// Rows written by the old window-class fallback have no trustworthy app identity.
+fn legacy_unidentified_window(key: &str) -> bool {
+    [
+        "xamlexplorerhostislandwindow",
+        "shell_traywnd",
+        "windows.ui.core.corewindow",
+        "shellhost",
+    ]
+    .contains(&key.to_ascii_lowercase().as_str())
+}
+
+fn rounded_percent(part: u64, total: u64) -> u64 {
     if total == 0 {
-        None
+        0
     } else {
-        Some((part * 100) / total)
+        (part * 100 + total / 2) / total
     }
-}
-
-fn overlap(start: u64, end: u64, window_start: u64, window_end: u64) -> u64 {
-    end.min(window_end).saturating_sub(start.max(window_start))
-}
-
-fn half_focus(spans: &[ReportSpan], duration: u64) -> (u64, u64, u64, u64) {
-    if duration == 0 {
-        return (0, 0, 0, 0);
-    }
-    let mid = duration / 2;
-    let mut first_focus = 0u64;
-    let mut first_total = 0u64;
-    let mut second_focus = 0u64;
-    let mut second_total = 0u64;
-    for span in spans {
-        let start = span.started_offset_seconds;
-        let end = start + span.seconds;
-        let first = overlap(start, end, 0, mid);
-        let second = overlap(start, end, mid, duration);
-        first_total += first;
-        second_total += second;
-        if matches!(span.state.as_str(), "focused" | "neutral") {
-            first_focus += first;
-            second_focus += second;
-        }
-    }
-    (first_focus, first_total, second_focus, second_total)
 }
 
 fn recap_buckets(
@@ -1666,39 +1843,6 @@ fn recap_buckets(
         .collect()
 }
 
-fn full_week_stretch_range(
-    start: time::Date,
-    end_exclusive: time::Date,
-    sessions: &[RecapSession],
-) -> (Option<u64>, Option<u64>) {
-    let mut cursor = start;
-    while cursor < end_exclusive && cursor.weekday() != time::Weekday::Monday {
-        cursor = cursor.saturating_add(time::Duration::days(1));
-    }
-    let mut week_medians = Vec::new();
-    while cursor.saturating_add(time::Duration::days(7)) <= end_exclusive {
-        let week_end = format_day(cursor.saturating_add(time::Duration::days(7)));
-        let week_start = format_day(cursor);
-        let samples: Vec<u64> = sessions
-            .iter()
-            .filter(|session| session.day >= week_start && session.day < week_end)
-            .map(|session| session.median_stretch_seconds)
-            .filter(|value| *value > 0)
-            .collect();
-        if !samples.is_empty() {
-            week_medians.push(median(&samples));
-        }
-        cursor = cursor.saturating_add(time::Duration::days(7));
-    }
-    let low = week_medians.iter().copied().min();
-    let high = week_medians.iter().copied().max();
-    if low == high {
-        (None, None)
-    } else {
-        (low, high)
-    }
-}
-
 fn monday_on_or_before(date: time::Date) -> time::Date {
     date.saturating_sub(time::Duration::days(i64::from(
         date.weekday().number_days_from_monday(),
@@ -1708,10 +1852,17 @@ fn monday_on_or_before(date: time::Date) -> time::Date {
 fn count_drifts(spans: &[ReportSpan]) -> u64 {
     let mut count = 0u64;
     let mut in_focus_track = false;
+    let mut previous_end = 0;
     for span in spans {
-        let focus_like = matches!(span.state.as_str(), "focused" | "neutral");
+        if span.started_offset_seconds > previous_end {
+            in_focus_track = false;
+        }
+        previous_end = span.started_offset_seconds.saturating_add(span.seconds);
+        let focus_like = on_task(&span.state);
         let drift_like = matches!(span.state.as_str(), "distracted" | "idle" | "suspicious");
-        if focus_like {
+        if matches!(span.state.as_str(), "paused" | "unknown") {
+            in_focus_track = false;
+        } else if focus_like {
             in_focus_track = true;
         } else if drift_like && in_focus_track {
             count += 1;
@@ -1721,13 +1872,51 @@ fn count_drifts(spans: &[ReportSpan]) -> u64 {
     count
 }
 
+/// Seconds from leaving focus to being back on a focused or neutral app, one entry per drift,
+/// plus whether a drift was still going at the end. Away and paused time neither starts nor
+/// ends a drift and is not counted in it; a legacy hole forgets the drift.
+fn drift_recoveries(spans: &[ReportSpan]) -> (Vec<u64>, u64) {
+    let mut recoveries = Vec::new();
+    let mut drifting: Option<u64> = None;
+    let mut was_focused = false;
+    let mut previous_end = 0;
+    for span in spans {
+        if span.started_offset_seconds > previous_end {
+            drifting = None;
+            was_focused = false;
+        }
+        previous_end = span.started_offset_seconds.saturating_add(span.seconds);
+        match span.state.as_str() {
+            state if on_task(state) => {
+                if let Some(seconds) = drifting.take() {
+                    recoveries.push(seconds);
+                }
+                was_focused = true;
+            }
+            "suspicious" | "distracted" => match drifting.as_mut() {
+                Some(seconds) => *seconds += span.seconds,
+                None if was_focused => drifting = Some(span.seconds),
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    (recoveries, u64::from(drifting.is_some()))
+}
+
 fn focused_stretches(spans: &[ReportSpan]) -> Vec<u64> {
     let mut stretches = Vec::new();
     let mut current = 0u64;
+    let mut previous_end = 0;
     for span in spans {
+        if span.started_offset_seconds > previous_end && current > 0 {
+            stretches.push(current);
+            current = 0;
+        }
+        previous_end = span.started_offset_seconds.saturating_add(span.seconds);
         match span.state.as_str() {
-            "focused" | "neutral" => current += span.seconds,
-            "distracted" | "idle" | "suspicious" => {
+            state if on_task(state) => current += span.seconds,
+            "distracted" | "idle" | "suspicious" | "paused" | "unknown" => {
                 if current > 0 {
                     stretches.push(current);
                     current = 0;
@@ -1743,7 +1932,7 @@ fn focused_stretches(spans: &[ReportSpan]) -> Vec<u64> {
 }
 
 fn parse_day(value: &str) -> Result<time::Date, String> {
-    if value.len() != 10 || value.as_bytes().get(4) != Some(&b'-') || value.as_bytes().get(7) != Some(&b'-') {
+    if !value.is_ascii() || value.len() != 10 || value.as_bytes().get(4) != Some(&b'-') || value.as_bytes().get(7) != Some(&b'-') {
         return Err("date must be YYYY-MM-DD".into());
     }
     let year: i32 = value[0..4]
@@ -1763,10 +1952,27 @@ fn format_day(date: time::Date) -> String {
     format!("{:04}-{:02}-{:02}", date.year(), u8::from(date.month()), date.day())
 }
 
+static STARTUP_OFFSET: std::sync::OnceLock<time::UtcOffset> = std::sync::OnceLock::new();
+
+/// Call before any thread starts. On macOS/Linux `time` refuses to read the local offset from
+/// a multi-threaded process, and history days would silently fall back to UTC.
+pub fn capture_local_offset() {
+    if let Ok(offset) = time::UtcOffset::current_local_offset() {
+        let _ = STARTUP_OFFSET.set(offset);
+    }
+}
+
+/// Per-instant offset where the platform allows it (DST-correct); otherwise the startup one.
+fn local_offset_at(instant: time::OffsetDateTime) -> time::UtcOffset {
+    time::UtcOffset::local_offset_at(instant)
+        .ok()
+        .or_else(|| STARTUP_OFFSET.get().copied())
+        .unwrap_or(time::UtcOffset::UTC)
+}
+
 fn local_today() -> time::Date {
-    time::OffsetDateTime::now_local()
-        .map(|now| now.date())
-        .unwrap_or_else(|_| time::OffsetDateTime::now_utc().date())
+    let now = time::OffsetDateTime::now_utc();
+    now.to_offset(local_offset_at(now)).date()
 }
 
 fn this_monday() -> time::Date {
@@ -1785,8 +1991,7 @@ fn local_day(started_at: &str) -> String {
     ) else {
         return prefix;
     };
-    let offset = time::UtcOffset::local_offset_at(instant).unwrap_or(time::UtcOffset::UTC);
-    calendar_day(instant, offset)
+    calendar_day(instant, local_offset_at(instant))
 }
 
 fn local_day_in(started_at: &str, start: &str, end_exclusive: &str) -> Option<String> {
@@ -1838,43 +2043,63 @@ fn median(values: &[u64]) -> u64 {
     }
 }
 
-fn category_totals_from_spans(spans: &[ReportSpan]) -> Vec<CategoryTotal> {
-    let mut totals = std::collections::HashMap::new();
-    for span in spans {
-        *totals.entry(span.category.clone()).or_insert(0u64) += span.seconds;
+/// Time per app/site and group. Groups follow span states, so they sum to the scores.
+fn apps_from_spans(spans: &[ReportSpan]) -> Vec<RecapApp> {
+    const GROUP_ORDER: [&str; 5] = ["Focus", "Neutral", "Distracting", "Unclassified", "Away"];
+    let mut totals = std::collections::HashMap::<(&'static str, &str, &str), (&str, u64)>::new();
+    for span in spans.iter().filter(|span| span.state != "paused") {
+        let group = match span.state.as_str() {
+            "focused" => "Focus",
+            "neutral" => "Neutral",
+            "unrated" => "Unclassified",
+            "suspicious" | "distracted" => "Distracting",
+            _ => "Away",
+        };
+        totals
+            .entry((group, &span.kind, &span.activity_key))
+            .or_insert((&span.label, 0))
+            .1 += span.seconds;
     }
-    let mut rows: Vec<CategoryTotal> = totals
+    let mut apps: Vec<RecapApp> = totals
         .into_iter()
-        .map(|(category, seconds)| CategoryTotal { category, seconds })
+        .map(|((group, kind, key), (label, seconds))| RecapApp {
+            group: group.to_string(),
+            kind: kind.to_string(),
+            key: key.to_string(),
+            label: label.to_string(),
+            seconds,
+            ratable: false,
+            rating: None,
+        })
         .collect();
-    rows.sort_by(|a, b| b.seconds.cmp(&a.seconds).then_with(|| a.category.cmp(&b.category)));
-    rows
+    let rank = |group: &str| GROUP_ORDER.iter().position(|g| *g == group).unwrap_or(9);
+    apps.sort_by(|a, b| {
+        rank(&a.group)
+            .cmp(&rank(&b.group))
+            .then_with(|| b.seconds.cmp(&a.seconds))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    apps
 }
 
-fn top_apps_from_spans(spans: &[ReportSpan], limit: usize) -> Vec<String> {
-    let mut totals = std::collections::HashMap::new();
-    for span in spans {
-        *totals.entry(span.app.clone()).or_insert(0u64) += span.seconds;
-    }
-    let mut pairs: Vec<_> = totals.into_iter().collect();
-    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    pairs.into_iter().take(limit).map(|(app, _)| app).collect()
-}
+const SUMMARY_SELECT: &str = "SELECT id, goal, started_at, focused_seconds, neutral_seconds,
+    unrated_seconds, distracted_seconds, idle_seconds, nudge_count FROM session";
 
-fn top_drifts_from_spans(spans: &[ReportSpan], limit: usize) -> Vec<DriftEntry> {
-    let mut drifts = Vec::new();
-    for span in spans {
-        if matches!(span.state.as_str(), "distracted" | "suspicious") {
-            drifts.push(DriftEntry {
-                at_offset_seconds: span.started_offset_seconds,
-                label: hint_label(&span.app, span.context.as_deref()),
-                seconds: span.seconds,
-            });
-        }
-    }
-    drifts.sort_by(|a, b| b.seconds.cmp(&a.seconds));
-    drifts.truncate(limit);
-    drifts
+/// Reads a `SUMMARY_SELECT` row; `complete_summary` adds hints and run time.
+fn summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionSummary> {
+    Ok(SessionSummary {
+        id: row.get::<_, i64>(0)? as u64,
+        goal: row.get(1)?,
+        started_at: row.get(2)?,
+        duration_seconds: 0,
+        focus_seconds: row.get::<_, i64>(3)? as u64,
+        neutral_seconds: row.get::<_, i64>(4)? as u64,
+        unrated_seconds: row.get::<_, i64>(5)? as u64,
+        distracted_seconds: row.get::<_, i64>(6)? as u64,
+        idle_seconds: row.get::<_, i64>(7)? as u64,
+        nudges: row.get::<_, i64>(8)? as u64,
+        top_hints: Vec::new(),
+    })
 }
 
 fn strictness_key(strictness: Strictness) -> &'static str {
@@ -1895,17 +2120,15 @@ fn parse_strictness(value: &str) -> Strictness {
 
 fn rule_target_key(target: &RuleTarget) -> &'static str {
     match target {
-        RuleTarget::AppName => "app_name",
-        RuleTarget::ProcessPath => "process_path",
-        RuleTarget::WindowTitle => "window_title",
+        RuleTarget::App => "app",
+        RuleTarget::Website => "website",
     }
 }
 
 fn parse_rule_target(value: String) -> RuleTarget {
     match value.as_str() {
-        "app_name" => RuleTarget::AppName,
-        "process_path" => RuleTarget::ProcessPath,
-        _ => RuleTarget::WindowTitle,
+        "website" => RuleTarget::Website,
+        _ => RuleTarget::App,
     }
 }
 
@@ -1993,33 +2216,188 @@ mod tests {
     use super::*;
     use crate::focus::FocusState;
 
-    fn fixture_spans() -> Vec<ReportSpan> {
-        vec![
-            ReportSpan {
-                started_offset_seconds: 0,
-                seconds: 300,
-                app: "Code".to_string(),
-                context: Some("session.rs".to_string()),
-                category: "work".to_string(),
-                state: "focused".to_string(),
-            },
-            ReportSpan {
-                started_offset_seconds: 300,
-                seconds: 120,
-                app: "Chrome".to_string(),
-                context: Some("YouTube".to_string()),
-                category: "media".to_string(),
-                state: "distracted".to_string(),
-            },
-            ReportSpan {
-                started_offset_seconds: 420,
-                seconds: 180,
-                app: "Code".to_string(),
-                context: Some("storage.rs".to_string()),
-                category: "work".to_string(),
-                state: "neutral".to_string(),
-            },
-        ]
+    fn app(name: &str) -> Activity {
+        Activity::app(name)
+    }
+
+    #[test]
+    fn rule_saves_report_only_sessions_whose_scores_changed() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        storage.replace_rules(&[]).unwrap();
+        let notion = storage.insert_session("A", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        storage.insert_span(notion, &app("Notion"), "neutral", 0, 60).unwrap();
+        storage.close_session(notion, "2026-09-22T12:01:00Z", "stopped", 60).unwrap();
+        let code = storage.insert_session("B", Strictness::Normal, "2026-09-22T13:00:00Z", 600).unwrap();
+        storage.insert_span(code, &app("Code"), "focused", 0, 60).unwrap();
+        storage.close_session(code, "2026-09-22T13:01:00Z", "stopped", 60).unwrap();
+
+        let rules = [AppRule::app("notion", RuleClassification::Focused)];
+        assert_eq!(storage.replace_rules(&rules).unwrap(), vec![notion]);
+        assert_eq!(storage.replace_rules(&rules).unwrap(), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn supervisor_time_recorded_as_focus_reads_as_neutral() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Old", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 0, 60).unwrap();
+        storage.insert_span(id, &Activity::supervisor(), "focused", 60, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:02:00Z", "stopped", 120).unwrap();
+
+        let report = storage.get_session_report(id).unwrap();
+        assert_eq!(report.focused_seconds, 60);
+        assert_eq!(report.focus_percent, 50);
+        assert_eq!(report.spans[1].state, "neutral");
+    }
+
+    #[test]
+    fn deleting_all_rules_does_not_restore_defaults() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        assert!(!storage.load_rules().unwrap().is_empty());
+        storage.replace_rules(&[]).unwrap();
+        assert!(storage.load_rules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn breaks_split_stretches_and_later_activity_stays_in_recap_halves() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Break", Strictness::Normal, "2026-09-22T12:00:00Z", 300).unwrap();
+        storage.insert_span(id, &app("Editor"), "focused", 0, 60).unwrap();
+        storage.insert_span(id, &app("Editor"), "focused", 180, 60).unwrap();
+        let mut spans = storage.load_spans_for_session(id, &[]).unwrap();
+        assert_eq!(focused_stretches(&spans), vec![60, 60]);
+        spans[1].state = "distracted".into();
+        assert_eq!(count_drifts(&spans), 0);
+        // A legacy hole forgets the drift instead of guessing how it ended.
+        assert_eq!(drift_recoveries(&spans), (vec![], 0));
+    }
+
+    #[test]
+    fn recovery_counts_only_drifting_time_until_back_on_task() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Drift", Strictness::Normal, "2026-09-22T12:00:00Z", 900).unwrap();
+        for (activity, state, start, seconds) in [
+            (site("youtube.com"), "distracted", 0, 60), // before any focus: not a drift
+            (app("Code"), "focused", 60, 120),
+            (site("youtube.com"), "suspicious", 180, 20),
+            (site("youtube.com"), "distracted", 200, 40),
+            (Activity::paused(), "paused", 240, 300), // a pause is not counted
+            (site("youtube.com"), "distracted", 540, 30),
+            (app("Notes"), "neutral", 570, 60),
+            (site("reddit.com"), "distracted", 630, 90), // still drifting at the end
+        ] {
+            storage.insert_span(id, &activity, state, start, seconds).unwrap();
+        }
+        let spans = storage.load_spans_for_session(id, &[]).unwrap();
+        assert_eq!(drift_recoveries(&spans), (vec![90], 1));
+    }
+
+    #[test]
+    fn version_seven_rescores_existing_history() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Break", Strictness::Normal, "2026-09-22T12:00:00Z", 300).unwrap();
+        storage.insert_span(id, &app("Editor"), "focused", 0, 60).unwrap();
+        storage.insert_span(id, &app("Editor"), "focused", 180, 60).unwrap();
+        storage.insert_span(id, &app("Notes"), "neutral", 240, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:05:00Z", "stopped", 180).unwrap();
+        // A v6 database: neutral counted as focus, and stretches ran across pauses.
+        storage.conn.execute_batch(
+            "UPDATE session SET focused_seconds = 180, longest_stretch_seconds = 120, median_stretch_seconds = 120;
+             ALTER TABLE session DROP COLUMN neutral_seconds;
+             ALTER TABLE session DROP COLUMN unrated_seconds;
+             PRAGMA user_version = 6;",
+        ).unwrap();
+        let reopened = SessionStorage::from_connection(storage.conn).unwrap();
+        let report = reopened.get_session_report(id).unwrap();
+        assert_eq!(report.focused_seconds, 120);
+        assert_eq!(report.unrated_seconds, 60);
+        assert_eq!(report.longest_stretch_seconds, 120);
+        assert_eq!(report.median_stretch_seconds, 90);
+    }
+
+    #[test]
+    fn rating_an_app_rescores_only_its_unrated_time() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        storage.replace_rules(&[]).unwrap();
+        let id = storage.insert_session("Rate", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        storage.insert_span(id, &app("Notion"), "neutral", 0, 120).unwrap();
+        // Decided during the session (say by a session rule): the decision keeps.
+        storage.insert_span(id, &app("Notion"), "distracted", 120, 60).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 180, 120).unwrap();
+        storage.insert_span(id, &Activity::website("chrome", "example.com"), "neutral", 300, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:06:00Z", "stopped", 360).unwrap();
+
+        let before = storage.get_session_report(id).unwrap();
+        assert_eq!((before.focused_seconds, before.unrated_seconds, before.focus_percent), (120, 180, 33));
+
+        storage.replace_rules(&[AppRule::app("notion", RuleClassification::Focused)]).unwrap();
+        let after = storage.get_session_report(id).unwrap();
+        assert_eq!((after.focused_seconds, after.unrated_seconds, after.focus_percent), (240, 60, 67));
+        assert_eq!(after.distracted_seconds, 60);
+        assert_eq!(storage.list_history(10).unwrap()[0].focus_seconds, 240);
+
+        storage.replace_rules(&[AppRule::website("example.com", RuleClassification::Neutral)]).unwrap();
+        let neutral = storage.get_session_report(id).unwrap();
+        // Notion's rule is gone, so its untouched past time is unrated again.
+        assert_eq!((neutral.focused_seconds, neutral.unrated_seconds), (120, 120));
+        assert_eq!(storage.list_history(10).unwrap()[0].neutral_seconds, 60);
+    }
+
+    #[test]
+    fn unrated_time_does_not_break_a_stretch_but_a_distracting_rating_does() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        storage.replace_rules(&[]).unwrap();
+        let id = storage.insert_session("Stretch", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 0, 120).unwrap();
+        storage.insert_span(id, &app("Slack"), "neutral", 120, 30).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 150, 120).unwrap();
+        storage.close_session(id, "2026-09-22T12:04:30Z", "stopped", 270).unwrap();
+        let unrated = storage.get_session_report(id).unwrap();
+        assert_eq!((unrated.longest_stretch_seconds, unrated.drift_count), (270, 0));
+
+        storage.replace_rules(&[AppRule::app("slack", RuleClassification::Distracting)]).unwrap();
+        let rated = storage.get_session_report(id).unwrap();
+        assert_eq!((rated.longest_stretch_seconds, rated.drift_count), (120, 1));
+    }
+
+    #[test]
+    fn renaming_an_app_does_not_change_its_recap_rule_group() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        storage.replace_rules(&[
+            AppRule::app("Draft Pad", RuleClassification::Focused),
+            AppRule::app("Games", RuleClassification::Distracting),
+        ]).unwrap();
+        let id = storage.insert_session("Names", Strictness::Normal, "2026-09-22T12:00:00Z", 300).unwrap();
+        let mut activity = app("Draft Pad");
+        activity.key = "draftpadtest".into();
+        activity.app_id = activity.key.clone();
+        storage.insert_span(id, &activity, "focused", 0, 60).unwrap();
+        storage.close_session(id, "2026-09-22T12:01:00Z", "stopped", 60).unwrap();
+        storage.set_app_name(&activity.key, "Games").unwrap();
+        let recap = storage.get_period_recap("month", "2026-09-01").unwrap();
+        assert_eq!(recap.apps[0].label, "Games");
+        assert_eq!(recap.apps[0].group, "Focus");
+    }
+
+    #[test]
+    fn invalid_unicode_dates_return_an_error() {
+        assert!(parse_day("abcé-1-23").is_err());
+    }
+
+    fn site(key: &str) -> Activity {
+        Activity::website("chrome", key)
+    }
+
+    fn insert_fixture_spans(storage: &SessionStorage, id: u64) {
+        for (activity, state, start, seconds) in [
+            (app("Code"), "focused", 0, 300),
+            (site("youtube.com"), "distracted", 300, 120),
+            (app("Code"), "neutral", 420, 180),
+        ] {
+            storage
+                .insert_span(id, &activity, state, start, seconds)
+                .expect("insert span");
+        }
     }
 
     #[test]
@@ -2028,19 +2406,7 @@ mod tests {
         let id = storage
             .insert_session("Ship storage", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
             .expect("insert session");
-        for span in fixture_spans() {
-            storage
-                .insert_span(
-                    id,
-                    &span.app,
-                    span.context.as_deref(),
-                    &span.category,
-                    &span.state,
-                    span.started_offset_seconds,
-                    span.seconds,
-                )
-                .expect("insert span");
-        }
+        insert_fixture_spans(&storage, id);
         storage
             .insert_event(id, 310, "nudge", Some("voice"))
             .expect("insert event");
@@ -2049,13 +2415,98 @@ mod tests {
             .expect("close session");
 
         let report = storage.get_session_report(id).expect("report");
-        assert_eq!(report.focused_seconds, 480);
+        assert_eq!(report.focused_seconds, 300);
+        assert_eq!(report.unrated_seconds, 180);
         assert_eq!(report.distracted_seconds, 120);
         assert_eq!(report.drift_count, 1);
         assert_eq!(report.nudge_count, 1);
         assert_eq!(report.longest_stretch_seconds, 300);
         assert_eq!(report.median_stretch_seconds, 240);
-        assert_eq!(report.focus_percent, 80);
+        assert_eq!(report.focus_percent, 50);
+    }
+
+    #[test]
+    fn site_names_rename_history_and_outlive_rules() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage
+            .insert_session("Names", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
+            .expect("insert session");
+        storage
+            .insert_span(id, &site("nytimes.com"), "neutral", 0, 60)
+            .expect("insert span");
+        storage
+            .insert_span(id, &site("youtube.com"), "distracted", 60, 60)
+            .expect("insert span");
+        let labels = |storage: &SessionStorage| -> Vec<String> {
+            storage
+                .load_spans_for_session(id, &[])
+                .expect("spans")
+                .into_iter()
+                .map(|span| span.label)
+                .collect()
+        };
+        assert_eq!(labels(&storage), ["nytimes.com", "YouTube"]);
+
+        storage.set_site_name("nytimes.com", "  NYT ").expect("name");
+        storage.set_site_name("youtube.com", "Videos").expect("name");
+        storage.replace_rules(&[]).expect("clear rules");
+        assert_eq!(labels(&storage), ["NYT", "Videos"]);
+        assert_eq!(storage.site_names().get("youtube.com").map(String::as_str), Some("Videos"));
+
+        storage.set_site_name("youtube.com", "").expect("clear");
+        assert_eq!(labels(&storage), ["NYT", "YouTube"]);
+    }
+
+    #[test]
+    fn app_names_change_old_history_without_changing_identity() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage.insert_session("Names", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
+            .expect("insert session");
+        storage.insert_span(id, &app("WhatsApp.Root"), "neutral", 0, 60)
+            .expect("insert span");
+        storage.set_app_name("whatsapp.root", "WhatsApp").expect("rename");
+        let span = storage.load_spans_for_session(id, &[]).expect("spans").remove(0);
+        assert_eq!(span.activity_key, "whatsapp.root");
+        assert_eq!(span.label, "WhatsApp");
+        storage.set_app_name("whatsapp.root", "").expect("reset");
+        assert_eq!(storage.load_spans_for_session(id, &[]).expect("spans")[0].label, "WhatsApp.Root");
+    }
+
+    #[test]
+    fn native_names_refresh_old_history_and_legacy_shell_rows_become_untracked() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage.insert_session("Names", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
+            .expect("insert session");
+        storage.insert_span(id, &app("WhatsApp.Root"), "neutral", 0, 60)
+            .expect("app span");
+        storage.insert_span(id, &app("XamlExplorerHostIslandWindow"), "neutral", 60, 60)
+            .expect("shell span");
+        storage.native_app_names.borrow_mut().insert("whatsapp.root".into(), "WhatsApp".into());
+        let spans = storage.load_spans_for_session(id, &[]).expect("spans");
+        assert_eq!(spans[0].label, "WhatsApp");
+        assert_eq!(spans[1].label, "Device asleep / unknown");
+        assert_eq!(spans[1].activity_key, "untracked");
+        assert_eq!(spans[1].source, "none");
+        storage.set_app_name("whatsapp.root", "Messages").expect("custom name");
+        assert_eq!(storage.load_spans_for_session(id, &[]).expect("spans")[0].label, "Messages");
+    }
+
+    #[test]
+    fn newest_observed_app_name_relabels_older_spans() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage.insert_session("Names", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
+            .expect("insert session");
+        storage.insert_span(id, &app("Draftpadtest"), "neutral", 0, 30)
+            .expect("old span");
+        let mut newer = app("Draftpadtest");
+        newer.app_label = "Draft Pad".into();
+        newer.label = "Draft Pad".into();
+        storage.insert_span(id, &newer, "neutral", 30, 30)
+            .expect("new span");
+        storage.refresh_native_app_names().expect("refresh names");
+        let spans = storage.load_spans_for_session(id, &[]).expect("spans");
+        assert_eq!(spans[0].label, "Draft Pad");
+        assert_eq!(spans[1].label, "Draft Pad");
     }
 
     #[test]
@@ -2072,19 +2523,7 @@ mod tests {
             let id = storage
                 .insert_session("Persist", Strictness::Normal, "2026-09-22T12:00:00Z", 600)
                 .expect("insert session");
-            for span in fixture_spans() {
-                storage
-                    .insert_span(
-                        id,
-                        &span.app,
-                        span.context.as_deref(),
-                        &span.category,
-                        &span.state,
-                        span.started_offset_seconds,
-                        span.seconds,
-                    )
-                    .expect("insert span");
-            }
+            insert_fixture_spans(&storage, id);
             storage
                 .close_session(id, "2026-09-22T12:30:00Z", "stopped", 1800)
                 .expect("close session");
@@ -2093,7 +2532,8 @@ mod tests {
 
         let (storage, state) = SessionStorage::open(&path).expect("reopen db");
         let report = storage.get_session_report(id).expect("report");
-        assert_eq!(report.focused_seconds, 480);
+        assert_eq!(report.focused_seconds, 300);
+        assert_eq!(report.unrated_seconds, 180);
         assert_eq!(report.distracted_seconds, 120);
         assert_eq!(state.history.len(), 1);
         drop(storage);
@@ -2107,10 +2547,10 @@ mod tests {
             .insert_session("Hour plan", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
             .expect("insert session");
         storage
-            .insert_span(id, "Code", None, "work", "focused", 0, 1500)
+            .insert_span(id, &app("Code"), "focused", 0, 1500)
             .expect("insert span");
         storage
-            .insert_span(id, "Chrome", Some("YouTube"), "media", "distracted", 1500, 300)
+            .insert_span(id, &site("youtube.com"), "distracted", 1500, 300)
             .expect("insert span");
         storage
             .close_session(id, "2026-09-22T12:30:00Z", "stopped", 1800)
@@ -2120,8 +2560,6 @@ mod tests {
         assert_eq!(trends.daily_focus.len(), 1);
         assert_eq!(trends.daily_focus[0].focus_percent, 83);
         assert_eq!(trends.daily_focus[0].focus_seconds, 1500);
-        assert_eq!(trends.sessions[0].focus_percent, 83);
-        assert_eq!(trends.weekly_stretch.len(), 5);
         let (seconds, count) = storage
             .sum_focus("2026-09-22", "2026-09-23")
             .expect("sum");
@@ -2135,13 +2573,39 @@ mod tests {
     }
 
     #[test]
+    fn trend_weeks_start_at_first_data_week() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let empty = storage.get_trends().expect("empty trends");
+        assert!(empty.weeks.is_empty());
+        assert_eq!(empty.full_weeks, 0);
+
+        let started = utc_now();
+        let id = storage
+            .insert_session("Now", Strictness::Normal, &started, 3600)
+            .expect("insert session");
+        storage
+            .insert_span(id, &app("Code"), "focused", 0, 600)
+            .expect("insert span");
+        storage
+            .close_session(id, &utc_now(), "stopped", 600)
+            .expect("close session");
+
+        let trends = storage.get_trends().expect("trends");
+        assert_eq!(trends.weeks.len(), 1);
+        assert_eq!(trends.weeks[0].session_count, 1);
+        assert_eq!(trends.weeks[0].median_stretch_seconds, 600);
+        // This week is not a full week yet.
+        assert_eq!(trends.full_weeks, 0);
+    }
+
+    #[test]
     fn recap_uses_inclusive_start_and_exclusive_end() {
         let storage = SessionStorage::open_in_memory().expect("open db");
         let first = storage
             .insert_session("First", Strictness::Normal, "2026-09-01T08:00:00Z", 1800)
             .expect("insert first");
         storage
-            .insert_span(first, "Code", None, "work", "focused", 0, 600)
+            .insert_span(first, &app("Code"), "focused", 0, 600)
             .expect("span");
         storage
             .close_session(first, "2026-09-01T08:10:00Z", "stopped", 600)
@@ -2150,7 +2614,7 @@ mod tests {
             .insert_session("Second", Strictness::Normal, "2026-09-30T08:00:00Z", 1800)
             .expect("insert second");
         storage
-            .insert_span(second, "Code", None, "work", "focused", 0, 900)
+            .insert_span(second, &app("Code"), "focused", 0, 900)
             .expect("span");
         storage
             .close_session(second, "2026-09-30T08:15:00Z", "stopped", 900)
@@ -2159,7 +2623,7 @@ mod tests {
             .insert_session("October", Strictness::Normal, "2026-10-01T08:00:00Z", 1800)
             .expect("insert october");
         storage
-            .insert_span(october, "Code", None, "work", "focused", 0, 120)
+            .insert_span(october, &app("Code"), "focused", 0, 120)
             .expect("span");
         storage
             .close_session(october, "2026-10-01T08:02:00Z", "stopped", 120)
@@ -2193,10 +2657,10 @@ mod tests {
             .insert_session("Split", Strictness::Normal, "2026-09-23T12:00:00Z", 1200)
             .expect("insert");
         storage
-            .insert_span(id, "Cursor", None, "work", "focused", 0, 600)
+            .insert_span(id, &app("Cursor"), "focused", 0, 600)
             .expect("first half");
         storage
-            .insert_span(id, "Chrome", None, "browse", "distracted", 600, 600)
+            .insert_span(id, &site("example.com"), "distracted", 600, 600)
             .expect("second half");
         storage
             .close_session(id, "2026-09-23T12:20:00Z", "stopped", 1200)
@@ -2214,8 +2678,8 @@ mod tests {
         assert_eq!(recap.buckets[2].label, "W");
         assert_eq!(recap.buckets[2].focus_seconds, 600);
         assert_eq!(recap.buckets[0].focus_seconds, 0);
-        assert_eq!(recap.first_half_focus_percent, Some(100));
-        assert_eq!(recap.second_half_focus_percent, Some(0));
+        assert_eq!(recap.recovery_median_seconds, None);
+        assert_eq!(recap.unrecovered_count, 1);
         assert_eq!(
             recap
                 .apps
@@ -2223,8 +2687,8 @@ mod tests {
                 .map(|app| (app.group.as_str(), app.label.as_str(), app.seconds))
                 .collect::<Vec<_>>(),
             vec![
-                ("Miscellaneous", "Browser · site unknown", 600),
-                ("Miscellaneous", "Cursor", 600),
+                ("Focus", "Cursor", 600),
+                ("Distracting", "example.com", 600),
             ]
         );
 
@@ -2240,37 +2704,29 @@ mod tests {
     }
 
     #[test]
-    fn period_recap_groups_apps_by_current_rules() {
+    fn period_recap_groups_apps_like_their_scores() {
         let storage = SessionStorage::open_in_memory().expect("open db");
         storage
             .replace_rules(&[
-                AppRule::app_name("Cursor", RuleClassification::Focused),
-                AppRule::app_name("Slack", RuleClassification::Neutral),
-                AppRule::title_contains("YouTube", RuleClassification::Distracting),
+                AppRule::app("Cursor", RuleClassification::Focused),
+                AppRule::app("Slack", RuleClassification::Neutral),
+                AppRule::website("youtube.com", RuleClassification::Distracting),
             ])
             .expect("rules");
         let id = storage
             .insert_session("Grouped", Strictness::Normal, "2026-09-23T12:00:00Z", 250)
             .expect("insert");
         storage
-            .insert_span(id, "Cursor", None, "work", "focused", 0, 100)
+            .insert_span(id, &app("Cursor"), "focused", 0, 100)
             .expect("focus");
         storage
-            .insert_span(id, "Slack", None, "comms", "neutral", 100, 50)
+            .insert_span(id, &app("Slack"), "neutral", 100, 50)
             .expect("neutral");
         storage
-            .insert_span(
-                id,
-                "Chrome",
-                Some("YouTube - Home"),
-                "browse",
-                "distracted",
-                150,
-                80,
-            )
+            .insert_span(id, &site("youtube.com"), "distracted", 150, 80)
             .expect("distract");
         storage
-            .insert_span(id, "Notepad", None, "browse", "neutral", 230, 20)
+            .insert_span(id, &app("Notepad"), "neutral", 230, 20)
             .expect("misc");
         storage
             .close_session(id, "2026-09-23T12:04:10Z", "stopped", 250)
@@ -2288,8 +2744,8 @@ mod tests {
             vec![
                 ("Focus", "Cursor", 100),
                 ("Neutral", "Slack", 50),
-                ("Distracting", "YouTube - Home", 80),
-                ("Miscellaneous", "Notepad", 20),
+                ("Distracting", "YouTube", 80),
+                ("Unclassified", "Notepad", 20),
             ]
         );
     }
@@ -2310,7 +2766,7 @@ mod tests {
             .insert_session("In week", Strictness::Normal, "2026-09-22T12:00:00Z", 1800)
             .expect("insert in week");
         storage
-            .insert_span(in_week, "Code", None, "work", "focused", 0, 600)
+            .insert_span(in_week, &app("Code"), "focused", 0, 600)
             .expect("span");
         storage
             .close_session(in_week, "2026-09-22T12:10:00Z", "stopped", 600)
@@ -2319,7 +2775,7 @@ mod tests {
             .insert_session("Later", Strictness::Normal, "2026-10-06T12:00:00Z", 1800)
             .expect("insert later");
         storage
-            .insert_span(later, "Code", None, "work", "focused", 0, 300)
+            .insert_span(later, &app("Code"), "focused", 0, 300)
             .expect("span");
         storage
             .close_session(later, "2026-10-06T12:05:00Z", "stopped", 300)
@@ -2372,31 +2828,52 @@ mod tests {
     }
 
     #[test]
-    fn version_1_database_migrates_and_keeps_history() {
+    fn version_1_database_migrates_titles_out_and_keeps_history() {
         let dir = std::env::temp_dir().join(format!(
             "supervisor-storage-migrate-{}",
             std::process::id()
         ));
         let path = dir.join("sessions.db");
         let _ = std::fs::remove_dir_all(&dir);
-        {
+        let id = {
             let (storage, _) = SessionStorage::open(&path).expect("open db");
             let id = storage
                 .insert_session("Old", Strictness::Normal, "2026-09-01T12:00:00Z", 1500)
                 .expect("insert session");
             storage
-                .insert_span(id, "Code", None, "work", "focused", 0, 420)
-                .expect("insert span");
-            storage
                 .close_session(id, "2026-09-01T12:30:00Z", "stopped", 999)
                 .expect("close session");
+            // Rebuild the v1 layout: titles in `span.context`, title and path rules.
             storage
                 .conn
-                .execute_batch(
-                    "ALTER TABLE session DROP COLUMN elapsed_seconds; PRAGMA user_version = 1;",
-                )
+                .execute_batch(&format!(
+                    r"
+                    ALTER TABLE span DROP COLUMN kind;
+                    ALTER TABLE span DROP COLUMN activity_key;
+                    ALTER TABLE span DROP COLUMN label;
+                    ALTER TABLE span DROP COLUMN source;
+                    ALTER TABLE span ADD COLUMN context TEXT;
+                    ALTER TABLE session DROP COLUMN elapsed_seconds;
+                    ALTER TABLE session DROP COLUMN neutral_seconds;
+                    ALTER TABLE session DROP COLUMN unrated_seconds;
+                    DROP TABLE site_name;
+                    DROP TABLE app_name;
+                    INSERT INTO span (session_id, app, context, category, state, started_offset_seconds, seconds)
+                      VALUES ({id}, 'Code', 'main.rs', 'work', 'focused', 0, 420),
+                             ({id}, 'chrome', 'Inbox - Gmail', 'browse', 'neutral', 420, 60);
+                    DELETE FROM rule;
+                    INSERT INTO rule (target, value, classification, source) VALUES
+                      ('window_title', 'YouTube', 'distracting', 'starter'),
+                      ('app_name', 'Slack', 'neutral', 'user'),
+                      ('window_title', 'Watch Later - YouTube', 'distracting', 'user'),
+                      ('process_path', 'C:\x.exe', 'focused', 'user'),
+                      ('window_title', 'Notes', 'focused', 'user');
+                    PRAGMA user_version = 1;
+                    "
+                ))
                 .expect("downgrade to v1");
-        }
+            id
+        };
 
         let (storage, state) = SessionStorage::open(&path).expect("migrate db");
         let version: i32 = storage
@@ -2405,7 +2882,30 @@ mod tests {
             .expect("version");
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(state.history.len(), 1);
-        assert_eq!(state.history[0].duration_seconds, 420);
+        assert_eq!(state.history[0].duration_seconds, 480);
+
+        let spans: Vec<(String, String)> = storage
+            .get_session_report(id)
+            .expect("report")
+            .spans
+            .into_iter()
+            .map(|span| (span.kind, span.label))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("app".to_string(), "Code".to_string()),
+                ("other_websites".to_string(), "Other websites".to_string()),
+            ]
+        );
+        assert_eq!(
+            storage.load_rules().expect("rules"),
+            vec![
+                AppRule::website("youtube.com", RuleClassification::Distracting),
+                AppRule::app("Slack", RuleClassification::Neutral),
+                AppRule::app("Notes", RuleClassification::Focused),
+            ]
+        );
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2458,21 +2958,29 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_database_is_preserved_instead_of_reset() {
+        let path = std::env::temp_dir().join(format!("supervisor-newer-schema-{}.db", std::process::id()));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 999; CREATE TABLE IF NOT EXISTS keep_me (value TEXT);").unwrap();
+        drop(conn);
+        let (opened, notice) = open_or_reset(Ok(path.clone()));
+        assert!(opened.is_none());
+        assert!(matches!(notice, Some(StorageNotice::Off { .. })));
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0)).unwrap(), 999);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM keep_me", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn orphan_session_recovers_as_abandoned() {
         let storage = SessionStorage::open_in_memory().expect("open db");
         let id = storage
             .insert_session("Crash", Strictness::Strict, "2026-09-22T08:00:00Z", 1500)
             .expect("insert session");
         storage
-            .insert_span(
-                id,
-                "Code",
-                Some("lib.rs"),
-                "work",
-                "focused",
-                0,
-                90,
-            )
+            .insert_span(id, &app("Code"), "focused", 0, 90)
             .expect("insert span");
 
         storage.recover_orphans().expect("recover");
@@ -2484,27 +2992,76 @@ mod tests {
     }
 
     #[test]
-    fn span_category_mapping_is_deterministic() {
+    fn recovered_sessions_do_not_count_pauses_as_run_time() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage
+            .insert_session("Crash", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
+            .expect("insert session");
+        storage.insert_span(id, &app("Code"), "focused", 0, 600).unwrap();
+        storage.insert_span(id, &Activity::paused(), "paused", 600, 600).unwrap();
+        storage.recover_orphans().unwrap();
+        let report = storage.get_session_report(id).expect("report");
+
+        assert_eq!(report.duration_seconds, 600);
+        assert_eq!(report.focus_percent, 100);
+    }
+
+    #[test]
+    fn recap_puts_away_time_in_away_not_the_app_rule() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        storage.replace_rules(&[AppRule::app("code", RuleClassification::Focused)]).unwrap();
+        let id = storage
+            .insert_session("Away", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
+            .expect("insert session");
+        storage.insert_span(id, &app("Code"), "focused", 0, 300).unwrap();
+        storage.insert_span(id, &app("Code"), "idle", 300, 600).unwrap();
+        storage.close_session(id, "2026-09-22T12:15:00Z", "stopped", 900).unwrap();
+        let apps = storage.get_period_recap("month", "2026-09-01").unwrap().apps;
+        let group = |name: &str| apps.iter().filter(|app| app.group == name).map(|app| app.seconds).sum::<u64>();
+
+        assert_eq!(group("Focus"), 300);
+        assert_eq!(group("Away"), 600);
+    }
+
+    #[test]
+    fn report_rows_say_whether_and_how_they_are_rated() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage
+            .insert_session("Rate", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
+            .expect("insert session");
+        storage.insert_span(id, &app("Snipping Tool"), "neutral", 0, 60).unwrap();
+        storage.insert_span(id, &site("youtube.com"), "distracted", 60, 60).unwrap();
+        storage.insert_span(id, &Activity::supervisor(), "focused", 120, 60).unwrap();
+        let apps = storage.get_session_report(id).expect("report").apps;
+        let row = |key: &str| apps.iter().find(|app| app.key == key).expect(key);
+
+        assert!(row("snipping tool").ratable);
+        assert_eq!(row("snipping tool").rating, None);
+        assert_eq!(row("youtube.com").rating, Some(RuleClassification::Distracting));
+        assert!(!row("supervisor").ratable);
+    }
+
+    #[test]
+    fn session_report_groups_apps_like_the_timeline() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let id = storage
+            .insert_session("Ship storage", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
+            .expect("insert session");
+        insert_fixture_spans(&storage, id);
+        let rows: Vec<(String, String, u64)> = storage
+            .get_session_report(id)
+            .expect("report")
+            .apps
+            .into_iter()
+            .map(|app| (app.group, app.key, app.seconds))
+            .collect();
         assert_eq!(
-            span_category("Code", Some("main.rs"), "focused", RuleClassification::Focused),
-            "work"
-        );
-        assert_eq!(
-            span_category("Slack", None, "neutral", RuleClassification::Neutral),
-            "comms"
-        );
-        assert_eq!(
-            span_category(
-                "Chrome",
-                Some("YouTube - watch"),
-                "distracted",
-                RuleClassification::Distracting
-            ),
-            "media"
-        );
-        assert_eq!(
-            span_category("Chrome", Some("docs"), "idle", RuleClassification::Neutral),
-            "offscreen"
+            rows,
+            vec![
+                ("Focus".to_string(), "code".to_string(), 300),
+                ("Distracting".to_string(), "youtube.com".to_string(), 120),
+                ("Unclassified".to_string(), "code".to_string(), 180),
+            ]
         );
     }
 
@@ -2522,7 +3079,10 @@ mod tests {
         let loaded = storage.load_settings().expect("load settings");
         assert_eq!(loaded, settings);
 
-        let rules = vec![AppRule::app_name("Code", RuleClassification::Focused)];
+        let rules = vec![
+            AppRule::app("Code", RuleClassification::Focused),
+            AppRule::website("github.com", RuleClassification::Focused),
+        ];
         storage.replace_rules(&rules).expect("save rules");
         let loaded_rules = storage.load_rules().expect("load rules");
         assert_eq!(loaded_rules, rules);
