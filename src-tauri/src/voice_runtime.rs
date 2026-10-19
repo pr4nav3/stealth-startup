@@ -145,18 +145,24 @@ pub fn install_runtime(
     mut progress: impl FnMut(VoiceRuntimeDownloadProgress),
 ) -> Result<VoiceRuntimeStatus, String> {
     let current = status(root);
-    if current.installed {
-        progress(VoiceRuntimeDownloadProgress {
-            downloaded_bytes: current.required_bytes.unwrap_or(0),
-            total_bytes: current.required_bytes.unwrap_or(0),
-            current_file: None,
-        });
-        return Ok(current);
+    if current.source == VoiceRuntimeSource::DevOverride {
+        return Ok(report_installed(current, &mut progress));
     }
-
-    let manifest = fetch_manifest()?;
+    // An installed runtime still checks the manifest, so a fixed zip for the same version
+    // (new sha) installs. Offline, keep what is installed.
+    let manifest = match fetch_manifest() {
+        Ok(manifest) => manifest,
+        Err(_) if current.installed => return Ok(report_installed(current, &mut progress)),
+        Err(error) => return Err(error),
+    };
     let target = runtime_target();
     let asset = select_runtime_asset(&manifest, &target)?;
+    // A corrupt install record is not an error here: the download below replaces it.
+    if let Some((install, _)) = installed_runtime(root).ok().flatten() {
+        if install.version == manifest.version && install.archive_sha256 == asset.sha256 {
+            return Ok(report_installed(current, &mut progress));
+        }
+    }
 
     fs::create_dir_all(runtime_root(root)).map_err(|error| error.to_string())?;
     let archive_path = runtime_root(root).join(DOWNLOAD_FILE);
@@ -187,6 +193,18 @@ pub fn install_runtime(
     )?;
 
     Ok(status(root))
+}
+
+fn report_installed(
+    current: VoiceRuntimeStatus,
+    progress: &mut impl FnMut(VoiceRuntimeDownloadProgress),
+) -> VoiceRuntimeStatus {
+    progress(VoiceRuntimeDownloadProgress {
+        downloaded_bytes: current.required_bytes.unwrap_or(0),
+        total_bytes: current.required_bytes.unwrap_or(0),
+        current_file: None,
+    });
+    current
 }
 
 pub fn delete_runtime(root: &Path) -> Result<(), String> {
