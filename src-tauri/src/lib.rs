@@ -44,7 +44,7 @@ struct AppState {
 }
 
 #[tauri::command]
-fn start_session(
+async fn start_session(
     input: StartSessionInput,
     app: AppHandle,
     state: State<'_, AppState>,
@@ -107,13 +107,13 @@ fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSna
 }
 
 #[tauri::command]
-fn mark_current_relevant(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+async fn mark_current_relevant(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     Ok(lock_sessions(&state)?.mark_current(focus::RuleClassification::Focused, now))
 }
 
 #[tauri::command]
-fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+async fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
     Ok(lock_sessions(&state)?.mark_current(focus::RuleClassification::Distracting, now))
 }
@@ -227,7 +227,7 @@ fn set_app_name(
 }
 
 #[tauri::command]
-fn update_rules(
+async fn update_rules(
     rules: Vec<focus::AppRule>,
     state: State<'_, AppState>,
 ) -> Result<session::RulesSaved, String> {
@@ -302,22 +302,16 @@ fn set_status_window_on_top(
 }
 
 #[tauri::command]
-fn get_voice_backend_status(
+async fn get_voice_backend_status(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<voice::VoiceBackendStatus, String> {
     voice::get_status(&app, &state.voice_worker)
 }
 
+/// Async so it runs off the main thread: the check hashes a gigabyte of model files.
 #[tauri::command]
-async fn download_voice_cloning_model(app: AppHandle) -> Result<voice::VoiceModelStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || voice::download_model(app))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-fn start_voice_model_download(
+async fn start_voice_model_download(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<voice::VoiceDownloadSnapshot, String> {
@@ -325,7 +319,7 @@ fn start_voice_model_download(
 }
 
 #[tauri::command]
-fn get_voice_model_download(
+async fn get_voice_model_download(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<voice::VoiceDownloadSnapshot, String> {
@@ -341,16 +335,19 @@ fn cancel_voice_model_download(
 }
 
 #[tauri::command]
-fn delete_voice_cloning_model(app: AppHandle) -> Result<voice::VoiceModelStatus, String> {
-    voice::delete_model(&app)
-}
-
-#[tauri::command]
-fn save_voice_reference(
+async fn delete_voice_cloning_model(
     app: AppHandle,
-    input: voice::SaveVoiceReferenceInput,
-) -> Result<voice::VoiceProfileSummary, String> {
-    voice::save_reference(&app, input)
+    state: State<'_, AppState>,
+) -> Result<voice::VoiceModelStatus, String> {
+    // The worker holds the model and runtime files open; deleting under it fails on Windows.
+    if state.voice_worker.is_busy() {
+        return Err("A clip is generating. Wait for it or cancel it first.".to_string());
+    }
+    if voice::download_active(&state.voice_download) {
+        return Err("A download is running. Cancel it first.".to_string());
+    }
+    voice::release_worker(&state.voice_worker);
+    voice::delete_model(&app)
 }
 
 #[tauri::command]
@@ -362,7 +359,7 @@ fn save_voice_reference_from_path(
 }
 
 #[tauri::command]
-fn start_voice_recording(
+async fn start_voice_recording(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<voice::VoiceRecordingSnapshot, String> {
@@ -370,7 +367,7 @@ fn start_voice_recording(
 }
 
 #[tauri::command]
-fn stop_voice_recording(
+async fn stop_voice_recording(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<voice::VoiceRecordingSnapshot, String> {
@@ -468,6 +465,8 @@ fn sync_session_webcam(app: &AppHandle) {
         return;
     };
     let webcam = &state.webcam;
+    // GPU mode that failed once this run would fail again every 30 s; CPU always works.
+    let gpu = gpu && !webcam.gpu_failed();
     if wants && webcam.is_stalled() {
         // Frozen, not crashed: kill it so the next tick starts a fresh one.
         eprintln!("webcam: worker sent nothing for a while; restarting it");
@@ -492,10 +491,8 @@ fn sync_session_webcam(app: &AppHandle) {
 fn lock_sessions<'a>(
     state: &'a State<'_, AppState>,
 ) -> Result<std::sync::MutexGuard<'a, SessionManager>, String> {
-    state
-        .sessions
-        .lock()
-        .map_err(|_| "session manager unavailable".to_string())
+    // A panic under the lock must not take the whole app down with it.
+    Ok(state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
 }
 
 fn database_path(app: &tauri::App) -> Result<PathBuf, String> {
@@ -566,12 +563,10 @@ pub fn run() {
             set_status_window_enabled,
             set_status_window_on_top,
             get_voice_backend_status,
-            download_voice_cloning_model,
             start_voice_model_download,
             get_voice_model_download,
             cancel_voice_model_download,
             delete_voice_cloning_model,
-            save_voice_reference,
             save_voice_reference_from_path,
             start_voice_recording,
             stop_voice_recording,
@@ -592,7 +587,11 @@ pub fn run() {
             // Managed state is never dropped (the ticker threads hold AppHandles), so stop the
             // voice worker here; outside Windows nothing else kills it when the app exits.
             if let tauri::RunEvent::Exit = event {
-                voice::release_worker(&app.state::<AppState>().voice_worker);
+                let state = app.state::<AppState>();
+                // Cancel first: a release alone waits for a running clip to finish.
+                voice::cancel_generation(&state.voice_worker);
+                voice::release_worker(&state.voice_worker);
+                webcam::stop_preview(&state.webcam);
             }
         });
 }
@@ -857,9 +856,7 @@ fn start_session_ticker(app: AppHandle) {
         let (ended_after_tick, should_poll) = {
             let state = app.state::<AppState>();
             let now = state.started_at.elapsed();
-            let Ok(mut sessions) = state.sessions.lock() else {
-                continue;
-            };
+            let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             // This loop runs every second; a long silence means the machine slept or froze.
             if now.saturating_sub(last_loop) > session::LOST_TIME_AFTER {
                 sessions.record_lost_time(last_loop, now);
@@ -890,9 +887,7 @@ fn start_session_ticker(app: AppHandle) {
         }) else {
             let state = app.state::<AppState>();
             let now = state.started_at.elapsed();
-            let Ok(mut sessions) = state.sessions.lock() else {
-                continue;
-            };
+            let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             sessions.record_capture_gap(now);
             let had_current = sessions.has_current();
             let snapshot = sessions.tick(now);
@@ -906,9 +901,7 @@ fn start_session_ticker(app: AppHandle) {
             let state = app.state::<AppState>();
             let now = state.started_at.elapsed();
             let identity = state.identity.clone();
-            let Ok(mut sessions) = state.sessions.lock() else {
-                continue;
-            };
+            let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let was_polling = sessions.should_poll_activity();
             let snapshot = sessions.record_sample(sample, now, &identity);
             if new_nudge(&mut nudges_seen, &snapshot) {

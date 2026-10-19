@@ -336,7 +336,7 @@ fn install_archive(
                 asset.bytes, bytes
             ));
         }
-        if sha256_file(archive_path)? != asset.sha256 {
+        if sha256_file(archive_path, cancel)? != asset.sha256 {
             return Err("downloaded voice runtime checksum mismatch".to_string());
         }
         if cancel.load(Ordering::SeqCst) {
@@ -347,7 +347,7 @@ fn install_archive(
             fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
         }
         fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
-        if let Err(error) = extract_zip(archive_path, &staging) {
+        if let Err(error) = extract_zip(archive_path, &staging, cancel) {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
@@ -501,10 +501,13 @@ fn installed_runtime(root: &Path) -> Result<Option<(RuntimeInstall, PathBuf)>, S
     Ok(Some((install, executable)))
 }
 
-fn extract_zip(archive_path: &Path, out_dir: &Path) -> Result<(), String> {
+fn extract_zip(archive_path: &Path, out_dir: &Path, cancel: &AtomicBool) -> Result<(), String> {
     let file = File::open(archive_path).map_err(|error| error.to_string())?;
     let mut archive = ZipArchive::new(file).map_err(|error| error.to_string())?;
     for index in 0..archive.len() {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(DOWNLOAD_CANCELLED.to_string());
+        }
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
         let Some(relative) = safe_relative_path(entry.name()) else {
             return Err(format!(
@@ -698,11 +701,14 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     fs::write(path, bytes).map_err(|error| error.to_string())
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
+fn sha256_file(path: &Path, cancel: &AtomicBool) -> Result<String, String> {
     let mut file = File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 1024 * 64];
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(DOWNLOAD_CANCELLED.to_string());
+        }
         let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
         if read == 0 {
             break;
@@ -892,7 +898,7 @@ mod tests {
         RuntimeAsset {
             target: runtime_target(),
             url: "https://example.invalid/runtime.zip".to_string(),
-            sha256: sha256_file(path).unwrap(),
+            sha256: sha256_file(path, &AtomicBool::new(false)).unwrap(),
             bytes: fs::metadata(path).unwrap().len(),
             executable: Some(default_executable()),
         }

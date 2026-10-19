@@ -47,11 +47,16 @@ const STARTER_PROFILES: &[(&str, &str, &str)] = &[
 #[serde(rename_all = "snake_case")]
 pub enum VoiceDownloadPhase {
     Idle,
+    /// Hashing what is installed and reading the manifest; nothing is being fetched yet.
+    Checking,
     Downloading,
     Cancelling,
     Complete,
     Error,
 }
+
+/// How much of the worker's stderr to keep for error messages.
+const STDERR_TAIL_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct VoiceDownloadSnapshot {
@@ -62,6 +67,8 @@ pub struct VoiceDownloadSnapshot {
     pub elapsed_seconds: u64,
     pub eta_seconds: Option<u64>,
     pub message: String,
+    /// Complete, and nothing needed fetching.
+    pub up_to_date: bool,
     pub model: VoiceModelStatus,
     pub runtime: voice_runtime::VoiceRuntimeStatus,
 }
@@ -76,6 +83,7 @@ pub struct VoiceDownloadState {
     started_at: Option<Instant>,
     error: Option<String>,
     cancel: Option<Arc<AtomicBool>>,
+    up_to_date: bool,
 }
 
 impl Default for VoiceDownloadState {
@@ -89,6 +97,7 @@ impl Default for VoiceDownloadState {
             started_at: None,
             error: None,
             cancel: None,
+            up_to_date: false,
         }
     }
 }
@@ -159,6 +168,8 @@ struct WorkerInner {
     busy: AtomicBool,
     loaded: AtomicBool,
     stop_after: AtomicBool,
+    /// A release asked for during a job: kill the worker once the job is done.
+    release_after: AtomicBool,
     last_used: Mutex<Instant>,
     generation: AtomicU64,
 }
@@ -167,6 +178,8 @@ struct LiveWorker {
     child: Child,
     stdin: ChildStdin,
     stdout: Option<BufReader<std::process::ChildStdout>>,
+    /// The last few KB the worker wrote to stderr: the reason, when it dies.
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
     _lifetime: WorkerLifetime,
 }
 
@@ -240,6 +253,7 @@ impl VoiceWorker {
                 busy: AtomicBool::new(false),
                 loaded: AtomicBool::new(false),
                 stop_after: AtomicBool::new(false),
+                release_after: AtomicBool::new(false),
                 last_used: Mutex::new(Instant::now()),
                 generation: AtomicU64::new(0),
             }),
@@ -250,11 +264,17 @@ impl VoiceWorker {
         self.inner.loaded.load(Ordering::SeqCst)
     }
 
+    /// Frees the model's RAM. A running job finishes first; only `cancel` interrupts one.
     pub fn release(&self) {
-        self.inner.stop_after.store(true, Ordering::SeqCst);
-        if !self.inner.busy.load(Ordering::SeqCst) {
+        if self.inner.busy.load(Ordering::SeqCst) {
+            self.inner.release_after.store(true, Ordering::SeqCst);
+        } else {
             self.kill();
         }
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.inner.busy.load(Ordering::SeqCst)
     }
 
     /// Stops a running job. The job thread sees `stop_after`, kills the worker and reports
@@ -316,12 +336,15 @@ impl VoiceWorker {
         self.inner.stop_after.store(false, Ordering::SeqCst);
         let generation = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let started = Instant::now();
+        // Cleared on every exit, a panic included; otherwise every later job says "already generating".
+        let _busy = ClearOnDrop(&self.inner.busy);
         let result = self.run_job_inner(root, reference, out_dir, phrases, generation, started);
-        self.inner.busy.store(false, Ordering::SeqCst);
         if let Ok(mut used) = self.inner.last_used.lock() {
             *used = Instant::now();
         }
-        if self.inner.stop_after.swap(false, Ordering::SeqCst) {
+        if self.inner.stop_after.swap(false, Ordering::SeqCst)
+            | self.inner.release_after.swap(false, Ordering::SeqCst)
+        {
             self.kill();
         }
         result
@@ -378,6 +401,7 @@ impl VoiceWorker {
             .take()
             .ok_or_else(|| "voice worker stdout missing".to_string())?;
         let pid = worker.child.id();
+        let stderr_tail = Arc::clone(&worker.stderr_tail);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut line = String::new();
@@ -421,10 +445,10 @@ impl VoiceWorker {
                     }
                     break line;
                 }
-                Ok((Ok(_), _, _)) => "voice worker stopped".to_string(),
+                Ok((Ok(_), _, _)) => worker_stopped(&stderr_tail),
                 Ok((Err(error), _, _)) => error.to_string(),
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => "voice worker stopped".to_string(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => worker_stopped(&stderr_tail),
             };
             let cancelled = self.inner.stop_after.load(Ordering::SeqCst);
             drop(live);
@@ -437,8 +461,16 @@ impl VoiceWorker {
         };
 
         finish_generation_peak(root, peak.working_set);
-        let parsed: ServeReply =
-            serde_json::from_str(reply.trim()).map_err(|error| error.to_string())?;
+        // A line that is not the reply means stdout is out of step; a fresh worker is safer
+        // than reading last job's reply next time.
+        let parsed: ServeReply = match serde_json::from_str(reply.trim()) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                drop(live);
+                self.kill();
+                return Err(format!("voice worker sent an unreadable reply: {error}"));
+            }
+        };
         self.inner
             .loaded
             .store(parsed.loaded.unwrap_or(parsed.ok), Ordering::SeqCst);
@@ -517,10 +549,23 @@ fn spawn_serve_worker(root: &Path) -> Result<(LiveWorker, WorkerKiller), String>
         command.creation_flags(0x0800_0000);
     }
     let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let stderr_tail = Arc::new(Mutex::new(Vec::new()));
     if let Some(mut stderr) = child.stderr.take() {
+        let tail = Arc::clone(&stderr_tail);
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stderr.read_to_end(&mut bytes);
+            let mut buffer = [0u8; 4096];
+            while let Ok(read) = stderr.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                if let Ok(mut tail) = tail.lock() {
+                    tail.extend_from_slice(&buffer[..read]);
+                    if tail.len() > STDERR_TAIL_BYTES {
+                        let drop = tail.len() - STDERR_TAIL_BYTES;
+                        tail.drain(..drop);
+                    }
+                }
+            }
         });
     }
     let lifetime = bind_worker_lifetime(&child);
@@ -542,7 +587,8 @@ fn spawn_serve_worker(root: &Path) -> Result<(LiveWorker, WorkerKiller), String>
             child,
             stdin,
             stdout: Some(BufReader::new(stdout)),
-            _lifetime: lifetime,
+            stderr_tail,
+        _lifetime: lifetime,
         },
         killer,
     ))
@@ -695,13 +741,6 @@ pub struct DeleteVoiceClipInput {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct SaveVoiceReferenceInput {
-    pub profile_id: String,
-    pub display_name: Option<String>,
-    pub audio_bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
 pub struct SaveVoiceReferenceFromPathInput {
     pub profile_id: String,
     pub display_name: Option<String>,
@@ -789,15 +828,6 @@ pub fn tick_worker(worker: &VoiceWorker) {
     worker.tick();
 }
 
-pub fn download_model(app: AppHandle) -> Result<VoiceModelStatus, String> {
-    let root = voice_root(&app)?;
-    fs::create_dir_all(model_dir(&root)).map_err(|error| error.to_string())?;
-    ensure_download_space(&root)?;
-    voice_runtime::install_runtime(&root, Arc::new(AtomicBool::new(false)), |_| {})?;
-    download_model_to(&root)?;
-    Ok(model_status(&root))
-}
-
 pub fn start_model_download(
     app: AppHandle,
     state: Arc<Mutex<VoiceDownloadState>>,
@@ -811,15 +841,15 @@ pub fn start_model_download(
             .map_err(|_| "voice download state unavailable".to_string())?;
         if matches!(
             download.phase,
-            VoiceDownloadPhase::Downloading | VoiceDownloadPhase::Cancelling
+            VoiceDownloadPhase::Checking | VoiceDownloadPhase::Downloading | VoiceDownloadPhase::Cancelling
         ) {
             return Ok(download_snapshot(&download, &root));
         }
     }
 
     ensure_download_space(&root)?;
-    // No early return when everything is installed: the worker thread still asks the manifest
-    // for a newer runtime, and valid model files are skipped.
+    // Hashing the installed model takes seconds, so it happens on the worker thread: this
+    // returns at once in the Checking phase, and Downloading starts with the first fetch.
     let runtime = voice_runtime::status(&root);
     let required_bytes = required_model_bytes() + runtime.required_bytes.unwrap_or(0);
 
@@ -828,26 +858,31 @@ pub fn start_model_download(
         let mut download = state
             .lock()
             .map_err(|_| "voice download state unavailable".to_string())?;
-        let installed_bytes = valid_pack_bytes(&root);
-        download.phase = VoiceDownloadPhase::Downloading;
-        download.downloaded_bytes = installed_bytes;
-        download.started_downloaded_bytes = installed_bytes;
+        download.phase = VoiceDownloadPhase::Checking;
+        download.downloaded_bytes = 0;
+        download.started_downloaded_bytes = 0;
         download.total_bytes = required_bytes.max(required_model_bytes());
         download.current_file = None;
-        download.started_at = Some(Instant::now());
+        download.started_at = None;
         download.error = None;
+        download.up_to_date = false;
         download.cancel = Some(Arc::clone(&cancel));
     }
 
     let download_state = Arc::clone(&state);
     let root_for_worker = root.clone();
     std::thread::spawn(move || {
-        let result =
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             download_pack_to_with_progress(&root_for_worker, Arc::clone(&cancel), |progress| {
                 if let Ok(mut download) = download_state.lock() {
+                    if download.phase == VoiceDownloadPhase::Checking && progress.current_file.is_some() {
+                        download.phase = VoiceDownloadPhase::Downloading;
+                        download.started_at = Some(Instant::now());
+                        download.started_downloaded_bytes = progress.downloaded_bytes;
+                    }
                     if matches!(
                         download.phase,
-                        VoiceDownloadPhase::Downloading | VoiceDownloadPhase::Cancelling
+                        VoiceDownloadPhase::Checking | VoiceDownloadPhase::Downloading | VoiceDownloadPhase::Cancelling
                     ) {
                         download.downloaded_bytes = progress.downloaded_bytes;
                         if let Some(total_bytes) = progress.total_bytes {
@@ -856,14 +891,17 @@ pub fn start_model_download(
                         download.current_file = progress.current_file;
                     }
                 }
-            });
+            })
+        }))
+        .unwrap_or_else(|_| Err("the download stopped unexpectedly".to_string()));
 
         if let Ok(mut download) = download_state.lock() {
             download.current_file = None;
             download.cancel = None;
             match result {
-                Ok(()) => {
+                Ok(fetched) => {
                     download.phase = VoiceDownloadPhase::Complete;
+                    download.up_to_date = !fetched;
                     download.downloaded_bytes = pack_required_bytes(&root_for_worker);
                     download.started_downloaded_bytes = download.downloaded_bytes;
                     download.total_bytes = download.downloaded_bytes;
@@ -892,6 +930,14 @@ pub fn start_model_download(
     Ok(download_snapshot(&download, &root))
 }
 
+/// Whether a check or download is running, so nothing deletes the files under it.
+pub fn download_active(state: &Arc<Mutex<VoiceDownloadState>>) -> bool {
+    state.lock().map(|download| matches!(
+        download.phase,
+        VoiceDownloadPhase::Checking | VoiceDownloadPhase::Downloading | VoiceDownloadPhase::Cancelling
+    )).unwrap_or(false)
+}
+
 pub fn model_download_snapshot(
     app: &AppHandle,
     state: &Arc<Mutex<VoiceDownloadState>>,
@@ -911,7 +957,7 @@ pub fn cancel_model_download(
     let mut download = state
         .lock()
         .map_err(|_| "voice download state unavailable".to_string())?;
-    if download.phase == VoiceDownloadPhase::Downloading {
+    if matches!(download.phase, VoiceDownloadPhase::Checking | VoiceDownloadPhase::Downloading) {
         download.phase = VoiceDownloadPhase::Cancelling;
         download.current_file = None;
         if let Some(cancel) = &download.cancel {
@@ -950,33 +996,6 @@ pub fn delete_profile(
         fs::remove_dir_all(dir).map_err(|error| error.to_string())?;
     }
     Ok(profile_summaries(&root))
-}
-
-pub fn save_reference(
-    app: &AppHandle,
-    input: SaveVoiceReferenceInput,
-) -> Result<VoiceProfileSummary, String> {
-    let root = voice_root(app)?;
-    let profile_id = clean_id(&input.profile_id)?;
-    if input.audio_bytes.is_empty() {
-        return Err("recorded voice clip is empty".to_string());
-    }
-    if input.audio_bytes.len() > MAX_REFERENCE_AUDIO_BYTES {
-        return Err("recorded voice clip is too large".to_string());
-    }
-
-    let display_name = clean_display_name(input.display_name.as_deref(), &profile_id);
-    let dir = profile_dir(&root, &profile_id);
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    fs::write(dir.join("reference.wav"), input.audio_bytes).map_err(|error| error.to_string())?;
-
-    let metadata = VoiceProfileMetadata {
-        profile_id: profile_id.clone(),
-        display_name,
-        reference_retained: true,
-    };
-    write_json(&dir.join("profile.json"), &metadata)?;
-    profile_summary(&dir, &profile_id)
 }
 
 pub fn save_reference_from_path(
@@ -1031,7 +1050,7 @@ pub fn start_recording(
     let (ready_tx, ready_rx) = mpsc::channel();
     std::thread::spawn(move || run_recording_thread(command_rx, ready_tx));
     let sample_rate = ready_rx
-        .recv_timeout(Duration::from_secs(3))
+        .recv_timeout(Duration::from_secs(15))
         .map_err(|_| "Microphone did not become ready.".to_string())??;
 
     recording.phase = VoiceRecordingPhase::Recording;
@@ -1072,9 +1091,11 @@ pub fn stop_recording(
     command
         .send(RecordingCommand::Stop(path, result_tx))
         .map_err(|_| "Recording stream stopped unexpectedly.".to_string())?;
+    // A timeout is an error the dialog can show, not an early return that leaves the
+    // phase on Recording with no stream behind it.
     let clip = result_rx
         .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "Recording did not stop cleanly.".to_string())?;
+        .unwrap_or_else(|_| Err("Recording did not stop cleanly.".to_string()));
 
     let mut recording = state
         .lock()
@@ -1236,7 +1257,8 @@ fn generate_clips_inner(
         .unwrap_or(&profile_id)
         .to_string();
     let reference = supervisor_storage_file(&root, &input.reference_audio_path, "reference audio")?;
-    if !model_status(&root).installed || !voice_runtime::status(&root).installed {
+    // Size check only: hashing 1.9 GB here added ten seconds to every clip. Install verifies.
+    if !model_status_for(&root, false).installed || !voice_runtime::status(&root).installed {
         return Err("download the voice cloning model pack before generating clips".to_string());
     }
     ensure_generation_ram(worker.is_loaded())?;
@@ -1400,6 +1422,7 @@ fn download_snapshot(state: &VoiceDownloadState, root: &Path) -> VoiceDownloadSn
         eta_seconds,
         message: match state.phase {
             VoiceDownloadPhase::Idle => "No model download is running.".to_string(),
+            VoiceDownloadPhase::Checking => "Checking the installed model and runtime.".to_string(),
             VoiceDownloadPhase::Downloading => state
                 .current_file
                 .as_ref()
@@ -1408,20 +1431,17 @@ fn download_snapshot(state: &VoiceDownloadState, root: &Path) -> VoiceDownloadSn
             VoiceDownloadPhase::Cancelling => {
                 "Cancelling download. Deleting partially installed files.".to_string()
             }
+            VoiceDownloadPhase::Complete if state.up_to_date => "Everything is already up to date.".to_string(),
             VoiceDownloadPhase::Complete => "Model pack ready.".to_string(),
             VoiceDownloadPhase::Error => state
                 .error
                 .clone()
                 .unwrap_or_else(|| "Model download failed.".to_string()),
         },
+        up_to_date: state.phase == VoiceDownloadPhase::Complete && state.up_to_date,
         model: model_status_for(root, false),
         runtime: voice_runtime::status(root),
     }
-}
-
-fn valid_pack_bytes(root: &Path) -> u64 {
-    let runtime = voice_runtime::status(root);
-    valid_installed_bytes(root) + runtime.required_bytes.unwrap_or(0)
 }
 
 fn pack_required_bytes(root: &Path) -> u64 {
@@ -1429,26 +1449,26 @@ fn pack_required_bytes(root: &Path) -> u64 {
     required_model_bytes() + runtime.required_bytes.unwrap_or(0)
 }
 
-fn valid_installed_bytes(root: &Path) -> u64 {
+/// Installed model bytes by size only: a progress baseline, not proof the files are good.
+fn present_model_bytes(root: &Path) -> u64 {
     let dir = model_dir(root);
     MODEL_FILES
         .iter()
-        .filter(|file| model_file_status(&dir, file, true).valid)
+        .filter(|file| model_file_status(&dir, file, false).valid)
         .map(|file| file.bytes)
         .sum()
 }
 
-fn download_model_to(root: &Path) -> Result<(), String> {
-    download_model_to_with_progress(root, Arc::new(AtomicBool::new(false)), |_| {})
-}
-
+/// Ok(true) when anything was fetched; Ok(false) means everything was already in place.
 fn download_pack_to_with_progress(
     root: &Path,
     cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(VoiceDownloadProgress),
-) -> Result<(), String> {
-    let model_start_bytes = valid_installed_bytes(root);
+) -> Result<bool, String> {
+    let model_start_bytes = present_model_bytes(root);
+    let mut fetched = false;
     let runtime = voice_runtime::install_runtime(root, Arc::clone(&cancel), |runtime_progress| {
+        fetched |= runtime_progress.current_file.is_some();
         progress(VoiceDownloadProgress {
             downloaded_bytes: model_start_bytes + runtime_progress.downloaded_bytes,
             total_bytes: Some(required_model_bytes() + runtime_progress.total_bytes),
@@ -1457,13 +1477,14 @@ fn download_pack_to_with_progress(
     })?;
     let runtime_bytes = runtime.required_bytes.unwrap_or(0);
 
-    download_model_to_with_progress(root, cancel, |model_progress| {
+    let fetched_model = download_model_to_with_progress(root, cancel, |model_progress| {
         progress(VoiceDownloadProgress {
             downloaded_bytes: runtime_bytes + model_progress.downloaded_bytes,
             total_bytes: Some(runtime_bytes + required_model_bytes()),
             current_file: model_progress.current_file,
-        });
-    })
+        })
+    })?;
+    Ok(fetched || fetched_model)
 }
 
 fn discard_partial_download(path: &Path) {
@@ -1474,7 +1495,7 @@ fn download_model_to_with_progress(
     root: &Path,
     cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(VoiceDownloadProgress),
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let dir = model_dir(root);
     let client = reqwest::Client::builder()
         .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
@@ -1482,21 +1503,26 @@ fn download_model_to_with_progress(
         .timeout(DOWNLOAD_TOTAL_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut completed_bytes = valid_installed_bytes(root);
-    progress(VoiceDownloadProgress {
-        downloaded_bytes: completed_bytes,
-        total_bytes: Some(required_model_bytes()),
-        current_file: None,
-    });
+    let mut completed_bytes = 0u64;
+    let mut fetched = false;
 
     for file in MODEL_FILES {
         if cancel.load(Ordering::SeqCst) {
             return Err(DOWNLOAD_CANCELLED.to_string());
         }
         let target = dir.join(file.path);
-        if model_file_status(&dir, file, true).valid {
+        // One hash per file: a valid one is counted and skipped. The hash stops on cancel.
+        let size_ok = fs::metadata(&target).map(|meta| meta.len() == file.bytes).unwrap_or(false);
+        if size_ok && sha256_file_until(&target, Some(&cancel))? == file.sha256 {
+            completed_bytes += file.bytes;
+            progress(VoiceDownloadProgress {
+                downloaded_bytes: completed_bytes,
+                total_bytes: Some(required_model_bytes()),
+                current_file: None,
+            });
             continue;
         }
+        fetched = true;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
@@ -1559,7 +1585,7 @@ fn download_model_to_with_progress(
                 file.path, file.bytes, bytes
             ));
         }
-        let hash = sha256_file(&tmp)?;
+        let hash = sha256_file_until(&tmp, Some(&cancel))?;
         if cancel.load(Ordering::SeqCst) {
             let _ = fs::remove_file(&tmp);
             discard_partial_download(&tmp);
@@ -1581,7 +1607,7 @@ fn download_model_to_with_progress(
         });
     }
 
-    Ok(())
+    Ok(fetched)
 }
 
 fn merge_generated_clips(profile_dir: &Path, staging_dir: &Path) -> Result<(), String> {
@@ -2327,7 +2353,8 @@ fn finish_generation_peak(root: &Path, peak_ram_bytes: u64) {
     let _ = write_json(&generation_budget_path(root), &budget);
 }
 
-struct WorkerLifetime {
+/// Ties a child to this process on Windows (job object: it dies when the handle closes).
+pub(crate) struct WorkerLifetime {
     #[cfg(windows)]
     job: Option<isize>,
 }
@@ -2352,7 +2379,27 @@ impl Drop for WorkerLifetime {
     }
 }
 
-fn bind_worker_lifetime(child: &std::process::Child) -> WorkerLifetime {
+struct ClearOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The EOF message plus the worker's last stderr line, so a startup failure says why.
+fn worker_stopped(tail: &Mutex<Vec<u8>>) -> String {
+    let text = tail
+        .lock()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    match text.lines().rev().find(|line| !line.trim().is_empty()) {
+        Some(line) => format!("voice worker stopped: {}", line.trim().chars().take(200).collect::<String>()),
+        None => "voice worker stopped".to_string(),
+    }
+}
+
+pub(crate) fn bind_worker_lifetime(child: &std::process::Child) -> WorkerLifetime {
     #[cfg(windows)]
     {
         WorkerLifetime {
@@ -2631,10 +2678,18 @@ fn available_ram_bytes() -> Option<u64> {
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
+    sha256_file_until(path, None)
+}
+
+/// A gigabyte takes seconds to hash, so a cancel must be able to interrupt it.
+fn sha256_file_until(path: &Path, cancel: Option<&AtomicBool>) -> Result<String, String> {
     let mut file = File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 1024 * 64];
     loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(DOWNLOAD_CANCELLED.to_string());
+        }
         let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
         if read == 0 {
             break;

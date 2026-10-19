@@ -19,6 +19,9 @@ const PREVIEW_FPS: &str = "4";
 /// A worker that was sending frames and then goes this long without one is stuck (frozen camera
 /// driver). Frames come at least twice a second, so this is never just a slow frame.
 const STALL_AFTER: Duration = Duration::from_secs(15);
+/// A worker that never sends its first line (model load, a wedged camera driver, a slow
+/// first launch under antivirus) is given this long before it is replaced.
+const FIRST_LINE_AFTER: Duration = Duration::from_secs(60);
 /// After the worker fails (no camera, camera denied), sessions wait this long to try again.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 #[cfg(not(debug_assertions))]
@@ -88,6 +91,11 @@ pub struct WebcamPreview {
     /// When the running worker last sent a line; `None` until its first, so a slow start (model
     /// load, camera open, a virus scan of the first launch) is never mistaken for a hang.
     last_line_at: Arc<Mutex<Option<Instant>>>,
+    spawned_at: Mutex<Option<Instant>>,
+    /// Keeps the Windows job object alive, so the worker dies with the app.
+    lifetime: Mutex<Option<crate::voice::WorkerLifetime>>,
+    /// GPU mode failed this run: sessions fall back to CPU instead of retrying it every 30 s.
+    gpu_failed: Arc<AtomicBool>,
 }
 
 impl Default for WebcamPreview {
@@ -99,6 +107,9 @@ impl Default for WebcamPreview {
             preview: AtomicBool::new(false),
             failed_at: Arc::new(Mutex::new(None)),
             last_line_at: Arc::new(Mutex::new(None)),
+            spawned_at: Mutex::new(None),
+            lifetime: Mutex::new(None),
+            gpu_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -121,7 +132,20 @@ impl WebcamPreview {
     /// Running but silent too long: a hung worker that would otherwise never be restarted.
     pub fn is_stalled(&self) -> bool {
         let quiet = self.last_line_at.lock().ok().and_then(|at| *at).map(|at| at.elapsed());
-        quiet.is_some_and(|quiet| quiet >= STALL_AFTER) && self.is_running()
+        let stalled = match quiet {
+            Some(quiet) => quiet >= STALL_AFTER,
+            None => self
+                .spawned_at
+                .lock()
+                .ok()
+                .and_then(|at| *at)
+                .is_some_and(|at| at.elapsed() >= FIRST_LINE_AFTER),
+        };
+        stalled && self.is_running()
+    }
+
+    pub fn gpu_failed(&self) -> bool {
+        self.gpu_failed.load(Ordering::SeqCst)
     }
 
     /// Whether a session should leave the camera alone for now after a failure.
@@ -242,6 +266,12 @@ fn spawn_worker(
         .take()
         .ok_or_else(|| "webcam worker stdout missing".to_string())?;
     let stop = state.replace_stop_flag()?;
+    if let Ok(mut lifetime) = state.lifetime.lock() {
+        *lifetime = Some(crate::voice::bind_worker_lifetime(&child));
+    }
+    if let Ok(mut at) = state.spawned_at.lock() {
+        *at = Some(Instant::now());
+    }
     state.store_child(child)?;
     state.preview.store(preview, Ordering::SeqCst);
     if let Ok(mut at) = state.failed_at.lock() {
@@ -253,7 +283,8 @@ fn spawn_worker(
 
     let failed_at = Arc::clone(&state.failed_at);
     let last_line_at = Arc::clone(&state.last_line_at);
-    std::thread::spawn(move || read_worker(app, stdout, stop, on_frame, failed_at, last_line_at));
+    let gpu_failed = Arc::clone(&state.gpu_failed);
+    std::thread::spawn(move || read_worker(app, stdout, stop, on_frame, failed_at, last_line_at, gpu_failed));
     Ok(())
 }
 
@@ -265,6 +296,9 @@ pub fn stop_preview(state: &WebcamPreview) {
         let _ = child.kill();
         let _ = child.wait();
     }
+    if let Ok(mut lifetime) = state.lifetime.lock() {
+        *lifetime = None;
+    }
 }
 
 fn read_worker<R: std::io::Read>(
@@ -274,6 +308,7 @@ fn read_worker<R: std::io::Read>(
     on_frame: FrameObserver,
     failed_at: Arc<Mutex<Option<Instant>>>,
     last_line_at: Arc<Mutex<Option<Instant>>>,
+    gpu_failed: Arc<AtomicBool>,
 ) {
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
@@ -292,6 +327,9 @@ fn read_worker<R: std::io::Read>(
         }
         match serde_json::from_str::<WebcamFrame>(line) {
             Ok(frame) => {
+                if frame.error.as_deref().is_some_and(|error| error.contains("GPU mode")) {
+                    gpu_failed.store(true, Ordering::SeqCst);
+                }
                 on_frame(&app, &frame);
                 let _ = app.emit(WORKER_EVENT, &frame);
             }

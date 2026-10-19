@@ -117,7 +117,9 @@ def emit(row: dict) -> None:
 
 def fail(device: str, message: str) -> int:
     emit({"device": device, "error": message})
-    print(message, file=sys.stderr)
+    # Frozen under a windowless app there is no stderr; printing to None would hit stdout.
+    if sys.stderr:
+        print(message, file=sys.stderr)
     return 1
 
 

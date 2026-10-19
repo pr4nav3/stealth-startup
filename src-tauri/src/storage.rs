@@ -560,6 +560,7 @@ impl SessionStorage {
                 "
                 PRAGMA foreign_keys = ON;
                 PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
                 ",
             )
             .map_err(|error| error.to_string())?;
@@ -924,6 +925,8 @@ impl SessionStorage {
     }
 
     pub fn save_settings(&self, settings: &SessionSettings) -> Result<(), String> {
+        // One transaction: six separate commits were six fsyncs per toggle.
+        let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
         self.set_setting("default_strictness", strictness_key(settings.default_strictness))?;
         self.set_setting("voice_profile", &settings.voice_profile)?;
         self.set_setting(
@@ -950,7 +953,7 @@ impl SessionStorage {
             "webcam_enabled",
             if settings.webcam_enabled { "true" } else { "false" },
         )?;
-        Ok(())
+        tx.commit().map_err(|error| error.to_string())
     }
 
     fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {

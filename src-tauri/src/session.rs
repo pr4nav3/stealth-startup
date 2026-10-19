@@ -151,6 +151,10 @@ impl SessionManager {
 
     /// Returns the past sessions whose scores the save changed.
     fn save_rules(&mut self, rules: Vec<AppRule>) -> Vec<u64> {
+        // Rescoring walks every finished session; unchanged rules (every Start) skip it.
+        if rules == self.persisted_rules {
+            return Vec::new();
+        }
         let mut rescored = Vec::new();
         save(self.storage.as_ref(), "save rules", |storage| {
             rescored = storage.replace_rules(&rules)?;
