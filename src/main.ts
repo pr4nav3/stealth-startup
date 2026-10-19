@@ -467,6 +467,7 @@ window.addEventListener("storage", (event) => {
   theme = event.newValue === "dark" ? "dark" : "light";
   applyTheme();
 });
+window.addEventListener("resize", fitQuote);
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeTopLayer();
@@ -657,8 +658,6 @@ let voicePreviewPath = "";
 let previewWaveRaf = 0;
 let previewBarDragging = false;
 let recordingOpen = false;
-/** How many clips the running generation job covers, for the busy modal. */
-let generatingClipCount = 0;
 let recordingState: RecordingState = "idle";
 let recordingError = "";
 let recordedVoice: RecordedVoice | null = null;
@@ -1139,10 +1138,12 @@ function render(): void {
 
   bindEvents();
   fitVoiceCardNames();
+  fitQuote();
   if (document.fonts.status !== "loaded") {
     void document.fonts.ready.then(() => {
       if (document.querySelector(".voice-card")) {
         fitVoiceCardNames();
+        fitQuote();
       }
     });
   }
@@ -1161,7 +1162,7 @@ function renderSession(current: CurrentSession | null): string {
     return `
       <section class="home-ready">
         <div class="home-grid">
-          <article class="quote-card ${quoteFit(note.text)}">
+          <article class="quote-card">
             <p class="eyebrow">Daily note · ${escapeHtml(note.date)}</p>
             <blockquote>“${escapeHtml(note.text)}”</blockquote>
             <p class="quote-by">— ${escapeHtml(note.by)}</p>
@@ -1869,6 +1870,34 @@ function renderVoiceSettings(): string {
   `;
 }
 
+/** The biggest quote that still fits its card: short quotes grow, long ones shrink. */
+function fitQuote(): void {
+  const card = document.querySelector<HTMLElement>(".quote-card");
+  const quote = card?.querySelector<HTMLElement>("blockquote");
+  if (!card || !quote) {
+    return;
+  }
+  // The grid stretches the card to the side column, so the smallest size shows the real room.
+  // The quote takes at most 60% of it: a card full of text reads like a wall.
+  quote.style.fontSize = "18px";
+  const room = card.clientHeight * 0.6;
+  const fits = (px: number) => {
+    quote.style.fontSize = `${px}px`;
+    return quote.offsetHeight <= room && quote.scrollWidth <= quote.clientWidth;
+  };
+  let low = 18;
+  let high = 60;
+  while (high - low > 1) {
+    const mid = Math.floor((low + high) / 2);
+    if (fits(mid)) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  quote.style.fontSize = `${low}px`;
+}
+
 function fitVoiceCardNames(): void {
   document.querySelectorAll<HTMLElement>(".voice-card").forEach((card) => {
     const name = card.querySelector("strong");
@@ -1977,7 +2006,10 @@ function renderVoiceClipsPanel(): string {
           </label>
           <strong class="voice-clips-count">${ready} of ${phrases.length} ready</strong>
         </div>
-        <button type="button" data-action="open-phrase-editor" ${canEditPhrases() ? "" : "disabled"}>+ Add phrase</button>
+        <div class="rule-toolbar-actions">
+          <button type="button" data-action="open-phrase-editor" ${canEditPhrases() ? "" : "disabled"}>+ Add phrase</button>
+          <button type="button" data-action="open-phrase-editor" data-new-set="1" ${canEditPhrases() ? "" : "disabled"}>+ New set</button>
+        </div>
           <p class="voice-clips-note">${escapeHtml(clipGenerateLockTitle(voice) || "Only ready clips play during sessions.")}</p>
         <label class="voice-clips-ready-only">
           <input id="voice-clips-ready-only" type="checkbox" ${readyClipsOnly ? "checked" : ""} />
@@ -2068,7 +2100,7 @@ function renderPhraseEditor(): string {
     <form class="phrase-editor" id="phrase-editor">
       <label>
         <span>Set</span>
-        <select name="tone">${phraseToneOptions(editor.tone)}<option value="${NEW_SET}">New set…</option></select>
+        <select name="tone">${phraseToneOptions(editor.tone === NEW_SET ? "gentle" : editor.tone)}<option value="${NEW_SET}" ${editor.tone === NEW_SET ? "selected" : ""}>New set…</option></select>
       </label>
       <label>
         <span>Phrase</span>
@@ -2079,7 +2111,7 @@ function renderPhraseEditor(): string {
         ${editor.phraseId ? `<button class="danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(editor.phraseId)}">Delete</button>` : ""}
         <button type="button" data-action="cancel-phrase-editor">Cancel</button>
       </div>
-      <label class="phrase-new-set" hidden>
+      <label class="phrase-new-set" ${editor.tone === NEW_SET ? "" : "hidden"}>
         <span>New set name</span>
         <input name="newSet" maxlength="80" placeholder="Coach, dry humor, drill sergeant..." />
       </label>
@@ -2108,13 +2140,6 @@ function renderPhraseLibrary(): string {
                 <small>${readyInSet} of ${inSet.length} clips ready</small>
               </summary>
               <div class="rows phrase-group-rows">
-                ${
-                  inSet.length - readyInSet > 0 && voice.profile?.reference_path
-                    ? `<div class="phrase-group-tools">
-                        <button class="small-button" type="button" data-action="generate-set" data-tone="${attr(tone)}" ${canGenerateClip(voice) ? "" : "disabled"} title="${attr(clipGenerateLockTitle(voice))}">Generate ${inSet.length - readyInSet} missing</button>
-                      </div>`
-                    : ""
-                }
                 ${items
                   .map((phrase) => {
                     const clip = clipForPhrase(voice, phrase);
@@ -4133,7 +4158,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "open-phrase-editor") {
     if (canEditPhrases()) {
       dismissVoiceInfo();
-      openPhraseEditor(source?.dataset.phraseId || null);
+      openPhraseEditor(source?.dataset.phraseId || null, source?.dataset.newSet ? NEW_SET : "gentle");
     }
     return;
   }
@@ -4142,18 +4167,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     const phraseId = source?.dataset.phraseId;
     if (phraseId && canEditPhrases()) {
       await deletePhrase(phraseId);
-    }
-    return;
-  }
-
-  if (action === "generate-set") {
-    const tone = source?.dataset.tone ?? "";
-    const voice = clipsVoice();
-    const missing = effectivePhrases().filter(
-      (phrase) => phrase.tone.toLowerCase() === tone.toLowerCase() && !clipForPhrase(voice, phrase),
-    );
-    if (voice.profile && missing.length) {
-      await generateProfileAudio(voice.profile.profile_id, missing, `${toneLabel(tone)} clips ready`);
     }
     return;
   }
@@ -5043,40 +5056,6 @@ async function generateOneClip(phraseId: string): Promise<boolean> {
     render();
   }
   return true;
-}
-
-async function generateProfileAudio(
-  profileId: string,
-  phrases: PhraseDefinition[] = voicePhraseInputs(),
-  feedback = "Audio generated",
-): Promise<boolean> {
-  const profile = profileById(profileId);
-  if (!profile?.reference_path || !modelInstalled()) {
-    showFeedback(modelInstalled() ? "Reference missing" : "Download voice pack first");
-    return false;
-  }
-  if (ramGenerationLocked()) {
-    showFeedback(ramLockMessage());
-    return false;
-  }
-
-  generatingClipCount = phrases.length;
-  return runVoiceBusy("generate-clips", async () => {
-    const generated = await invoke<VoiceProfileSummary>("generate_voice_clips", {
-      input: {
-        profile_id: profile.profile_id,
-        display_name: profile.display_name,
-        reference_audio_path: profile.reference_path,
-        phrases: phrases.map((phrase) => ({ id: phrase.id, tone: phrase.tone, text: phrase.text })),
-        delete_reference_after_generation: false,
-        merge_clips: true,
-      },
-    });
-    upsertProfile(generated);
-    await refreshVoiceStatus(false);
-    clipsVoiceId = voiceIdForProfile(generated.profile_id);
-    showFeedback(feedback);
-  });
 }
 
 async function deleteVoiceProfile(): Promise<void> {
@@ -6311,7 +6290,7 @@ function voiceBusyTitle(): string {
     case "delete-model":
       return "Deleting model files";
     case "generate-clips":
-      return generatingClipCount > 1 ? `Generating ${generatingClipCount} clips` : "Generating a clip";
+      return "Generating a clip";
     case "delete-voice":
       return "Deleting voice";
     default:
@@ -6321,7 +6300,7 @@ function voiceBusyTitle(): string {
 
 function voiceBusyCopy(): string {
   if (voiceBusy === "generate-clips") {
-    return "About a minute per clip, all on this computer. Saved clips play without the model.";
+    return "About a minute, all on this computer. Saved clips play without the model.";
   }
   if (voiceBusy === "download-model") {
     return "The model pack is large. Supervisor will return to small mode after generation.";
@@ -6524,32 +6503,102 @@ function formatStretchChip(totalSeconds: number): string {
   return `${minutes}m`;
 }
 
+/** One per day of the year, cycling. Short enough to read at a glance and to stand alone. */
+const DAILY_NOTES = [
+  { text: "To be everywhere is to be nowhere.", by: "Seneca" },
+  { text: "How we spend our days is, of course, how we spend our lives.", by: "Annie Dillard" },
+  { text: "Tell me to what you pay attention and I will tell you who you are.", by: "José Ortega y Gasset" },
+  { text: "Well begun is half done.", by: "Aristotle" },
+  { text: "Inspiration exists, but it has to find you working.", by: "Pablo Picasso" },
+  { text: "Confine yourself to the present.", by: "Marcus Aurelius" },
+  { text: "It is not enough to be busy. So are the ants. The question is: what are we busy about?", by: "Henry David Thoreau" },
+  { text: "Resolve to perform what you ought; perform without fail what you resolve.", by: "Benjamin Franklin" },
+  { text: "No great thing is created suddenly.", by: "Epictetus" },
+  { text: "Lost time is never found again.", by: "Benjamin Franklin" },
+  { text: "Attention is the rarest and purest form of generosity.", by: "Simone Weil" },
+  { text: "You don't have to be great to start, but you have to start to be great.", by: "Zig Ziglar" },
+  { text: "The mind is not a vessel to be filled, but a fire to be kindled.", by: "Plutarch" },
+  { text: "Do not wait to strike till the iron is hot; but make it hot by striking.", by: "W. B. Yeats" },
+  { text: "My experience is what I agree to attend to.", by: "William James" },
+  { text: "Tomorrow is often the busiest day of the week.", by: "Spanish proverb" },
+  { text: "It is not that we have a short time to live, but that we waste a good deal of it.", by: "Seneca" },
+  { text: "Amateurs sit and wait for inspiration, the rest of us just get up and go to work.", by: "Stephen King" },
+  { text: "Concentration is the secret of strength.", by: "Ralph Waldo Emerson" },
+  { text: "The best time to plant a tree was twenty years ago. The second best time is now.", by: "Chinese proverb" },
+  { text: "Nothing will work unless you do.", by: "Maya Angelou" },
+  { text: "Focus is a matter of deciding what things you are not going to do.", by: "John Carmack" },
+  { text: "If you seek tranquillity, do less. Or, more accurately, do what is essential.", by: "Marcus Aurelius" },
+  { text: "Work expands so as to fill the time available for its completion.", by: "C. Northcote Parkinson" },
+  { text: "Begin at once to live, and count each separate day as a separate life.", by: "Seneca" },
+  { text: "Finish each day and be done with it.", by: "Ralph Waldo Emerson" },
+  { text: "The scariest moment is always just before you start.", by: "Stephen King" },
+  { text: "Great things are done by a series of small things brought together.", by: "Vincent van Gogh" },
+  { text: "Don't mistake activity with achievement.", by: "John Wooden" },
+  { text: "A wealth of information creates a poverty of attention.", by: "Herbert Simon" },
+  { text: "How long are you going to wait before you demand the best for yourself?", by: "Epictetus" },
+  { text: "Someday is not a day of the week.", by: "Janet Dailey" },
+  { text: "The first and greatest victory is to conquer yourself.", by: "Plato" },
+  { text: "Do what you can, with what you have, where you are.", by: "Theodore Roosevelt" },
+  { text: "Things which matter most must never be at the mercy of things which matter least.", by: "Goethe" },
+  { text: "Never leave that till tomorrow which you can do today.", by: "Benjamin Franklin" },
+  { text: "Almost everything will work again if you unplug it for a few minutes, including you.", by: "Anne Lamott" },
+  { text: "Our life is frittered away by detail. Simplify, simplify.", by: "Henry David Thoreau" },
+  { text: "Deciding what not to do is as important as deciding what to do.", by: "Steve Jobs" },
+  { text: "Waste no more time arguing what a good man should be. Be one.", by: "Marcus Aurelius" },
+  { text: "Dig the well before you are thirsty.", by: "Chinese proverb" },
+  { text: "Nothing is so fatiguing as the eternal hanging on of an uncompleted task.", by: "William James" },
+  { text: "Little by little, one travels far.", by: "Spanish proverb" },
+  { text: "What is important is seldom urgent and what is urgent is seldom important.", by: "Dwight D. Eisenhower" },
+  { text: "First say to yourself what you would be; and then do what you have to do.", by: "Epictetus" },
+  { text: "Do every act of your life as though it were the very last act of your life.", by: "Marcus Aurelius" },
+  { text: "Energy and persistence conquer all things.", by: "Benjamin Franklin" },
+  { text: "The impediment to action advances action. What stands in the way becomes the way.", by: "Marcus Aurelius" },
+  { text: "You will never find time for anything. If you want time, you must make it.", by: "Charles Buxton" },
+  { text: "When walking, walk. When eating, eat.", by: "Zen proverb" },
+  { text: "Knowing is not enough; we must apply. Willing is not enough; we must do.", by: "Goethe" },
+  { text: "There is no substitute for hard work.", by: "Thomas Edison" },
+  { text: "The art of being wise is the art of knowing what to overlook.", by: "William James" },
+  { text: "Either you run the day or the day runs you.", by: "Jim Rohn" },
+  { text: "Do the thing and you shall have the power.", by: "Ralph Waldo Emerson" },
+  { text: "Fall seven times, stand up eight.", by: "Japanese proverb" },
+  { text: "We suffer more often in imagination than in reality.", by: "Seneca" },
+  { text: "Make each day your masterpiece.", by: "John Wooden" },
+  { text: "The journey of a thousand miles begins with a single step.", by: "Laozi" },
+  { text: "Procrastination is the thief of time.", by: "Edward Young" },
+  { text: "Attention is the beginning of devotion.", by: "Mary Oliver" },
+  { text: "Don't explain your philosophy. Embody it.", by: "Epictetus" },
+  { text: "Plans are worthless, but planning is everything.", by: "Dwight D. Eisenhower" },
+  { text: "A year from now you may wish you had started today.", by: "Karen Lamb" },
+  { text: "Give yourself a gift: the present moment.", by: "Marcus Aurelius" },
+  { text: "The reward of a thing well done is to have done it.", by: "Ralph Waldo Emerson" },
+  { text: "If you spend too much time thinking about a thing, you will never get it done.", by: "Bruce Lee" },
+  { text: "Motivation is what gets you started. Habit is what keeps you going.", by: "Jim Rohn" },
+  { text: "Action is the antidote to despair.", by: "Joan Baez" },
+  { text: "You can't cross the sea merely by standing and staring at the water.", by: "Rabindranath Tagore" },
+  { text: "Little strokes fell great oaks.", by: "Benjamin Franklin" },
+  { text: "Measure twice, cut once.", by: "Proverb" },
+  { text: "There is nothing so useless as doing efficiently that which should not be done at all.", by: "Peter Drucker" },
+  { text: "It does not matter how slowly you go as long as you do not stop.", by: "Confucius" },
+  { text: "Difficulties strengthen the mind, as labor does the body.", by: "Seneca" },
+  { text: "We are what we repeatedly do. Excellence, then, is not an act, but a habit.", by: "Will Durant" },
+  { text: "Do not let what you cannot do interfere with what you can do.", by: "John Wooden" },
+  { text: "We are kept from our goal not by obstacles but by a clear path to a lesser goal.", by: "Robert Brault" },
+  { text: "The best way out is always through.", by: "Robert Frost" },
+  { text: "Begin, be bold, and venture to be wise.", by: "Horace" },
+  { text: "Don't count the days, make the days count.", by: "Muhammad Ali" },
+  { text: "If you want to improve, be content to be thought foolish and stupid.", by: "Epictetus" },
+  { text: "A ship in harbor is safe, but that is not what ships are built for.", by: "John A. Shedd" },
+  { text: "Tell me, what is it you plan to do with your one wild and precious life?", by: "Mary Oliver" },
+];
+
 function dailyNote(): { date: string; text: string; by: string } {
-  const notes = [
-    { text: "To be everywhere is to be nowhere.", by: "Seneca" },
-    { text: "What we do now echoes in eternity.", by: "Marcus Aurelius" },
-    { text: "Well begun is half done.", by: "Aristotle" },
-    { text: "The mind is not a vessel to be filled, but a fire to be kindled.", by: "Plutarch" },
-    { text: "It is not that we have a short time to live, but that we waste a good deal of it.", by: "Seneca" },
-    { text: "No great thing is created suddenly.", by: "Epictetus" },
-    { text: "The first and greatest victory is to conquer yourself.", by: "Plato" },
-  ];
+  const notes = DAILY_NOTES;
   const now = new Date();
   const start = new Date(now.getFullYear(), 0, 0);
   const day = Math.floor((now.getTime() - start.getTime()) / 86400000);
   const note = notes[day % notes.length];
   const date = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }).toUpperCase();
   return { date, text: note.text, by: note.by };
-}
-
-function quoteFit(text: string): string {
-  if (text.length > 70) {
-    return "quote-long";
-  }
-  if (text.length > 46) {
-    return "quote-mid";
-  }
-  return "quote-short";
 }
 
 const WEEK_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];

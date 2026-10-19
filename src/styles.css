@@ -505,24 +505,12 @@ h1 {
 
 .quote-card blockquote {
   margin: 18px 0 0;
+  font-size: 2rem; /* fitQuote() sets the real size once the card is laid out */
   font-weight: 760;
   letter-spacing: -0.03em;
-  line-height: 1.02;
+  line-height: 1.05;
   overflow-wrap: break-word;
   text-wrap: balance;
-}
-
-.quote-short blockquote {
-  font-size: clamp(2rem, 6.4cqi, 3.35rem);
-}
-
-.quote-mid blockquote {
-  font-size: clamp(1.7rem, 4.8cqi, 2.65rem);
-}
-
-.quote-long blockquote {
-  font-size: clamp(1.35rem, 3.6cqi, 2.05rem);
-  line-height: 1.12;
 }
 
 .quote-by {
@@ -1482,12 +1470,6 @@ dt {
 
 .phrase-editor .phrase-new-set[hidden] {
   display: none;
-}
-
-.phrase-group-tools {
-  display: flex;
-  justify-content: flex-end;
-  padding-bottom: 6px;
 }
 
 .rule-editor {
