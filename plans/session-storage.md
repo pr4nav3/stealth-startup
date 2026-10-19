@@ -1,6 +1,6 @@
 # Session Storage and Reports
 
-**Dated.** Written 2026-10-15 against an earlier schema. Treat `feat/window-supervision` as the source of truth. Window targeting, attribution, and history storage are being rewritten on that branch. Use this file for background, not as the spec to implement.
+**Dated.** Written 2026-10-15 against an earlier schema. The code on `main` is the source of truth; use this file for background, not as the spec to implement. Current state: `plans/STATUS.md`.
 
 Last updated: 2026-10-15 (body). Banner: 2026-10-16.
 
@@ -137,13 +137,13 @@ Do not add daily rollup tables. Three sessions a day for a year is roughly
 
 ## Metrics
 
-A **focused stretch** is an unbroken run of focused, neutral, or unrated time
-until the first distracted, idle, or away state. Unrated time is not drift. Three numbers come out of it, and
+A **focused stretch** is an unbroken run of focused, neutral, or unclassified time
+until the first distracted, idle, or away state. Unclassified time is not drift. Three numbers come out of it, and
 each has to be explainable in one sentence.
 
 | Number | Definition | Why |
 | --- | --- | --- |
-| Focus % | Relevant seconds over session length; Neutral and unrated don't count | The honest headline |
+| Focus % | Relevant seconds over session length; Neutral and unclassified don't count | The honest headline |
 | Typical stretch | **median** stretch length | The trend line; a median keeps one heroic hour from hiding a choppy day |
 | Longest stretch | longest stretch length | The record to beat |
 
@@ -155,18 +155,18 @@ users stop trusting that the first time it disagrees with how the day felt.
 One page, four blocks, top to bottom. Opens when a session ends, and is
 reachable again from History.
 
-1. **One headline line.** `52 min · 78% focused · typical stretch 9 min`. No
-   cards, no chrome.
+1. **One headline line** under the goal: `Typical attention span · 9 min`. Duration,
+   focus % and nudges are cards beside the timeline.
 2. **One full-width timeline bar**, colored by state over time, ticked where
    nudges fired. Highest information density in the design: solid for twenty
    minutes, fell apart in the middle, recovered. Hover gives app and duration.
    CSS flexbox over the span rows.
 3. **Where it went** — time per app/site, grouped Focus / Neutral /
-   Distracting / Unrated / Away, matching the timeline colors and summing to
+   Distracting / Unclassified / Away, matching the timeline colors and summing to
    the scores. Same rows as the weekly recap.
 
-**Rating past time.** Time recorded as neutral had no rule then (or a Neutral
-one), so it follows today's rules: rating an app rescores its past unrated time
+**Classifying past time.** Time recorded as neutral had no rule then (or a Neutral
+one), so it follows today's rules: classifying an app rescores its past unclassified time
 and every cached session total. Relevant and distracting decisions made during
 a session keep, since they may come from that session's own rules.
 

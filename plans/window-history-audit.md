@@ -1,6 +1,6 @@
 # Window supervision and history audit
 
-Reviewed 2026-10-17 on the dirty `feat/window-supervision` working tree.
+Reviewed 2026-10-17 on the then-uncommitted window-supervision work; everything here is now on `main`.
 
 ## Assessment
 
@@ -100,9 +100,9 @@ observation quality, stable app identity, and what the focus score actually mean
    refused); macOS bundle-id capture needs a real Mac run. Historical shell
    cleanup is still a limited compatibility mapping.
 4. **Capture failures still count with idle time in the headline.** The score
-   is now Relevant time only (schema v7): Neutral and unrated time no longer
-   count as focus, unrated time has its own total, and rating an app rescores
-   its past unrated time. `source = none` keeps capture failures distinct in
+   is now Relevant time only (schema v7): Neutral and unclassified time no longer
+   count as focus, unclassified time has its own total, and classifying an app rescores
+   its past unclassified time. `source = none` keeps capture failures distinct in
    detailed spans, but the Away total does not; expose observation coverage.
 5. **Sleep/resume needs a live acceptance test.** The expiry cap prevents
    overcounting past the timer, but does not prove that time while suspended
@@ -110,18 +110,20 @@ observation quality, stable app identity, and what the focus score actually mean
 6. **Historical explanation is incomplete.** Spans retain state/category/source,
    but not the matched rule or whether neutral was explicit versus unmatched.
    Add this provenance before depending on historical rule explanations.
-   Time recorded as neutral follows today's rules, so a Neutral rating given
-   during a session is overridden by a later rating; Relevant and distracting
+   Time recorded as neutral follows today's rules, so a Neutral classification given
+   during a session is overridden by a later classification; Relevant and distracting
    decisions keep. This was chosen over a per-span flag (see `rated_state`).
    Browser app rules currently exclude recognized websites entirely. Decide
    whether users should instead be able to set a browser-wide default with site
    exceptions; the preview now describes the behavior actually implemented.
-7. **Interaction QA is unfinished.** Live-session polling no longer rebuilds
-   under an open editor or focused field; keyboard behavior still needs a pass. PDF export is
-   still unimplemented; its nonfunctional control has been removed.
-8. **Webcam is not in the session pipeline.** Phone/away totals remain zero and
-   strictness/nudge arbitration is not integrated. This audit did not change voice
-   generation or webcam behavior.
+7. **Keyboard behavior still needs a pass.** Live-session polling no longer rebuilds
+   under an open editor or focused field, and the classify popup has 1/2/3 keys; the rest
+   of the app has not been walked with a keyboard only.
+
+Resolved since this audit: the webcam is in the session pipeline (phone spans, nudge
+arbitration, Away from the camera; see `plans/webcam-tracking.md`), and the 2026-10-19
+backend/frontend audit moved slow commands off the UI thread and closed the stuck-state
+and cancel gaps (`plans/STATUS.md`).
 
 ## Keeping detail now and shrinking later
 

@@ -1,6 +1,6 @@
 # Mac handoff: things to test and fix on a real Mac
 
-**Original Mac checklist** from before website-identity supervision. Baseline now is `feat/window-supervision`: Windows reads the address bar, titles are never stored, `browser_macos.rs` is a stub. Do not implement window capture or title persistence from this file. Build, signing, permissions, RAM, shell surfaces, and webcam packaging below can still be useful.
+**Original Mac checklist** from before website-identity supervision. Baseline now is `main`: Windows reads the address bar, titles are never stored, `browser_macos.rs` is a stub. Do not implement window capture or title persistence from this file. Build, signing, permissions, RAM, shell surfaces, and webcam packaging below can still be useful.
 
 Nothing below has been compiled or run on macOS. All development so far was on Windows.
 Work through it on a Mac before any Mac release, and tick items off in this file.

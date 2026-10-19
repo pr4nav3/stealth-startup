@@ -1,6 +1,6 @@
 # Webcam Tracking
 
-Last updated: 2026-10-18
+Last updated: 2026-10-19
 
 The tracker runs as a Settings preview and, when the user turns it on, during
 every session (see Sessions below).
@@ -33,8 +33,9 @@ no webcam, or with the camera denied.
 
 `webcam_bakeoff/`:
 
-- YuNet face + **YOLO11n** ONNX @ 640 (phone + person).
-- Full frame plus lower-center square for lap / half-frame phones.
+- YuNet face + **YOLO26s** ONNX @ 640 (phone + person), full frame only; the
+  lower-center second pass found more look-alikes than phones and is off.
+  `models/yolo26s.onnx` is not in git (see `webcam_bakeoff/README.md`).
 - `run_tracker.py` prints JSON lines; `--preview` adds a JPEG for settings.
 - Metrics and candidates: `webcam_bakeoff/RESULTS.md`.
 
@@ -57,7 +58,10 @@ runs it without them. Every reading goes to `SessionManager::record_webcam`
 
 The worker runs while a session is Active or Muted and "Turn on webcam
 monitoring" (saved as `webcam_enabled`) is on. Pause and Stop stop it within a
-second. After a failure (no camera, denied) sessions retry every 30 s.
+second. After a failure (no camera, denied) sessions retry every 30 s; a
+worker that goes silent for 15 s, or never sends a line within 60 s, is
+replaced; if GPU mode fails the session falls back to CPU. The worker is bound
+to the app (Windows job object) and stopped on exit.
 
 **Phone = its own span.** The first reading that sees a phone closes the
 window's span and opens a `phone` span (marker activity `phone`, state
@@ -85,4 +89,4 @@ recorded, never nudged.
 ## Out of scope
 
 Gaze-to-pixel, walked-away nudges, cloud models,
-frame storage, MediaPipe runtime wheels. A GPU toggle exists for the preview.
+frame storage, MediaPipe runtime wheels, a second camera (index 0 only for now).

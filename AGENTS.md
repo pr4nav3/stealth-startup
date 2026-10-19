@@ -12,4 +12,4 @@ Supervisor-specific defaults:
 - Add no new dependency unless the current phase needs it.
 - Leave one runnable check for non-trivial logic.
 
-Baseline branch: `feat/window-supervision`. Tracker: `plans/STATUS.md`. Agent starter bugs: `plans/known-issues.md`.
+Baseline branch: `main`. Tracker: `plans/STATUS.md`. Agent starter bugs: `plans/known-issues.md`.

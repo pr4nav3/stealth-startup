@@ -1,6 +1,6 @@
 # Supervisor V1 Plan
 
-**Historical plan (2026-08-12).** Do not implement from this file. Current work: `plans/STATUS.md`. Baseline branch: `feat/window-supervision`.
+**Historical plan (2026-08-12).** Do not implement from this file. Current work: `plans/STATUS.md`. Baseline branch: `main`.
 
 Last updated: 2026-08-12
 
