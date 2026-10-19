@@ -532,6 +532,97 @@ h1 {
   padding: 10px 14px;
 }
 
+.onboard-card {
+  width: 100%;
+  padding: 12px 14px 10px;
+}
+
+.onboard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.onboard-card.is-collapsed {
+  padding-bottom: 12px;
+}
+
+.onboard-head .small-button {
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.onboard-intro {
+  margin: 6px 0 0;
+  font-size: var(--sv-type-3);
+}
+
+.onboard-steps {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboard-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.onboard-step > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.onboard-step strong {
+  font-size: var(--sv-type-3);
+  font-weight: 650;
+}
+
+.onboard-step span {
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
+}
+
+.onboard-step.is-done strong,
+.onboard-step.is-done span {
+  color: var(--sv-muted);
+}
+
+.onboard-dot {
+  width: 11px;
+  height: 11px;
+  border: 1px solid var(--sv-border);
+  border-radius: 3px;
+}
+
+.onboard-step.is-done .onboard-dot {
+  background: var(--acid);
+}
+
+.onboard-optional,
+.onboard-done {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.onboard-optional {
+  margin-left: 4px;
+  font-weight: 500;
+  color: var(--sv-muted);
+}
+
+.onboard-done {
+  color: var(--sv-muted);
+}
+
 .week-card {
   position: relative;
   display: flex;

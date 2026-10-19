@@ -737,7 +737,8 @@ async function init(): Promise<void> {
 
   if (appView === "main") {
     void refreshTrends(false);
-    void refreshVoiceStatus(false);
+    // Renders when the voice list arrives, so cards that read it are not stale.
+    void refreshVoiceStatus();
     void refreshVoiceDownload(false);
   }
 }
@@ -1000,6 +1001,8 @@ function viewKey(): string {
     lastError,
     voiceError,
     history.length,
+    // The Getting started card ticks itself off from rules, voice and settings.
+    onboardingSteps().map((step) => (step.done ? "1" : "0")).join("") + (localStorage.getItem(ONBOARDING_KEY) ?? ""),
     historyWeekStart,
     historyWeek?.sessions.length ?? "",
     sessionReport?.id ?? "",
@@ -1168,10 +1171,14 @@ function renderSession(current: CurrentSession | null): string {
             <p class="quote-by">— ${escapeHtml(note.by)}</p>
           </article>
           <div class="home-side">
-            <article class="panel local-card">
-              <p class="eyebrow">Privacy first</p>
-              <p>Everything stays on this device.</p>
-            </article>
+            ${
+              onboardingVisible()
+                ? renderGettingStarted()
+                : `<article class="panel local-card">
+                    <p class="eyebrow">Privacy first</p>
+                    <p>Everything stays on this device.</p>
+                  </article>`
+            }
             <article class="panel week-card">
               <p class="eyebrow">This week</p>
               <p class="week-total">${escapeHtml(week.total)} focused</p>
@@ -1494,6 +1501,90 @@ function renderOverlayProgress(current: CurrentSession): string {
       <span>${formatDuration(current.remaining_seconds)} left</span>
       <div class="progress" aria-label="Session progress"><span style="width: ${percent}%"></span></div>
     </div>
+  `;
+}
+
+const ONBOARDING_KEY = "supervisor-onboarding";
+
+/** What a new user has to set up, each read from real state so it ticks itself off. */
+function onboardingSteps() {
+  return [
+    {
+      id: "rules",
+      title: "Mark what counts",
+      copy: "Add the apps and sites you work in as Relevant. Only Relevant time counts as focus.",
+      done: permanentRules.some((rule) => rule.classification === "focused"),
+      label: "Add rules",
+    },
+    {
+      id: "voice",
+      title: "Clone a voice",
+      copy: "Record twenty seconds of anyone, and that's who nudges you back.",
+      done: (voiceBackend?.profiles ?? []).some(
+        (profile) => !(STARTER_PROFILE_IDS as readonly string[]).includes(profile.profile_id) && Boolean(profile.reference_path),
+      ),
+      label: "Record",
+    },
+    {
+      id: "webcam",
+      title: "Turn on the webcam",
+      copy: "Catches a phone in your hand. Off until you say so.",
+      done: settings.webcam_enabled,
+      label: "Open",
+      optional: true,
+    },
+    {
+      id: "session",
+      title: "Run a first session",
+      copy: "Fifteen minutes is enough to see how it works.",
+      done: history.length > 0,
+      label: "Start 15 min",
+    },
+  ];
+}
+
+/** Shown until the required steps are done. "Hide" only folds it to one line, so it is never lost. */
+function onboardingVisible(): boolean {
+  return onboardingSteps().some((step) => !step.done && !step.optional);
+}
+
+function renderGettingStarted(): string {
+  const required = onboardingSteps().filter((step) => !step.optional);
+  const done = required.filter((step) => step.done).length;
+  if (localStorage.getItem(ONBOARDING_KEY) === "collapsed") {
+    return `
+      <article class="panel onboard-card is-collapsed">
+        <div class="onboard-head">
+          <p class="eyebrow">Getting started · ${done} of ${required.length} done</p>
+          <button class="small-button" type="button" data-action="onboard-show">Show</button>
+        </div>
+      </article>
+    `;
+  }
+  return `
+    <article class="panel onboard-card">
+      <div class="onboard-head">
+        <p class="eyebrow">Getting started</p>
+        <button class="small-button" type="button" data-action="onboard-hide">Hide</button>
+      </div>
+      <p class="onboard-intro">Supervisor watches what's in front of you and nudges you back. Nothing leaves this computer.</p>
+      <ol class="onboard-steps">
+        ${onboardingSteps()
+          .map(
+            (step) => `
+              <li class="onboard-step ${step.done ? "is-done" : ""}">
+                <i class="onboard-dot" aria-hidden="true"></i>
+                <div>
+                  <strong>${escapeHtml(step.title)}${step.optional ? ` <span class="onboard-optional">optional</span>` : ""}</strong>
+                  <span>${escapeHtml(step.copy)}</span>
+                </div>
+                ${step.done ? `<span class="onboard-done">Done</span>` : `<button class="small-button" type="button" data-action="onboard-${step.id}">${escapeHtml(step.label)}</button>`}
+              </li>
+            `,
+          )
+          .join("")}
+      </ol>
+    </article>
   `;
 }
 
@@ -3859,6 +3950,35 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "close-session-rules") {
     sessionRulesOpen = false;
     ruleEditor = null;
+    render();
+    return;
+  }
+
+  if (action === "onboard-hide" || action === "onboard-show") {
+    localStorage.setItem(ONBOARDING_KEY, action === "onboard-hide" ? "collapsed" : "open");
+    render();
+    return;
+  }
+
+  if (action === "onboard-rules") {
+    activeTab = "settings";
+    settingsView = "home";
+    render();
+    document.querySelector(".settings-rules-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+
+  if (action === "onboard-voice" || action === "onboard-webcam") {
+    activeTab = "settings";
+    await runAction(action === "onboard-voice" ? "open-voice-settings" : "open-webcam-settings");
+    return;
+  }
+
+  if (action === "onboard-session") {
+    draft.duration_minutes = 15;
+    await runAction("open-preflight");
+    // A first session should show the rules it runs on.
+    preflightBlocksOpen = true;
     render();
     return;
   }
