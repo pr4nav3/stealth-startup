@@ -918,6 +918,9 @@ impl SessionStorage {
                 "webcam_enabled" => {
                     settings.webcam_enabled = value == "true";
                 }
+                "webcam_camera" => {
+                    settings.webcam_camera = value.parse().unwrap_or(0);
+                }
                 _ => {}
             }
         }
@@ -953,6 +956,7 @@ impl SessionStorage {
             "webcam_enabled",
             if settings.webcam_enabled { "true" } else { "false" },
         )?;
+        self.set_setting("webcam_camera", &settings.webcam_camera.to_string())?;
         tx.commit().map_err(|error| error.to_string())
     }
 
@@ -3352,6 +3356,7 @@ mod tests {
             status_window_on_top: false,
             webcam_gpu: true,
             webcam_enabled: true,
+            webcam_camera: 2,
         };
         storage.save_settings(&settings).expect("save settings");
         let loaded = storage.load_settings().expect("load settings");

@@ -415,6 +415,9 @@ impl SessionManager {
         if let Some(enabled) = update.webcam_enabled {
             self.settings.webcam_enabled = enabled;
         }
+        if let Some(camera) = update.webcam_camera {
+            self.settings.webcam_camera = camera;
+        }
         if let Some(voice_profile) = update.voice_profile {
             let voice_profile = voice_profile.trim();
             if !voice_profile.is_empty() {
@@ -1354,6 +1357,8 @@ pub struct SettingsUpdate {
     pub webcam_gpu: Option<bool>,
     #[serde(default)]
     pub webcam_enabled: Option<bool>,
+    #[serde(default)]
+    pub webcam_camera: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1365,6 +1370,8 @@ pub struct SessionSettings {
     pub webcam_gpu: bool,
     /// Runs the webcam during sessions (phone and presence). Off until the user turns it on.
     pub webcam_enabled: bool,
+    /// Which camera the worker opens (OpenCV index; 0 is the default camera).
+    pub webcam_camera: u32,
 }
 
 impl Default for SessionSettings {
@@ -1376,6 +1383,7 @@ impl Default for SessionSettings {
             status_window_on_top: true,
             webcam_gpu: false,
             webcam_enabled: false,
+            webcam_camera: 0,
         }
     }
 }
@@ -1978,6 +1986,7 @@ mod tests {
             voice_profile: None,
             webcam_gpu: None,
             webcam_enabled: Some(true),
+            webcam_camera: None,
         });
         manager
     }

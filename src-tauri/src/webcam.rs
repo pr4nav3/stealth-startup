@@ -211,6 +211,7 @@ pub fn start_worker(
     app: AppHandle,
     state: &WebcamPreview,
     gpu: bool,
+    camera: u32,
     preview: bool,
     on_frame: FrameObserver,
 ) -> Result<(), String> {
@@ -222,7 +223,7 @@ pub fn start_worker(
         return Ok(());
     }
     stop_preview(state);
-    let started = spawn_worker(app, state, gpu, preview, on_frame);
+    let started = spawn_worker(app, state, gpu, camera, preview, on_frame);
     if started.is_err() {
         state.mark_failed();
     }
@@ -233,6 +234,7 @@ fn spawn_worker(
     app: AppHandle,
     state: &WebcamPreview,
     gpu: bool,
+    camera: u32,
     preview: bool,
     on_frame: FrameObserver,
 ) -> Result<(), String> {
@@ -247,6 +249,8 @@ fn spawn_worker(
         .arg(if preview { PREVIEW_FPS } else { SESSION_FPS })
         .arg("--device")
         .arg(if gpu { "gpu" } else { "cpu" })
+        .arg("--camera")
+        .arg(camera.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env("PYTHONUNBUFFERED", "1")
