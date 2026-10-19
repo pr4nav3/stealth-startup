@@ -59,6 +59,9 @@ pub struct StoredPhraseLibrary {
     pub custom_tones: Vec<String>,
     pub custom_phrases: Vec<StoredPhrase>,
     pub phrase_overrides: Vec<StoredPhrase>,
+    /// Bundled phrase ids the user deleted. Older libraries have none.
+    #[serde(default)]
+    pub hidden_phrases: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2326,6 +2329,7 @@ fn clean_phrase_library(library: StoredPhraseLibrary) -> StoredPhraseLibrary {
         custom_tones: clean_block_suggestions(&library.custom_tones),
         custom_phrases: clean_stored_phrases(library.custom_phrases),
         phrase_overrides: clean_stored_phrases(library.phrase_overrides),
+        hidden_phrases: clean_block_suggestions(&library.hidden_phrases),
     }
 }
 
@@ -3316,6 +3320,23 @@ mod tests {
                 ("Unclassified".to_string(), "code".to_string(), 180),
             ]
         );
+    }
+
+    #[test]
+    fn deleted_bundled_phrases_round_trip_and_old_libraries_still_load() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let old: StoredPhraseLibrary = serde_json::from_str(
+            r#"{"custom_tones":[],"custom_phrases":[],"phrase_overrides":[]}"#,
+        ).expect("old shape");
+        assert!(old.hidden_phrases.is_empty());
+        let saved = storage
+            .save_phrase_library(StoredPhraseLibrary {
+                hidden_phrases: vec![" mom_again ".into(), "mom_again".into(), "".into()],
+                ..old
+            })
+            .expect("save");
+        assert_eq!(saved.hidden_phrases, vec!["mom_again"]);
+        assert_eq!(storage.load_phrase_library().expect("load").hidden_phrases, vec!["mom_again"]);
     }
 
     #[test]

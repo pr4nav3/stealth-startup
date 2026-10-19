@@ -408,6 +408,8 @@ interface PhraseLibraryState {
   custom_tones: string[];
   custom_phrases: PhraseDefinition[];
   phrase_overrides: PhraseDefinition[];
+  /** Bundled phrases the user deleted. */
+  hidden_phrases: string[];
 }
 
 interface RecordedVoice {
@@ -490,29 +492,31 @@ const starterRules: AppRule[] = ["youtube.com", "netflix.com", "tiktok.com", "in
   }),
 );
 
-const toneOrder: VoiceTone[] = ["gentle", "mom", "stern", "kind-reset"];
+const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern"];
+/** The editor's "New set…" choice. */
+const NEW_SET = "__new__";
 
 const phraseBank: PhraseDefinition[] = [
-  { id: "gentle_deep_breath", tone: "gentle", text: "Deep breath. Back to the thing." },
-  { id: "gentle_drifted_a_little", tone: "gentle", text: "You drifted a little. Come back." },
-  { id: "gentle_one_next_action", tone: "gentle", text: "One next action. That is all." },
-  { id: "gentle_soft_reset", tone: "gentle", text: "Soft reset. Look at the task again." },
-  { id: "gentle_back_to_plan", tone: "gentle", text: "No hurry. Just back to the plan." },
-  { id: "mom_beta_focus", tone: "mom", text: "Beta, focus. You opened this for what?" },
-  { id: "mom_enough_scrolling", tone: "mom", text: "Enough scrolling. Finish the thing first." },
-  { id: "mom_wander_later", tone: "mom", text: "You can wander later. Work now." },
-  { id: "mom_arre_come_back", tone: "mom", text: "Arre, come back. One tab, one task." },
-  { id: "mom_what_was_the_goal", tone: "mom", text: "What was the goal? Say it, then do it." },
-  { id: "stern_not_the_task", tone: "stern", text: "This is not the task." },
-  { id: "stern_close_it", tone: "stern", text: "Close it and return." },
-  { id: "stern_you_said_it_mattered", tone: "stern", text: "You said this mattered. Act like it." },
-  { id: "stern_decide_now", tone: "stern", text: "Decide now. Work or stop pretending." },
-  { id: "stern_back_to_work", tone: "stern", text: "Back to work. No more bargaining." },
-  { id: "kind_reset_pause_inhale", tone: "kind-reset", text: "Pause. Inhale. Now back to the file." },
-  { id: "kind_reset_no_drama", tone: "kind-reset", text: "No drama. Just return." },
-  { id: "kind_reset_not_failing", tone: "kind-reset", text: "You are not failing. You are drifting. Come back." },
-  { id: "kind_reset_small_next_step", tone: "kind-reset", text: "Small next step. That is enough." },
-  { id: "kind_reset_begin_again", tone: "kind-reset", text: "Begin again. The work is still here." },
+  { id: "gentle_back_to_it", tone: "gentle", text: "Hey. Back to it." },
+  { id: "gentle_that_can_wait", tone: "gentle", text: "That can wait. This can't." },
+  { id: "gentle_you_drifted", tone: "gentle", text: "You drifted. It happens. Come back." },
+  { id: "gentle_one_more_push", tone: "gentle", text: "One more push on the real thing." },
+  { id: "gentle_pick_up_where", tone: "gentle", text: "Close that, and pick up where you were." },
+  { id: "mom_i_can_see", tone: "mom", text: "Beta, I can see the screen." },
+  { id: "mom_what_is_this", tone: "mom", text: "Arre, what is this now? Finish your work first." },
+  { id: "mom_again", tone: "mom", text: "Again? Close it. Then we'll talk." },
+  { id: "mom_did_you_finish", tone: "mom", text: "Did you finish? No? Then why is this open." },
+  { id: "mom_two_minutes", tone: "mom", text: "Two minutes becomes two hours. I know you." },
+  { id: "genz_bro_the_tab", tone: "genz", text: "Bro. The tab." },
+  { id: "genz_not_the_assignment", tone: "genz", text: "That's not the assignment." },
+  { id: "genz_lock_in", tone: "genz", text: "Lock in. Like, now." },
+  { id: "genz_why_behind", tone: "genz", text: "This is why you're behind." },
+  { id: "genz_not_today", tone: "genz", text: "We're not doing this today. Back." },
+  { id: "stern_not_the_task", tone: "stern", text: "This isn't the task." },
+  { id: "stern_close_it_now", tone: "stern", text: "Close it. Now." },
+  { id: "stern_you_picked_this", tone: "stern", text: "You picked this. Finish it." },
+  { id: "stern_no_negotiating", tone: "stern", text: "Back to work. No negotiating." },
+  { id: "stern_want_it_back", tone: "stern", text: "Every minute here is one you'll want back." },
 ];
 
 const noneVoice: VoiceOption = {
@@ -629,8 +633,7 @@ let customPhrases: PhraseDefinition[] = [];
 let customPhraseSets: string[] = [];
 let phraseOverrides: Record<string, PhraseDefinition> = {};
 let phraseEditor: PhraseEditor | null = null;
-let phraseSetPickerOpen = false;
-let newPhraseSetName = "";
+let hiddenPhrases = new Set<string>();
 const openPhraseGroups = new Set<string>();
 let clipsVoiceId = "starter-female";
 let clipsVoiceTouched = false;
@@ -654,6 +657,8 @@ let voicePreviewPath = "";
 let previewWaveRaf = 0;
 let previewBarDragging = false;
 let recordingOpen = false;
+/** How many clips the running generation job covers, for the busy modal. */
+let generatingClipCount = 0;
 let recordingState: RecordingState = "idle";
 let recordingError = "";
 let recordedVoice: RecordedVoice | null = null;
@@ -705,6 +710,7 @@ async function init(): Promise<void> {
     history = loadedHistory;
     permanentRules = loadedRules;
     customPhraseSets = loadedPhraseLibrary.custom_tones;
+    hiddenPhrases = new Set(loadedPhraseLibrary.hidden_phrases);
     customPhrases = loadedPhraseLibrary.custom_phrases;
     phraseOverrides = Object.fromEntries(
       loadedPhraseLibrary.phrase_overrides.map((phrase) => [phrase.id, phrase]),
@@ -861,12 +867,6 @@ function closeTopLayer(): void {
     render();
     return;
   }
-  if (phraseSetPickerOpen) {
-    phraseSetPickerOpen = false;
-    newPhraseSetName = "";
-    render();
-    return;
-  }
   if (historyConfirm) {
     historyConfirm = null;
     render();
@@ -928,7 +928,6 @@ function editorIsOpen(): boolean {
     ruleEditor !== null ||
     historyRename !== null ||
     phraseEditor !== null ||
-    phraseSetPickerOpen ||
     recordingOpen ||
     historyConfirm !== null ||
     voiceDeleteTargetId !== null ||
@@ -1893,11 +1892,9 @@ function renderVoiceCard(voice: VoiceOption): string {
       profile?.reference_retained &&
         effectivePhrases().every((phrase) => !clipForPhraseId(profile.clips, phrase.id)),
     );
-  const canGenerate = needsGeneration && modelInstalled() && voiceBusy === null && ramAllowsGeneration();
   const canUse = voice.selectable && voiceBusy === null;
-  const action = needsGeneration ? "generate-audio" : "select-voice";
-  const disabled = needsGeneration ? !canGenerate : !canUse || selected;
-  const lockTitle = needsGeneration && ramGenerationLocked() ? attr(ramLockMessage()) : "";
+  const action = needsGeneration ? "set-up-clips" : "select-voice";
+  const disabled = needsGeneration ? voiceBusy !== null : !canUse || selected;
 
   return `
     <article class="voice-card ${selected ? "selected" : ""}">
@@ -1909,7 +1906,7 @@ function renderVoiceCard(voice: VoiceOption): string {
             ? ""
             : `<button class="voice-info" type="button" data-action="voice-info" data-voice-id="${escapeHtml(voice.id)}">Info</button>`
         }
-        <button class="voice-select" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" data-profile-id="${escapeHtml(profile?.profile_id ?? "")}" ${disabled ? "disabled" : ""}${lockTitle ? ` title="${lockTitle}"` : ""}>${selected ? "Selected" : "Select"}</button>
+        <button class="voice-select" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" ${disabled ? "disabled" : ""}>${selected ? "Selected" : needsGeneration ? "Set up clips" : "Select"}</button>
       </div>
     </article>
   `;
@@ -1945,11 +1942,18 @@ function renderCreateVoiceGuide(): string {
               : "Download once to generate voice clips. Saved clips play without the model."
           }</p>
         </div>
-        <button class="${installed ? "danger" : "overlay-pause"}" type="button" data-action="${installed ? "ask-delete-model" : "download-model-pack"}" ${busy ? "disabled" : ""}>${installed ? "Delete model" : downloadLabel}</button>
+        ${
+          installed
+            ? `<div class="modal-actions">
+                <button type="button" data-action="download-model-pack" ${busy ? "disabled" : ""}>${downloading ? downloadLabel : "Check for updates"}</button>
+                <button class="danger" type="button" data-action="ask-delete-model" ${busy ? "disabled" : ""}>Delete model</button>
+              </div>`
+            : `<button class="overlay-pause" type="button" data-action="download-model-pack" ${busy ? "disabled" : ""}>${downloadLabel}</button>`
+        }
       </div>
       <ol class="create-voice-steps">
         <li><strong>1. Add a voice</strong><span>Click + New voice above, then record a short sample.</span></li>
-        <li><strong>2. Generate your clips</strong><span>Set Clips for to that recorded voice, then Generate on a phrase.</span></li>
+        <li><strong>2. Generate your clips</strong><span>Open a phrase set below and press Generate missing, or generate one phrase at a time.</span></li>
         <li><strong>3. Listen and keep</strong><span>Listen to each clip. Try again if needed, then keep the version you like.</span></li>
       </ol>
     </div>
@@ -1973,7 +1977,7 @@ function renderVoiceClipsPanel(): string {
           </label>
           <strong class="voice-clips-count">${ready} of ${phrases.length} ready</strong>
         </div>
-        <button type="button" data-action="open-phrase-editor" ${canEditPhrases() ? "" : "disabled"}>Add set</button>
+        <button type="button" data-action="open-phrase-editor" ${canEditPhrases() ? "" : "disabled"}>+ Add phrase</button>
           <p class="voice-clips-note">${escapeHtml(clipGenerateLockTitle(voice) || "Only ready clips play during sessions.")}</p>
         <label class="voice-clips-ready-only">
           <input id="voice-clips-ready-only" type="checkbox" ${readyClipsOnly ? "checked" : ""} />
@@ -2060,24 +2064,25 @@ function renderPhraseEditor(): string {
   if (!editor) {
     return "";
   }
-  const regenerate = Boolean(editor.phraseId);
-  const canSubmit = !regenerate || canGenerateClip(clipsVoice());
-  const lockTitle = regenerate ? clipGenerateLockTitle(clipsVoice()) : "";
-
   return `
     <form class="phrase-editor" id="phrase-editor">
       <label>
-        <span>Personality</span>
-        <select name="tone">${phraseToneOptions(editor.tone)}</select>
+        <span>Set</span>
+        <select name="tone">${phraseToneOptions(editor.tone)}<option value="${NEW_SET}">New set…</option></select>
       </label>
       <label>
         <span>Phrase</span>
         <input name="text" maxlength="140" value="${attr(editor.text)}" placeholder="Back to the task." />
       </label>
       <div class="rule-editor-actions">
-        <button class="primary" type="submit" ${canSubmit ? "" : "disabled"}${lockTitle ? ` title="${attr(lockTitle)}"` : ""}>${regenerate ? "Regenerate" : "Add phrase"}</button>
+        <button class="primary" type="submit">Save</button>
+        ${editor.phraseId ? `<button class="danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(editor.phraseId)}">Delete</button>` : ""}
         <button type="button" data-action="cancel-phrase-editor">Cancel</button>
       </div>
+      <label class="phrase-new-set" hidden>
+        <span>New set name</span>
+        <input name="newSet" maxlength="80" placeholder="Coach, dry humor, drill sergeant..." />
+      </label>
     </form>
   `;
 }
@@ -2103,6 +2108,13 @@ function renderPhraseLibrary(): string {
                 <small>${readyInSet} of ${inSet.length} clips ready</small>
               </summary>
               <div class="rows phrase-group-rows">
+                ${
+                  inSet.length - readyInSet > 0 && voice.profile?.reference_path
+                    ? `<div class="phrase-group-tools">
+                        <button class="small-button" type="button" data-action="generate-set" data-tone="${attr(tone)}" ${canGenerateClip(voice) ? "" : "disabled"} title="${attr(clipGenerateLockTitle(voice))}">Generate ${inSet.length - readyInSet} missing</button>
+                      </div>`
+                    : ""
+                }
                 ${items
                   .map((phrase) => {
                     const clip = clipForPhrase(voice, phrase);
@@ -2147,48 +2159,9 @@ function renderVoiceDialogs(): string {
     ${showVoiceDialog && recordingOpen ? renderRecordingModal() : ""}
     ${showVoiceDialog && voiceInfoId && !voiceDeleteTargetId && !clipGenerate && !voiceBusy ? renderVoiceInfoModal() : ""}
     ${showVoiceDialog && voiceDeleteTargetId ? renderDeleteVoiceModal() : ""}
-    ${showVoiceDialog && phraseSetPickerOpen ? renderPhraseSetPicker() : ""}
     ${showVoiceDialog && modelDeleteOpen ? renderDeleteModelModal() : ""}
     ${showVoiceDialog && clipGenerate ? renderClipGenerateModal() : ""}
     ${voiceBusy && !clipGenerate ? renderVoiceBusyModal() : ""}
-  `;
-}
-
-function renderPhraseSetPicker(): string {
-  return `
-    <div class="modal-backdrop" role="presentation">
-      <section class="modal-panel phrase-set-panel" role="dialog" aria-modal="true" aria-labelledby="phrase-set-title">
-        <div class="modal-head">
-          <div>
-            <p class="eyebrow">ADD PHRASE</p>
-            <h2 id="phrase-set-title">Choose a phrase set</h2>
-          </div>
-        </div>
-        <p class="phrase-set-copy">Add to an existing set, or name a new one.</p>
-        <div class="phrase-set-options">
-          ${phraseToneOrder()
-            .map(
-              (tone) => `
-                <button type="button" data-action="choose-phrase-set" data-tone="${attr(tone)}">
-                  <span>${escapeHtml(toneLabel(tone))}</span>
-                  <small>${phraseCountLabel(effectivePhrases().filter((phrase) => phrase.tone.toLowerCase() === tone.toLowerCase()).length)}</small>
-                </button>
-              `,
-            )
-            .join("")}
-        </div>
-        <div class="new-phrase-set">
-          <label>
-            <span>New set name</span>
-            <input id="new-phrase-set-name" maxlength="80" value="${attr(newPhraseSetName)}" placeholder="Coach, dry humor, gentle reset..." />
-          </label>
-          <button class="primary" type="button" data-action="create-phrase-set">Create set</button>
-        </div>
-        <div class="modal-actions">
-          <button type="button" data-action="close-phrase-set-picker">Cancel</button>
-        </div>
-      </section>
-    </div>
   `;
 }
 
@@ -2257,8 +2230,7 @@ function renderHistoryConfirm(): string {
 
 function renderRecordingModal(): string {
   const isRecording = recordingState === "recording";
-  const ramLocked = ramGenerationLocked();
-  const canSave = Boolean(recordedVoice?.bytes && recordedVoice.name.trim() && voiceBusy === null && !ramLocked);
+  const canSave = Boolean(recordedVoice?.bytes && recordedVoice.name.trim() && voiceBusy === null);
 
   return `
     <div class="modal-backdrop" role="presentation">
@@ -2292,9 +2264,9 @@ function renderRecordingModal(): string {
                   <audio controls preload="metadata" src="${attr(recordedVoice.url)}"></audio>
                   <div class="modal-actions">
                     <button type="button" data-action="rerecord-voice">Re-record</button>
-                    <button class="primary" type="button" data-action="save-recorded-voice" ${canSave ? "" : "disabled"}>${ramLocked ? "Clone locked" : "Save voice and generate audio clips"}</button>
+                    <button class="primary" type="button" data-action="save-recorded-voice" ${canSave ? "" : "disabled"}>Save voice</button>
                   </div>
-                  ${ramLocked ? `<p class="recording-error">Generation is locked until more RAM is free. The recording can wait.</p>` : ""}
+                  <p class="quiet">Saving is instant. You pick which phrase sets to generate next.</p>
                 `
                 : `<p class="empty">The clip will appear here after recording so you can play it back before generation.</p>`
             }
@@ -2381,10 +2353,10 @@ function renderDeleteVoiceModal(): string {
           </div>
           <button class="small-button" type="button" data-action="cancel-delete-voice">Close</button>
         </div>
-        <p class="quiet">Choose whether to remove the saved reference clip too, or only remove generated phrase audio.</p>
+        <p class="quiet">Clips can be generated again from the recording. Deleting the voice removes the recording too.</p>
         <div class="delete-choice-grid">
-          <button class="danger" type="button" data-action="delete-voice-profile">Delete voice clip and all voice files</button>
-          <button type="button" data-action="delete-voice-files" ${profile.clip_count === 0 ? "disabled" : ""}>Delete voice files only</button>
+          <button type="button" data-action="delete-voice-files" ${profile.clip_count === 0 ? "disabled" : ""}>Delete clips, keep the recording</button>
+          <button class="danger" type="button" data-action="delete-voice-profile">Delete the voice</button>
         </div>
       </section>
     </div>
@@ -2627,14 +2599,18 @@ function renderHistoryOverview(): string {
         <p class="eyebrow">Attention span</p>
         <p class="span-value">${escapeHtml(currentLabel)}</p>
         <p class="span-caption">${escapeHtml(caption)}</p>
-        ${renderWeekPlot(
-          weeks.map((week) => ({
-            weekStart: week.week_start,
-            value: week.session_count > 0 ? week.median_stretch_seconds / 60 : null,
-            chip: formatStretchChip(week.median_stretch_seconds),
-          })),
-          "Typical stretch for the last five weeks",
-        )}
+        ${
+          weeks.length === 0
+            ? ""
+            : renderWeekPlot(
+                weeks.map((week) => ({
+                  weekStart: week.week_start,
+                  value: week.session_count > 0 ? week.median_stretch_seconds / 60 : null,
+                  chip: formatStretchChip(week.median_stretch_seconds),
+                })),
+                "Typical stretch for the last five weeks",
+              )
+        }
       </section>
       <div class="history-recaps">
         ${renderRecapCard(trends.week_recap)}
@@ -3615,9 +3591,18 @@ function bindEvents(): void {
     void saveHistoryRename();
   });
 
-  document.getElementById("phrase-editor")?.addEventListener("submit", (event) => {
+  const phraseForm = document.getElementById("phrase-editor") as HTMLFormElement | null;
+  phraseForm?.addEventListener("submit", (event) => {
     event.preventDefault();
     void savePhraseForm(event.currentTarget as HTMLFormElement);
+  });
+  phraseForm?.querySelector<HTMLSelectElement>('select[name="tone"]')?.addEventListener("change", (event) => {
+    const field = phraseForm.querySelector<HTMLElement>(".phrase-new-set");
+    const isNew = (event.target as HTMLSelectElement).value === NEW_SET;
+    field?.toggleAttribute("hidden", !isNew);
+    if (isNew) {
+      field?.querySelector("input")?.focus();
+    }
   });
 
   document.querySelector("details.overlay-more")?.addEventListener("toggle", (event) => {
@@ -3678,10 +3663,6 @@ function bindEvents(): void {
         openPhraseGroups.delete(tone);
       }
     });
-  });
-
-  document.getElementById("new-phrase-set-name")?.addEventListener("input", (event) => {
-    newPhraseSetName = (event.target as HTMLInputElement).value;
   });
 
   document.getElementById("preflight-duration")?.addEventListener("input", (event) => {
@@ -4038,7 +4019,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     const leavingVoice = settingsView === "voice";
     settingsView = "home";
     phraseEditor = null;
-    phraseSetPickerOpen = false;
     dismissVoiceInfo();
     if (leavingVoice) {
       leaveVoiceScreen();
@@ -4152,58 +4132,36 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "open-phrase-editor") {
     if (canEditPhrases()) {
-      const phraseId = source?.dataset.phraseId || null;
-      if (phraseId) {
-        openPhraseEditor(phraseId);
-      } else {
-        dismissVoiceInfo();
-        phraseSetPickerOpen = true;
-        newPhraseSetName = "";
-        render();
-      }
+      dismissVoiceInfo();
+      openPhraseEditor(source?.dataset.phraseId || null);
     }
     return;
   }
 
-  if (action === "close-phrase-set-picker") {
-    phraseSetPickerOpen = false;
-    newPhraseSetName = "";
+  if (action === "delete-phrase") {
+    const phraseId = source?.dataset.phraseId;
+    if (phraseId && canEditPhrases()) {
+      await deletePhrase(phraseId);
+    }
+    return;
+  }
+
+  if (action === "generate-set") {
+    const tone = source?.dataset.tone ?? "";
+    const voice = clipsVoice();
+    const missing = effectivePhrases().filter(
+      (phrase) => phrase.tone.toLowerCase() === tone.toLowerCase() && !clipForPhrase(voice, phrase),
+    );
+    if (voice.profile && missing.length) {
+      await generateProfileAudio(voice.profile.profile_id, missing, `${toneLabel(tone)} clips ready`);
+    }
+    return;
+  }
+
+  if (action === "set-up-clips") {
+    clipsVoiceId = source?.dataset.voiceId ?? clipsVoiceId;
     render();
-    return;
-  }
-
-  if (action === "choose-phrase-set") {
-    const tone = source?.dataset.tone;
-    if (tone) {
-      phraseSetPickerOpen = false;
-      openPhraseGroups.add(tone);
-      openPhraseEditor(null, tone);
-    }
-    return;
-  }
-
-  if (action === "create-phrase-set") {
-    const enteredName = newPhraseSetName.trim().slice(0, 80);
-    if (!enteredName) {
-      showFeedback("Name the phrase set");
-      return;
-    }
-    const tone =
-      phraseToneOrder().find((item) => item.toLowerCase() === enteredName.toLowerCase()) ??
-      enteredName;
-    if (!customPhraseSets.some((item) => item.toLowerCase() === tone.toLowerCase()) && !toneOrder.includes(tone)) {
-      const previousSets = [...customPhraseSets];
-      customPhraseSets.push(tone);
-      if (!(await persistPhraseLibrary())) {
-        customPhraseSets = previousSets;
-        render();
-        return;
-      }
-    }
-    phraseSetPickerOpen = false;
-    newPhraseSetName = "";
-    openPhraseGroups.add(tone);
-    openPhraseEditor(null, tone);
+    document.querySelector(".phrase-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
 
@@ -4260,14 +4218,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "delete-voice-files") {
     await deleteVoiceFilesOnly();
-    return;
-  }
-
-  if (action === "generate-audio") {
-    const profileId = source?.dataset.profileId;
-    if (profileId) {
-      await generateProfileAudio(profileId);
-    }
     return;
   }
 
@@ -4602,45 +4552,63 @@ async function persistSessionRuleChanges(previous: AppRule[]): Promise<void> {
   render();
 }
 
-async function savePhraseForm(form: HTMLFormElement): Promise<void> {
-  if (!canEditPhrases()) {
-    return;
-  }
+function libraryBackup() {
+  return {
+    customPhrases: customPhrases.map((phrase) => ({ ...phrase })),
+    customPhraseSets: [...customPhraseSets],
+    phraseOverrides: { ...phraseOverrides },
+    hiddenPhrases: new Set(hiddenPhrases),
+  };
+}
 
-  const editor = phraseEditor ? { ...phraseEditor } : null;
-  if (editor?.phraseId && !canGenerateClip(clipsVoice())) {
-    showFeedback(clipGenerateLockTitle(clipsVoice()));
+function restoreLibrary(backup: ReturnType<typeof libraryBackup>): void {
+  ({ customPhrases, customPhraseSets, phraseOverrides, hiddenPhrases } = backup);
+}
+
+async function savePhraseForm(form: HTMLFormElement): Promise<void> {
+  const editor = phraseEditor;
+  if (!editor || !canEditPhrases()) {
     return;
   }
-  const previousCustomPhrases = customPhrases.map((phrase) => ({ ...phrase }));
-  const previousPhraseOverrides = { ...phraseOverrides };
   const text = formValue(form, "text").trim();
-  const tone = formValue(form, "tone") as VoiceTone;
-  const wasEdit = Boolean(editor?.phraseId);
+  let tone = formValue(form, "tone") as VoiceTone;
+  if (tone === NEW_SET) {
+    const name = formValue(form, "newSet").trim().slice(0, 80);
+    if (!name) {
+      showFeedback("Name the new set");
+      return;
+    }
+    tone = phraseToneOrder().find((item) => item.toLowerCase() === name.toLowerCase()) ?? name;
+  }
   if (!text) {
     showFeedback("Phrase needs text");
     return;
   }
-
-  if (editor?.phraseId) {
-    const existingCustomIndex = customPhrases.findIndex((phrase) => phrase.id === editor.phraseId);
-    if (existingCustomIndex >= 0) {
-      customPhrases[existingCustomIndex] = { id: customPhrases[existingCustomIndex].id, tone, text };
-    } else {
-      phraseOverrides[editor.phraseId] = { id: editor.phraseId, tone, text };
-    }
-  } else {
-    customPhrases.push({
-      id: uniqueCustomPhraseId(text),
-      tone,
-      text,
-    });
+  const existing = editor.phraseId ? effectivePhrases().find((item) => item.id === editor.phraseId) : null;
+  const voice = clipsVoice();
+  // A clip says the old words, so new words need a new clip. A move between sets keeps it.
+  const reword = Boolean(existing && existing.text !== text && clipForPhrase(voice, existing));
+  if (reword && !canGenerateClip(voice)) {
+    showFeedback(`${clipGenerateLockTitle(voice)} Moving it to another set still works.`);
+    return;
   }
 
+  const backup = libraryBackup();
+  if (!phraseToneOrder().some((item) => item.toLowerCase() === tone.toLowerCase())) {
+    customPhraseSets.push(tone);
+  }
+  if (existing) {
+    const index = customPhrases.findIndex((phrase) => phrase.id === existing.id);
+    if (index >= 0) {
+      customPhrases[index] = { id: existing.id, tone, text };
+    } else {
+      phraseOverrides[existing.id] = { id: existing.id, tone, text };
+    }
+  } else {
+    customPhrases.push({ id: uniqueCustomPhraseId(text), tone, text });
+  }
   if (!(await persistPhraseLibrary())) {
-    customPhrases = previousCustomPhrases;
-    phraseOverrides = previousPhraseOverrides;
-    phraseEditor = editor;
+    restoreLibrary(backup);
     render();
     return;
   }
@@ -4648,14 +4616,33 @@ async function savePhraseForm(form: HTMLFormElement): Promise<void> {
   openPhraseGroups.add(tone);
   phraseEditor = null;
   render();
-  if (wasEdit && editor?.phraseId) {
-    const started = await generateOneClip(editor.phraseId);
-    if (!started) {
+  if (reword && existing) {
+    if (!(await generateOneClip(existing.id))) {
       showFeedback("Phrase saved");
     }
     return;
   }
-  showFeedback("Phrase added");
+  const moved = existing && existing.text === text && existing.tone.toLowerCase() !== tone.toLowerCase();
+  showFeedback(moved ? `Moved to ${toneLabel(tone)}` : existing ? "Phrase saved" : "Phrase added");
+}
+
+/** Custom phrases go; bundled ones are hidden, so they stay deletable without a clip cleanup. */
+async function deletePhrase(phraseId: string): Promise<void> {
+  const backup = libraryBackup();
+  if (customPhrases.some((phrase) => phrase.id === phraseId)) {
+    customPhrases = customPhrases.filter((phrase) => phrase.id !== phraseId);
+  } else {
+    hiddenPhrases.add(phraseId);
+    delete phraseOverrides[phraseId];
+  }
+  if (!(await persistPhraseLibrary())) {
+    restoreLibrary(backup);
+    render();
+    return;
+  }
+  phraseEditor = null;
+  render();
+  showFeedback("Phrase deleted");
 }
 
 async function persistPhraseLibrary(): Promise<boolean> {
@@ -4665,11 +4652,13 @@ async function persistPhraseLibrary(): Promise<boolean> {
         custom_tones: customPhraseSets,
         custom_phrases: customPhrases,
         phrase_overrides: Object.values(phraseOverrides),
+        hidden_phrases: [...hiddenPhrases],
       },
     });
     customPhraseSets = library.custom_tones;
     customPhrases = library.custom_phrases;
     phraseOverrides = Object.fromEntries(library.phrase_overrides.map((phrase) => [phrase.id, phrase]));
+    hiddenPhrases = new Set(library.hidden_phrases);
     voiceError = "";
     return true;
   } catch (error) {
@@ -4967,55 +4956,36 @@ async function stopVoiceRecording(keepClip = true): Promise<void> {
 
 async function saveRecordedVoice(): Promise<void> {
   const recording = recordedVoice;
-  if (!recording?.path || !modelInstalled()) {
+  if (!recording?.path) {
     return;
   }
-  if (ramGenerationLocked()) {
-    showFeedback(ramLockMessage());
-    return;
-  }
-
   const name = recording.name.trim();
   if (!name) {
     showFeedback("Name the voice");
     return;
   }
-
-  const profileId = uniqueVoiceProfileId(name);
-  recordingOpen = false;
-
-  await runVoiceBusy("generate-clips", async () => {
+  try {
     const saved = await invoke<VoiceProfileSummary>("save_voice_reference_from_path", {
-      input: {
-        profile_id: profileId,
-        display_name: name,
-        reference_audio_path: recording.path,
-      },
+      input: { profile_id: uniqueVoiceProfileId(name), display_name: name, reference_audio_path: recording.path },
     });
     if (!saved.reference_path) {
       throw new Error("Recorded voice reference was not saved.");
     }
-
-    const generated = await invoke<VoiceProfileSummary>("generate_voice_clips", {
-      input: {
-        profile_id: saved.profile_id,
-        display_name: name,
-        reference_audio_path: saved.reference_path,
-        phrases: voicePhraseInputs(),
-        delete_reference_after_generation: false,
-      },
-    });
-
-    upsertProfile(generated);
+    upsertProfile(saved);
     await refreshVoiceStatus(false);
-    draft.voiceId = voiceOptionId(generated.profile_id);
-    clipsVoiceId = draft.voiceId;
-    await updateSelectedVoice(draft.voiceId);
+    clipsVoiceId = voiceOptionId(saved.profile_id);
     await clearVoiceRecording();
     resetRecordedVoice();
+    recordingOpen = false;
     recordingState = "idle";
-    showFeedback("Voice generated");
-  });
+    voiceError = "";
+    render();
+    showFeedback("Voice saved. Generate its clips below.");
+    document.querySelector(".phrase-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    voiceError = errorText(error);
+    render();
+  }
 }
 
 async function generateOneClip(phraseId: string): Promise<boolean> {
@@ -5075,7 +5045,11 @@ async function generateOneClip(phraseId: string): Promise<boolean> {
   return true;
 }
 
-async function generateProfileAudio(profileId: string, feedback = "Audio generated"): Promise<boolean> {
+async function generateProfileAudio(
+  profileId: string,
+  phrases: PhraseDefinition[] = voicePhraseInputs(),
+  feedback = "Audio generated",
+): Promise<boolean> {
   const profile = profileById(profileId);
   if (!profile?.reference_path || !modelInstalled()) {
     showFeedback(modelInstalled() ? "Reference missing" : "Download voice pack first");
@@ -5086,14 +5060,16 @@ async function generateProfileAudio(profileId: string, feedback = "Audio generat
     return false;
   }
 
+  generatingClipCount = phrases.length;
   return runVoiceBusy("generate-clips", async () => {
     const generated = await invoke<VoiceProfileSummary>("generate_voice_clips", {
       input: {
         profile_id: profile.profile_id,
         display_name: profile.display_name,
         reference_audio_path: profile.reference_path,
-        phrases: voicePhraseInputs(),
+        phrases: phrases.map((phrase) => ({ id: phrase.id, tone: phrase.tone, text: phrase.text })),
         delete_reference_after_generation: false,
+        merge_clips: true,
       },
     });
     upsertProfile(generated);
@@ -6111,10 +6087,6 @@ function ramGenerationLocked(): boolean {
   return voiceBackend?.system.has_enough_ram === false;
 }
 
-function ramAllowsGeneration(): boolean {
-  return voiceBackend?.system.has_enough_ram !== false;
-}
-
 function ramLockMessage(): string {
   const system = voiceBackend?.system;
   const need = system?.min_free_ram_bytes ? formatBytes(system.min_free_ram_bytes) : "enough";
@@ -6240,7 +6212,7 @@ function phraseToneOptions(selected: VoiceTone): string {
 
 function effectivePhrases(): PhraseDefinition[] {
   return [
-    ...phraseBank.map((phrase) => phraseOverrides[phrase.id] ?? phrase),
+    ...phraseBank.filter((phrase) => !hiddenPhrases.has(phrase.id)).map((phrase) => phraseOverrides[phrase.id] ?? phrase),
     ...customPhrases,
   ];
 }
@@ -6339,7 +6311,7 @@ function voiceBusyTitle(): string {
     case "delete-model":
       return "Deleting model files";
     case "generate-clips":
-      return "Generating audio clips";
+      return generatingClipCount > 1 ? `Generating ${generatingClipCount} clips` : "Generating a clip";
     case "delete-voice":
       return "Deleting voice";
     default:
@@ -6349,7 +6321,7 @@ function voiceBusyTitle(): string {
 
 function voiceBusyCopy(): string {
   if (voiceBusy === "generate-clips") {
-    return "The local worker is cloning the voice, sampling peak RAM, and will quit when the clips are written.";
+    return "About a minute per clip, all on this computer. Saved clips play without the model.";
   }
   if (voiceBusy === "download-model") {
     return "The model pack is large. Supervisor will return to small mode after generation.";
@@ -6375,8 +6347,8 @@ function toneLabel(tone: VoiceTone): string {
       return "Mom";
     case "stern":
       return "Stern";
-    case "kind-reset":
-      return "Kind reset";
+    case "genz":
+      return "Gen Z";
     default:
       return tone;
   }
