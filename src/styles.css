@@ -3489,6 +3489,12 @@ button.recap-bar-col:active .recap-bar {
   background: #fff7df;
 }
 
+/* Same look as the other dark-mode tags (RAM stamp, status chip). */
+[data-theme="dark"] .trend-card .trend-pill.is-good {
+  background: var(--white-soft);
+  color: var(--ink);
+}
+
 .trend-pill.is-bad {
   background: #ff684f;
 }

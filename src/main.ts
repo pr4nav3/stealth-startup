@@ -25,7 +25,7 @@ type ClipGenerate = {
   phase: ClipGeneratePhase;
   error: string;
 };
-type VoiceDownloadPhase = "idle" | "downloading" | "cancelling" | "complete" | "error";
+type VoiceDownloadPhase = "idle" | "checking" | "downloading" | "cancelling" | "complete" | "error";
 type RecordingState = "idle" | "recording" | "recorded" | "error";
 
 interface Bounds {
@@ -377,6 +377,7 @@ interface VoiceDownloadSnapshot {
   elapsed_seconds: number;
   eta_seconds: number | null;
   message: string;
+  up_to_date: boolean;
   model: VoiceModelStatus;
   runtime: VoiceRuntimeStatus;
 }
@@ -779,7 +780,7 @@ async function refreshVoiceDownload(shouldRender = true): Promise<void> {
   try {
     const download = await invoke<VoiceDownloadSnapshot>("get_voice_model_download");
     applyDownloadSnapshot(download);
-    if (download.phase === "downloading" || download.phase === "cancelling") {
+    if (download.phase === "checking" || download.phase === "downloading" || download.phase === "cancelling") {
       voiceBusy = "download-model";
       startDownloadPolling();
     }
@@ -807,7 +808,8 @@ async function refreshSnapshot(): Promise<void> {
     const newest = noteNewHistory(history);
     if (appView === "main") {
       ensureSelectedVoice();
-      if (historyHydrated && newest && !snapshot.current) {
+      // Not while a dialog or editor is open: a recording or clip job would vanish behind History.
+      if (historyHydrated && newest && !snapshot.current && !editorIsOpen()) {
         void openHistoryReport(newest);
         return;
       }
@@ -833,7 +835,7 @@ async function refreshSnapshot(): Promise<void> {
 }
 
 function closeTopLayer(): void {
-  if (voiceBusy === "download-model" && voiceDownload?.phase === "complete") {
+  if (voiceBusy === "download-model" && ["complete", "cancelling", "error"].includes(voiceDownload?.phase ?? "")) {
     dismissDownloadModal();
     return;
   }
@@ -1921,7 +1923,7 @@ function renderRuleEditor(editor: RuleEditor): string {
 
 function renderVoiceSettings(): string {
   const voices = availableVoices();
-  const creating = voiceBusy !== null || voiceDownload?.phase === "downloading" || voiceDownload?.phase === "cancelling";
+  const creating = voiceBusy !== null || ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
   return `
     <section class="voice-page">
       <div class="subpage-head">
@@ -2042,12 +2044,14 @@ function voiceCardMark(voice: VoiceOption): string {
 
 function renderCreateVoiceGuide(): string {
   const installed = modelInstalled();
-  const downloading = voiceDownload?.phase === "downloading" || voiceDownload?.phase === "cancelling";
+  const downloading = ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
   const busy = voiceBusy !== null || downloading;
   const downloadLabel =
     voiceDownload?.phase === "cancelling"
       ? "Cancelling..."
-      : voiceDownload?.phase === "downloading"
+      : voiceDownload?.phase === "checking"
+        ? "Checking..."
+        : voiceDownload?.phase === "downloading"
         ? "Downloading..."
         : "Download model";
 
@@ -2073,7 +2077,7 @@ function renderCreateVoiceGuide(): string {
       </div>
       <ol class="create-voice-steps">
         <li><strong>1. Add a voice</strong><span>Click + New voice above, then record a short sample.</span></li>
-        <li><strong>2. Generate your clips</strong><span>Open a phrase set below and press Generate missing, or generate one phrase at a time.</span></li>
+        <li><strong>2. Generate your clips</strong><span>Open a phrase set below and press Generate on a phrase. One at a time, so you can hear each one.</span></li>
         <li><strong>3. Listen and keep</strong><span>Listen to each clip. Try again if needed, then keep the version you like.</span></li>
       </ol>
     </div>
@@ -2191,11 +2195,11 @@ function renderPhraseEditor(): string {
     <form class="phrase-editor" id="phrase-editor">
       <label>
         <span>Set</span>
-        <select name="tone">${phraseToneOptions(editor.tone === NEW_SET ? "gentle" : editor.tone)}<option value="${NEW_SET}" ${editor.tone === NEW_SET ? "selected" : ""}>New set…</option></select>
+        <select id="phrase-editor-tone" name="tone">${phraseToneOptions(editor.tone === NEW_SET ? "gentle" : editor.tone)}<option value="${NEW_SET}" ${editor.tone === NEW_SET ? "selected" : ""}>New set…</option></select>
       </label>
       <label>
         <span>Phrase</span>
-        <input name="text" maxlength="140" value="${attr(editor.text)}" placeholder="Back to the task." />
+        <input id="phrase-editor-text" name="text" maxlength="140" value="${attr(editor.text)}" placeholder="Back to the task." />
       </label>
       <div class="rule-editor-actions">
         <button class="primary" type="submit">Save</button>
@@ -2564,21 +2568,30 @@ function renderDownloadBusyModal(): string {
   const total = Math.max(0, download?.total_bytes ?? voiceBackend?.model.required_bytes ?? 0);
   const downloaded = Math.max(0, Math.min(download?.downloaded_bytes ?? 0, total || Number.MAX_SAFE_INTEGER));
   const percent = done ? 100 : total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
-  const title = done
-    ? "Model pack ready"
-    : phase === "cancelling"
-      ? "Cancelling download"
-      : "Downloading model pack";
-  const copy = done
-    ? "The voice model is installed. Saved clips play without keeping this window open."
-    : download?.message ?? "Downloading model pack.";
+  const upToDate = done && Boolean(download?.up_to_date);
+  const title = upToDate
+    ? "Up to date"
+    : done
+      ? "Model pack ready"
+      : phase === "checking"
+        ? "Checking installed files"
+        : phase === "cancelling"
+          ? "Cancelling download"
+          : "Downloading model pack";
+  const copy = upToDate
+    ? "The installed model and voice runtime are the latest. Nothing was downloaded."
+    : done
+      ? "The voice model is installed. Saved clips play without keeping this window open."
+      : download?.message ?? "Downloading model pack.";
   const eta = done
     ? "Done"
-    : phase === "cancelling"
-      ? "Deleting partial files"
-      : download?.eta_seconds === null || download?.eta_seconds === undefined
-        ? "Estimating time left"
-        : `${formatDuration(download.eta_seconds)} left`;
+    : phase === "checking"
+      ? "A few seconds"
+      : phase === "cancelling"
+        ? "Deleting partial files"
+        : download?.eta_seconds === null || download?.eta_seconds === undefined
+          ? "Estimating time left"
+          : `${formatDuration(download.eta_seconds)} left`;
   const progressText = total > 0 ? `${formatBytes(downloaded)} / ${formatBytes(total)}` : formatBytes(downloaded);
   const note = done
     ? "You can close this and start cloning a voice."
@@ -2600,11 +2613,9 @@ function renderDownloadBusyModal(): string {
         <p class="quiet busy-note">${escapeHtml(note)}</p>
         <div class="modal-actions">
           ${
-            done
+            done || phase === "cancelling" || phase === "error"
               ? `<button type="button" data-action="close-model-download">Close</button>`
-              : phase === "cancelling"
-                ? ""
-                : `<button class="danger" type="button" data-action="cancel-model-download">Cancel download</button>`
+              : `<button class="danger" type="button" data-action="cancel-model-download">Cancel download</button>`
           }
         </div>
       </section>
@@ -2974,11 +2985,22 @@ function finishRating(): void {
   }
 }
 
+let ratingBusy = false;
+
 async function chooseRating(classification: RuleClassification): Promise<void> {
   const app = rating?.queue[rating.index];
-  if (!rating || !app) {
+  if (!rating || !app || ratingBusy) {
     return;
   }
+  ratingBusy = true;
+  try {
+    await saveRating(app, classification);
+  } finally {
+    ratingBusy = false;
+  }
+}
+
+async function saveRating(app: RecapApp, classification: RuleClassification): Promise<void> {
   const target: RuleTarget = app.kind === "website" ? "website" : "app";
   const previous = cloneRules(permanentRules);
   const others = permanentRules.filter(
@@ -2989,6 +3011,9 @@ async function chooseRating(classification: RuleClassification): Promise<void> {
       rules: [{ target, value: app.key, classification }, ...others],
     });
     permanentRules = saved.rules;
+    if (!rating) {
+      return; // closed while the save was in flight
+    }
     saved.rescored_sessions.forEach((id) => rating?.rescored.add(id));
     rating.last = { label: app.label, choice: classification };
   } catch (error) {
@@ -3001,8 +3026,10 @@ async function chooseRating(classification: RuleClassification): Promise<void> {
       row.rating = classification;
     }
   }
-  rating.rated += 1;
-  advanceRating();
+  if (rating) {
+    rating.rated += 1;
+    advanceRating();
+  }
 }
 
 function renderAppGroups(apps: RecapApp[], groups: string[]): string {
@@ -3260,15 +3287,15 @@ function trendCompare(
   if (before == null) {
     return { line: "First full week on record" };
   }
+  // The pill carries the comparison; the line stays empty so the card reads once.
   const change = now - before;
-  const baseline = `vs ${format(before)} the week before`;
   if (Math.abs(change) < threshold) {
-    return { pill: "Steady", good: true, line: baseline };
+    return { pill: "Steady", good: true, line: "" };
   }
   const up = change > 0;
   const amount = format(Math.abs(change));
   const pill = lowerIsBetter ? `${amount} ${up ? "slower" : "faster"}` : `${up ? "↑" : "↓"} ${amount}`;
-  return { pill, good: lowerIsBetter ? !up : up, line: baseline };
+  return { pill, good: lowerIsBetter ? !up : up, line: "" };
 }
 
 function renderTrendCard(card: {
@@ -3288,7 +3315,7 @@ function renderTrendCard(card: {
           <p class="trend-value">${escapeHtml(card.value)}</p>
           ${compare.pill ? `<span class="trend-pill ${compare.good ? "is-good" : "is-bad"}">${escapeHtml(compare.pill)}</span>` : ""}
         </div>
-        <p class="trend-line">Last full week · ${escapeHtml(compare.line)}</p>
+        <p class="trend-line">Last full week${compare.line ? ` · ${escapeHtml(compare.line)}` : ""}</p>
       </div>
       ${card.plot}
     </section>
@@ -3712,9 +3739,17 @@ function bindEvents(): void {
     event.preventDefault();
     void savePhraseForm(event.currentTarget as HTMLFormElement);
   });
+  phraseForm?.querySelector<HTMLInputElement>('input[name="text"]')?.addEventListener("input", (event) => {
+    if (phraseEditor) {
+      phraseEditor.text = (event.target as HTMLInputElement).value;
+    }
+  });
   phraseForm?.querySelector<HTMLSelectElement>('select[name="tone"]')?.addEventListener("change", (event) => {
     const field = phraseForm.querySelector<HTMLElement>(".phrase-new-set");
     const isNew = (event.target as HTMLSelectElement).value === NEW_SET;
+    if (phraseEditor) {
+      phraseEditor.tone = (event.target as HTMLSelectElement).value;
+    }
     field?.toggleAttribute("hidden", !isNew);
     if (isNew) {
       field?.querySelector("input")?.focus();
@@ -4859,6 +4894,7 @@ async function startModelDownload(): Promise<void> {
   }
 
   voiceBusy = "download-model";
+  render();
   try {
     const download = await invoke<VoiceDownloadSnapshot>("start_voice_model_download");
     applyDownloadSnapshot(download);
@@ -4867,7 +4903,7 @@ async function startModelDownload(): Promise<void> {
     if (download.phase === "complete") {
       stopDownloadPolling();
       await refreshVoiceStatus(false);
-      showFeedback("Model pack ready");
+      showFeedback(download.up_to_date ? "Up to date" : "Model pack ready");
     }
   } catch (error) {
     voiceBusy = null;
@@ -4916,7 +4952,7 @@ async function pollModelDownload(): Promise<void> {
     if (download.phase === "complete") {
       stopDownloadPolling();
       await refreshVoiceStatus(false);
-      showFeedback("Model pack ready");
+      showFeedback(download.up_to_date ? "Up to date" : "Model pack ready");
       render();
       return;
     }
@@ -4924,6 +4960,7 @@ async function pollModelDownload(): Promise<void> {
       stopDownloadPolling();
       voiceBusy = null;
       await refreshVoiceStatus(false);
+      render();
       showFeedback("Download cancelled");
       return;
     }
@@ -5116,7 +5153,7 @@ async function saveRecordedVoice(): Promise<void> {
     showFeedback("Voice saved. Generate its clips below.");
     document.querySelector(".phrase-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
-    voiceError = errorText(error);
+    recordingError = errorText(error); // the dialog is still open; a banner would sit behind it
     render();
   }
 }
@@ -5339,6 +5376,10 @@ function paintRecordingClock(): void {
   const el = document.getElementById("recording-elapsed");
   if (el && recordingState === "recording") {
     el.textContent = formatDuration(recordingDurationSeconds());
+    // The backend releases the mic at 60 s; stop here too so the clock doesn't run on.
+    if (recordingDurationSeconds() >= 60) {
+      void stopVoiceRecording();
+    }
   }
 }
 
@@ -5597,6 +5638,7 @@ function playWebcamAlarm(): void {
   gain.connect(context.destination);
   gain.gain.setValueAtTime(0.08, context.currentTime);
   gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.28);
+  oscillator.onended = () => void context.close();
   oscillator.start();
   oscillator.stop(context.currentTime + 0.28);
 }
@@ -6472,6 +6514,7 @@ function formValue(form: HTMLFormElement, name: string): string {
 async function refreshTrends(shouldRender = true): Promise<void> {
   try {
     trends = await invoke<TrendsData>("get_trends");
+    lastError = "";
   } catch (error) {
     lastError = errorText(error);
   }
