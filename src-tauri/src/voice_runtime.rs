@@ -23,6 +23,9 @@ const DOWNLOAD_CANCELLED: &str = "download cancelled";
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// The manifest is a few KB: offline, the user should see "could not reach" in seconds.
+const MANIFEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +84,20 @@ struct RuntimeInstall {
     executable: String,
     archive_sha256: String,
     archive_bytes: u64,
+    /// Size of the extracted runtime, measured once at install. Records from before this
+    /// field was added lack it; `status` then walks the folder once per process.
+    #[serde(default)]
+    installed_bytes: Option<u64>,
+}
+
+/// The one-time walk for a record without `installed_bytes`, cached because the runtime has
+/// thousands of files and `status` is polled by the UI.
+static WALKED_INSTALLED_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+fn installed_bytes(root: &Path, install: &RuntimeInstall) -> u64 {
+    install
+        .installed_bytes
+        .unwrap_or_else(|| *WALKED_INSTALLED_BYTES.get_or_init(|| dir_size(&current_runtime_dir(root)).unwrap_or(0)))
 }
 
 pub fn status(root: &Path) -> VoiceRuntimeStatus {
@@ -100,6 +117,7 @@ pub fn status(root: &Path) -> VoiceRuntimeStatus {
 
     match installed_runtime(root) {
         Ok(Some((install, executable))) => VoiceRuntimeStatus {
+            installed_bytes: installed_bytes(root, &install),
             target: runtime_target(),
             install_dir: current_runtime_dir(root).to_string_lossy().into_owned(),
             installed: true,
@@ -108,7 +126,6 @@ pub fn status(root: &Path) -> VoiceRuntimeStatus {
             worker_api: Some(install.worker_api),
             source: VoiceRuntimeSource::Release,
             required_bytes: Some(install.archive_bytes),
-            installed_bytes: dir_size(&current_runtime_dir(root)).unwrap_or(0),
         },
         _ => VoiceRuntimeStatus {
             target: runtime_target(),
@@ -119,7 +136,7 @@ pub fn status(root: &Path) -> VoiceRuntimeStatus {
             worker_api: None,
             source: VoiceRuntimeSource::Missing,
             required_bytes: None,
-            installed_bytes: dir_size(&current_runtime_dir(root)).unwrap_or(0),
+            installed_bytes: 0,
         },
     }
 }
@@ -150,7 +167,14 @@ pub fn install_runtime(
     }
     // An installed runtime still checks the manifest, so a fixed zip for the same version
     // (new sha) installs. Offline, keep what is installed.
-    let manifest = match fetch_manifest() {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(DOWNLOAD_CANCELLED.to_string());
+    }
+    let manifest = fetch_manifest();
+    if cancel.load(Ordering::SeqCst) {
+        return Err(DOWNLOAD_CANCELLED.to_string());
+    }
+    let manifest = match manifest {
         Ok(manifest) => manifest,
         Err(_) if current.installed => return Ok(report_installed(current, &mut progress)),
         Err(error) => return Err(error),
@@ -243,8 +267,8 @@ fn fetch_manifest() -> Result<VoicePackManifest, String> {
     let url = manifest_url()
         .ok_or_else(|| "voice pack manifest URL is not configured for this build".to_string())?;
     let client = reqwest::blocking::Client::builder()
-        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
-        .timeout(Duration::from_secs(60))
+        .connect_timeout(MANIFEST_CONNECT_TIMEOUT)
+        .timeout(MANIFEST_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
     let body = client
@@ -363,6 +387,7 @@ fn install_archive(
             return Err(format!("voice runtime is missing executable: {executable}"));
         }
         make_executable(&executable_path)?;
+        let installed_bytes = dir_size(&staging).map_err(|error| error.to_string())?;
 
         let had_previous = replace_runtime_dir(root, &staging)?;
         if let Err(error) = write_json(
@@ -374,6 +399,7 @@ fn install_archive(
                 executable,
                 archive_sha256: asset.sha256.clone(),
                 archive_bytes: asset.bytes,
+                installed_bytes: Some(installed_bytes),
             },
         ) {
             restore_previous_runtime(root, had_previous);

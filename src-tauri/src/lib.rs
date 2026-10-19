@@ -436,8 +436,8 @@ fn delete_voice_clip(
 // Runs off the main thread: on macOS it can wait for the camera permission prompt.
 #[tauri::command(async)]
 fn start_webcam_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let gpu = lock_sessions(&state)?.settings().webcam_gpu;
-    webcam::start_worker(app, &state.webcam, gpu, true, on_webcam_frame)
+    let settings = lock_sessions(&state)?.settings();
+    webcam::start_worker(app, &state.webcam, settings.webcam_gpu, settings.webcam_camera, true, on_webcam_frame)
 }
 
 /// A session that still wants the camera gets a worker without pictures back.
@@ -461,9 +461,11 @@ fn on_webcam_frame(app: &AppHandle, frame: &webcam::WebcamFrame) {
 /// prompt), and waits a while after a failure instead of retrying every second.
 fn sync_session_webcam(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let Ok((wants, gpu)) = lock_sessions(&state).map(|sessions| (sessions.wants_webcam(), sessions.settings().webcam_gpu)) else {
+    let Ok((wants, settings)) = lock_sessions(&state).map(|sessions| (sessions.wants_webcam(), sessions.settings())) else {
         return;
     };
+    let gpu = settings.webcam_gpu;
+    let camera = settings.webcam_camera;
     let webcam = &state.webcam;
     // GPU mode that failed once this run would fail again every 30 s; CPU always works.
     let gpu = gpu && !webcam.gpu_failed();
@@ -478,7 +480,7 @@ fn sync_session_webcam(app: &AppHandle) {
             let app = app.clone();
             std::thread::spawn(move || {
                 let state = app.state::<AppState>();
-                if let Err(error) = webcam::start_worker(app.clone(), &state.webcam, gpu, false, on_webcam_frame) {
+                if let Err(error) = webcam::start_worker(app.clone(), &state.webcam, gpu, camera, false, on_webcam_frame) {
                     eprintln!("webcam: {error}");
                 }
             });
