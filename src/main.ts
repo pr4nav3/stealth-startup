@@ -85,6 +85,7 @@ interface SessionSettings {
   status_window_on_top: boolean;
   webcam_gpu: boolean;
   webcam_enabled: boolean;
+  webcam_camera: number;
 }
 
 interface SessionMetrics {
@@ -574,6 +575,7 @@ let settings: SessionSettings = {
   status_window_on_top: true,
   webcam_gpu: false,
   webcam_enabled: false,
+  webcam_camera: 0,
 };
 let history: SessionSummary[] = [];
 const EMPTY_RECAP: FocusRecap = { start: "", end: "", focus_seconds: 0, session_count: 0 };
@@ -589,6 +591,8 @@ let trends: TrendsData = {
   week_recap: EMPTY_RECAP,
 };
 let historyWeekStart = "";
+/** Bumped per week request, so a slow earlier week cannot land over the one shown now. */
+let historyWeekRequest = 0;
 let historyWeek: HistoryWeek | null = null;
 let sessionReport: SessionReport | null = null;
 let weekRecap: WeekRecap | null = null;
@@ -652,7 +656,6 @@ let voiceDeleteTargetId: string | null = null;
 let voiceInfoId: string | null = null;
 let voicePreviewAudio: HTMLAudioElement | null = null;
 const waveformPeaks = new Map<string, number[]>();
-const waveformBuffers = new Map<string, AudioBuffer>();
 const waveformPending = new Map<string, Promise<AudioBuffer>>();
 let waveformContext: AudioContext | null = null;
 let voicePreviewPath = "";
@@ -669,7 +672,9 @@ let voiceError = "";
 let feedbackMessage = "";
 let feedbackTimer: number | null = null;
 let pollId: number | null = null;
+let snapshotInFlight = false;
 let downloadPollId: number | null = null;
+let downloadPollInFlight = false;
 let nudgeAudio: HTMLAudioElement | null = null;
 const webcamSettings = {
   phoneUse: false,
@@ -783,6 +788,9 @@ async function refreshVoiceDownload(shouldRender = true): Promise<void> {
     if (download.phase === "checking" || download.phase === "downloading" || download.phase === "cancelling") {
       voiceBusy = "download-model";
       startDownloadPolling();
+    } else if (download.phase === "error" && !voiceError) {
+      // A download that failed before this page loaded; the modal is gone, so the notice says it.
+      voiceError = download.message;
     }
   } catch {
     voiceDownload = null;
@@ -794,6 +802,19 @@ async function refreshVoiceDownload(shouldRender = true): Promise<void> {
 }
 
 async function refreshSnapshot(): Promise<void> {
+  // A slow tick must not be overtaken by the next one and then land its older snapshot.
+  if (snapshotInFlight) {
+    return;
+  }
+  snapshotInFlight = true;
+  try {
+    await refreshSnapshotNow();
+  } finally {
+    snapshotInFlight = false;
+  }
+}
+
+async function refreshSnapshotNow(): Promise<void> {
   try {
     snapshot = await invoke<SessionSnapshot>("get_session_snapshot");
     settings = snapshot.settings;
@@ -1770,6 +1791,12 @@ function renderWebcamSettings(): string {
                 <input id="webcam-gpu" class="toggle-input" type="checkbox" ${settings.webcam_gpu ? "checked" : ""} aria-label="Run on GPU" />
                 <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
               </span>
+            </label>
+            <label class="setting-row">
+              <span>Camera</span>
+              <select id="webcam-camera" aria-label="Camera">
+                ${[0, 1, 2, 3].map((index) => `<option value="${index}" ${settings.webcam_camera === index ? "selected" : ""}>Camera ${index}</option>`).join("")}
+              </select>
             </label>
           </section>
           <section class="panel webcam-test-panel">
@@ -3851,6 +3878,10 @@ function bindEvents(): void {
     void setWebcamGpu((event.target as HTMLInputElement).checked);
   });
 
+  document.getElementById("webcam-camera")?.addEventListener("change", (event) => {
+    void setWebcamCamera(Number((event.target as HTMLSelectElement).value));
+  });
+
   document.getElementById("voice-name")?.addEventListener("input", (event) => {
     if (recordedVoice) {
       recordedVoice.name = (event.target as HTMLInputElement).value;
@@ -4254,8 +4285,11 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     if (voiceId && voice?.selectable) {
       draft.voiceId = voiceId;
       render();
-      showFeedback(`${voice.name} selected`);
-      void updateSelectedVoice(voiceId);
+      void updateSelectedVoice(voiceId).then((saved) => {
+        if (saved) {
+          showFeedback(`${voice.name} selected`);
+        }
+      });
     }
     return;
   }
@@ -4876,15 +4910,17 @@ async function updateStatusWindowEnabled(enabled: boolean): Promise<void> {
   }
 }
 
-async function updateSelectedVoice(voiceId: string): Promise<void> {
+async function updateSelectedVoice(voiceId: string): Promise<boolean> {
   try {
     settings = await invoke<SessionSettings>("update_settings", {
       update: { voice_profile: voiceId },
     });
     voiceError = "";
+    return true;
   } catch (error) {
     voiceError = errorText(error);
     render();
+    return false;
   }
 }
 
@@ -4945,7 +4981,18 @@ async function pollModelDownload(): Promise<void> {
     stopDownloadPolling();
     return;
   }
+  if (downloadPollInFlight) {
+    return;
+  }
+  downloadPollInFlight = true;
+  try {
+    await pollModelDownloadNow();
+  } finally {
+    downloadPollInFlight = false;
+  }
+}
 
+async function pollModelDownloadNow(): Promise<void> {
   try {
     const download = await invoke<VoiceDownloadSnapshot>("get_voice_model_download");
     applyDownloadSnapshot(download);
@@ -5393,16 +5440,37 @@ async function setWebcamEnabled(enabled: boolean): Promise<void> {
     });
   } catch (error) {
     webcamError = errorText(error);
+    const box = document.getElementById("webcam-phone-use") as HTMLInputElement | null;
+    if (box) {
+      box.checked = settings.webcam_enabled;
+    }
   }
   webcamSettings.phoneUse = settings.webcam_enabled;
   paintWebcamDom();
 }
 
 async function setWebcamGpu(enabled: boolean): Promise<void> {
+  await updateWebcamWorkerSetting({ webcam_gpu: enabled }, () => {
+    const box = document.getElementById("webcam-gpu") as HTMLInputElement | null;
+    if (box) {
+      box.checked = settings.webcam_gpu;
+    }
+  });
+}
+
+async function setWebcamCamera(camera: number): Promise<void> {
+  await updateWebcamWorkerSetting({ webcam_camera: camera }, () => {
+    const select = document.getElementById("webcam-camera") as HTMLSelectElement | null;
+    if (select) {
+      select.value = String(settings.webcam_camera);
+    }
+  });
+}
+
+/** A setting the worker reads at launch: a running preview restarts. On failure the control is put back. */
+async function updateWebcamWorkerSetting(update: Partial<SessionSettings>, revert: () => void): Promise<void> {
   try {
-    settings = await invoke<SessionSettings>("update_settings", {
-      update: { webcam_gpu: enabled },
-    });
+    settings = await invoke<SessionSettings>("update_settings", { update });
     if (webcamPreviewStarted) {
       await stopWebcamPreview();
       webcamFrame = null;
@@ -5411,10 +5479,7 @@ async function setWebcamGpu(enabled: boolean): Promise<void> {
     webcamError = "";
   } catch (error) {
     webcamError = errorText(error);
-    const box = document.getElementById("webcam-gpu") as HTMLInputElement | null;
-    if (box) {
-      box.checked = settings.webcam_gpu;
-    }
+    revert();
   }
   paintWebcamDom();
 }
@@ -6041,11 +6106,8 @@ async function loadWaveformPeaks(path: string, bars: number): Promise<number[]> 
   return peaks;
 }
 
+/** Not cached: peaks are, and a decoded buffer is seconds of float32 per clip. */
 async function loadWaveformBuffer(path: string): Promise<AudioBuffer> {
-  const cached = waveformBuffers.get(path);
-  if (cached) {
-    return cached;
-  }
   let pending = waveformPending.get(path);
   if (!pending) {
     pending = (async () => {
@@ -6055,9 +6117,7 @@ async function loadWaveformBuffer(path: string): Promise<AudioBuffer> {
       }
       const bytes = await response.arrayBuffer();
       const context = waveformContext ?? (waveformContext = new AudioContext());
-      const buffer = await context.decodeAudioData(bytes.slice(0));
-      waveformBuffers.set(path, buffer);
-      return buffer;
+      return context.decodeAudioData(bytes.slice(0));
     })();
     waveformPending.set(path, pending);
   }
@@ -6427,7 +6487,6 @@ function bumpClipAsset(path: string): void {
       waveformPeaks.delete(key);
     }
   }
-  waveformBuffers.delete(path);
   waveformPending.delete(path);
   if (voicePreviewPath === path) {
     stopVoicePreview();
@@ -6527,10 +6586,18 @@ async function refreshHistoryWeek(shouldRender = true): Promise<void> {
   if (!historyWeekStart) {
     historyWeekStart = thisMondayKey();
   }
+  const request = ++historyWeekRequest;
   try {
-    historyWeek = await invoke<HistoryWeek>("get_history_week", { weekStart: historyWeekStart });
-    historyWeekStart = historyWeek.week_start;
+    const week = await invoke<HistoryWeek>("get_history_week", { weekStart: historyWeekStart });
+    if (request !== historyWeekRequest) {
+      return;
+    }
+    historyWeek = week;
+    historyWeekStart = week.week_start;
   } catch (error) {
+    if (request !== historyWeekRequest) {
+      return;
+    }
     lastError = errorText(error);
   }
   if (shouldRender) {
@@ -6552,16 +6619,25 @@ function noteNewHistory(items: SessionSummary[]): number | null {
 }
 
 async function openWeekRecap(start: string): Promise<void> {
+  const request = ++historyWeekRequest;
   try {
-    [weekRecap, appNames] = await Promise.all([
+    const [recap, names] = await Promise.all([
       invoke<WeekRecap>("get_week_recap", { start }),
       invoke<Record<string, string>>("get_app_names"),
     ]);
+    if (request !== historyWeekRequest) {
+      return;
+    }
+    weekRecap = recap;
+    appNames = names;
     historyView = "recap";
     sessionReport = null;
     historyRename = null;
     lastError = "";
   } catch (error) {
+    if (request !== historyWeekRequest) {
+      return;
+    }
     lastError = errorText(error);
   }
   render();
