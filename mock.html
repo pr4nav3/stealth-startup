@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Supervisor (mock)</title>
+    <script>
+    (() => {
+      const q = new URLSearchParams(location.search);
+      const empty = q.get("empty") === "1";
+      const pad = n => String(n).padStart(2, "0");
+      const key = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+      const today = new Date(); today.setHours(0,0,0,0);
+      const monday = new Date(today); monday.setDate(today.getDate() - ((today.getDay()+6)%7));
+      const addDays = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
+      // 6 weeks of plausible data
+      const weeks = []; const daily = [];
+      const seed = [1.2, 2.4, 3.1, 2.0, 4.2, 1.6]; // hours per week
+      for (let w = 5; w >= 0; w--) {
+        const start = addDays(monday, -7*w);
+        const hours = w === 0 ? 1.6 : seed[5-w];
+        const perDay = [0.35,0.25,0,0.2,0.2,0,0];
+        let total = 0, count = 0;
+        for (let d = 0; d < 7; d++) {
+          const day = addDays(start, d);
+          if (day > today) break;
+          const fs = Math.round(hours*3600*perDay[d]);
+          if (fs > 0) { total += fs; count += 1; daily.push({date:key(day), focus_percent:72, focus_seconds:fs, session_count:1}); }
+        }
+        weeks.push({week_start:key(start), session_count:count, focus_seconds:total, median_stretch_seconds: 60*(9+w*2), recovery_median_seconds: 40+w*12});
+      }
+      const thisWeek = weeks[weeks.length-1];
+      const sessions = [];
+      let id = 100;
+      for (const d of daily) {
+        const started = new Date(d.date+"T10:30:00");
+        const dur = Math.max(900, Math.round(d.focus_seconds/0.72));
+        sessions.push({id: id++, goal: ["Finish lab 3 writeup","Read chapter 7","Supervisor UI pass","Grind leetcode","Thesis intro"][id%5], started_at: started.toISOString(), duration_seconds: dur, focus_seconds: d.focus_seconds, neutral_seconds: Math.round(dur*0.1), unrated_seconds: 0, distracted_seconds: Math.round(dur*0.12), idle_seconds: Math.round(dur*0.06), nudges: 2, top_hints:["VS Code","youtube.com"]});
+      }
+      sessions.sort((a,b)=> b.started_at.localeCompare(a.started_at));
+      const report = s => ({ id:s.id, goal:s.goal, strictness:"normal", started_at:s.started_at, ended_at:null, ended_reason:"completed", planned_seconds:s.duration_seconds, duration_seconds:s.duration_seconds, focus_percent:72, focused_seconds:s.focus_seconds, unrated_seconds:0, distracted_seconds:s.distracted_seconds, idle_seconds:s.idle_seconds, away_seconds:0, phone_seconds:0, drift_count:3, nudge_count:2, longest_stretch_seconds:1140, median_stretch_seconds:540,
+        spans:[{started_offset_seconds:0,seconds:600,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"},{started_offset_seconds:600,seconds:180,app:"chrome",kind:"website",activity_key:"youtube.com",label:"YouTube",state:"distracted"},{started_offset_seconds:780,seconds:900,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"},{started_offset_seconds:1680,seconds:120,app:"chrome",kind:"website",activity_key:"docs.google.com",label:"Google Docs",state:"neutral"},{started_offset_seconds:1800,seconds:s.duration_seconds-1800,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"}],
+        apps:[{group:"Focus",kind:"app",key:"code",label:"VS Code",seconds:s.focus_seconds,ratable:true,rating:"focused"},{group:"Distracting",kind:"website",key:"youtube.com",label:"YouTube",seconds:s.distracted_seconds,ratable:true,rating:"distracting"},{group:"Neutral",kind:"website",key:"docs.google.com",label:"Google Docs",seconds:s.neutral_seconds,ratable:true,rating:"neutral"}],
+        events:[{at_offset_seconds:660,kind:"nudge",detail:null},{at_offset_seconds:720,kind:"nudge",detail:null}] });
+      const settings = {default_strictness:"normal", voice_profile:"starter-female", status_window_enabled:true, status_window_on_top:true, webcam_gpu:false, webcam_enabled:false, webcam_camera:0};
+      const rules = [{id:1,target:"app",value:"code",classification:"focused",source:"user"},{id:2,target:"website",value:"youtube.com",classification:"distracting",source:"starter"}];
+      const hist = empty ? [] : sessions;
+      const trendsData = empty ? {daily_focus:[],weeks:[],full_weeks:0,week_recap:{start:key(monday),end:key(addDays(monday,6)),focus_seconds:0,session_count:0}} : {daily_focus:daily, weeks, full_weeks:5, week_recap:{start:thisWeek.week_start,end:key(addDays(monday,6)),focus_seconds:thisWeek.focus_seconds,session_count:thisWeek.session_count}};
+      const weekRecap = start => { const ws = weeks.find(w=>w.week_start===start) || thisWeek; const buckets = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((l,i)=>{const d=daily.find(x=>x.date===key(addDays(new Date(start),i))); return {label:l, focus_seconds:d?d.focus_seconds:0};}); return {start, end:key(addDays(new Date(start),6)), focus_seconds:ws.focus_seconds, session_count:ws.session_count, buckets, median_stretch_seconds:ws.median_stretch_seconds, longest_stretch_seconds:1500, recovery_median_seconds:ws.recovery_median_seconds, recovery_count:7, unrecovered_count:1, previous_recovery_median_seconds:ws.recovery_median_seconds+9, apps: report(sessions[0]||{}).apps}; };
+      const handlers = {
+        get_settings: () => settings,
+        get_history: () => hist,
+        get_rules: () => rules,
+        get_phrase_library: () => ({custom_tones:[],custom_phrases:[],phrase_overrides:[],hidden_phrases:[]}),
+        get_site_names: () => ({}), get_app_names: () => ({}),
+        get_session_snapshot: () => ({status:"idle", settings, current:null, history:hist, rescore:null}),
+        get_trends: () => trendsData,
+        get_history_week: a => { const ws = a.weekStart; return {week_start:ws, sessions: hist.filter(s=>{const d=new Date(s.started_at); const m=new Date(d); m.setHours(0,0,0,0); m.setDate(m.getDate()-((m.getDay()+6)%7)); return key(m)===ws;}), oldest_day: hist.length? hist[hist.length-1].started_at.slice(0,10):null}; },
+        get_session_report: a => report(hist.find(s=>s.id===a.id) || hist[0]),
+        get_week_recap: a => weekRecap(a.start),
+        get_voice_backend_status: () => { throw "mock: voice offline"; },
+        get_voice_model_download: () => { throw "mock"; },
+        "plugin:event|listen": () => 1,
+        "plugin:event|unlisten": () => null,
+      };
+      window.__TAURI_INTERNALS__ = {
+        invoke: (cmd, args) => new Promise((res, rej) => { const h = handlers[cmd]; if (!h) return rej(`mock: no handler for ${cmd}`); try { res(h(args||{})); } catch (e) { rej(e); } }),
+        transformCallback: (cb) => { const id = Math.floor(Math.random()*1e9); window[`_${id}`] = cb; return id; },
+        unregisterCallback: () => {},
+        convertFileSrc: p => p,
+        metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
+      };
+    })();
+    </script>
+  </head>
+  <body>
+    <main id="app"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
