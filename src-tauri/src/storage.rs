@@ -1538,8 +1538,9 @@ impl SessionStorage {
         }
         let mut days: Vec<_> = by_day.into_iter().collect();
         days.sort_by(|left, right| left.0.cmp(&right.0));
-        if days.len() > 14 {
-            days = days.split_off(days.len() - 14);
+        // The home calendar and streak read back a few months.
+        if days.len() > 120 {
+            days = days.split_off(days.len() - 120);
         }
         let daily_focus = days
             .into_iter()

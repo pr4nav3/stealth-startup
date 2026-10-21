@@ -18,8 +18,8 @@
       const seed = [1.2, 2.4, 3.1, 2.0, 4.2, 1.6]; // hours per week
       for (let w = 5; w >= 0; w--) {
         const start = addDays(monday, -7*w);
-        const hours = w === 0 ? 1.6 : seed[5-w];
-        const perDay = [0.35,0.25,0,0.2,0.2,0,0];
+        const hours = w === 0 ? 2.4 : seed[5-w];
+        const perDay = [0.3,0.25,0.15,0.15,0.15,0,0];
         let total = 0, count = 0;
         for (let d = 0; d < 7; d++) {
           const day = addDays(start, d);

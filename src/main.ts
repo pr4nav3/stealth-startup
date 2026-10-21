@@ -742,7 +742,7 @@ async function init(): Promise<void> {
   historyHydrated = true;
 
   if (appView === "main") {
-    void refreshTrends(false);
+    void refreshTrends();
     // Renders when the voice list arrives, so cards that read it are not stale.
     void refreshVoiceStatus();
     void refreshVoiceDownload(false);
@@ -1029,6 +1029,8 @@ function viewKey(): string {
     historyWeekStart,
     historyWeek?.sessions.length ?? "",
     sessionReport?.id ?? "",
+    lastReportId ?? "",
+    trends.daily_focus.length,
   ].join("\u001f");
 }
 
@@ -1183,46 +1185,39 @@ function render(): void {
 
 function renderSession(current: CurrentSession | null): string {
   if (!current) {
+    void ensureLastReport();
     const note = dailyNote();
-    const week = weekSummary();
+    const streak = streakInfo();
+    const todaySeconds = dayFocusMap().get(dayKey(new Date())) ?? 0;
     return `
       <section class="home-ready">
         <div class="home-grid">
-          <article class="quote-card">
-            <p class="eyebrow">Daily note · ${escapeHtml(note.date)}</p>
-            <blockquote>“${escapeHtml(note.text)}”</blockquote>
-            <p class="quote-by">— ${escapeHtml(note.by)}</p>
+          <article class="panel cal-card">
+            <p class="eyebrow">Calendar · ${escapeHtml(monthLabel(new Date()))}</p>
+            <div class="streak-line">
+              <strong>${streak.days}</strong>
+              <span>day streak</span>
+            </div>
+            ${renderCalendar(streak)}
+            <div class="today-line">
+              <span class="eyebrow">Today</span>
+              <div class="today-track" role="img" aria-label="${attr(`${Math.round(todaySeconds / 60)} of ${STREAK_DAY_SECONDS / 60} minutes today`)}">
+                <span style="width: ${Math.min(100, (todaySeconds / STREAK_DAY_SECONDS) * 100).toFixed(1)}%"></span>
+              </div>
+              <span class="today-value">${escapeHtml(formatMinutes(todaySeconds))}</span>
+            </div>
           </article>
           <div class="home-side">
             ${
               onboardingVisible()
                 ? renderGettingStarted()
-                : `<article class="panel local-card">
-                    <p class="eyebrow">Privacy first</p>
-                    <p>Everything stays on this device.</p>
+                : `<article class="panel quote-card">
+                    <p class="eyebrow">Daily note · ${escapeHtml(note.date)}</p>
+                    <blockquote>“${escapeHtml(note.text)}”</blockquote>
+                    <p class="quote-by">— ${escapeHtml(note.by)}</p>
                   </article>`
             }
-            <article class="panel week-card">
-              <p class="eyebrow">This week</p>
-              <p class="week-total">${escapeHtml(week.total)} focused</p>
-              <p class="week-caption">${escapeHtml(week.caption)}</p>
-              <div class="week-bars">
-                ${week.days
-                  .map(
-                    (day) => `
-                      <div class="week-col" role="img" aria-label="${attr(day.name)}, ${Math.max(0, Math.round(day.seconds / 60))}m focused">
-                        <span class="week-bar-track">
-                          <span class="week-bar ${day.seconds > 0 ? "is-on" : ""}" style="height: ${barHeight(day.seconds, week.max)}%">
-                            <span class="week-tip">${Math.max(0, Math.round(day.seconds / 60))}m</span>
-                          </span>
-                        </span>
-                        <span class="week-letter">${escapeHtml(day.letter)}</span>
-                      </div>
-                    `,
-                  )
-                  .join("")}
-              </div>
-            </article>
+            ${renderLastSessionCard(streak.days)}
           </div>
         </div>
         ${renderStartAction()}
@@ -4023,6 +4018,11 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "onboard-hide" || action === "onboard-show") {
     localStorage.setItem(ONBOARDING_KEY, action === "onboard-hide" ? "collapsed" : "open");
     render();
+    return;
+  }
+
+  if (action === "copy-card") {
+    await copyCard(streakInfo().days);
     return;
   }
 
@@ -6840,34 +6840,279 @@ function dailyNote(): { date: string; text: string; by: string } {
   return { date, text: note.text, by: note.by };
 }
 
-const WEEK_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
-const WEEK_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+/** A day counts toward the streak at this much focused time. */
+const STREAK_DAY_SECONDS = 25 * 60;
 
-function weekSummary(): {
-  total: string;
-  caption: string;
-  days: { letter: string; name: string; seconds: number }[];
-  max: number;
-} {
+function dayFocusMap(): Map<string, number> {
+  return new Map(trends.daily_focus.map((day) => [day.date, day.focus_seconds]));
+}
+
+function isWeekend(date: Date): boolean {
+  return date.getDay() === 0 || date.getDay() === 6;
+}
+
+/**
+ * The current streak: consecutive counted days ending today or yesterday. Weekends never
+ * break it; a weekend inside the run is a bridge. `chain` is every day drawn as part of it.
+ */
+function streakInfo(): { days: number; chain: Set<string> } {
+  const focus = dayFocusMap();
+  const run: { key: string; counted: boolean }[] = [];
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  for (let step = 0; step < 400; step += 1) {
+    const key = dayKey(cursor);
+    const counted = (focus.get(key) ?? 0) >= STREAK_DAY_SECONDS;
+    if (counted) {
+      run.push({ key, counted: true });
+    } else if (isWeekend(cursor)) {
+      run.push({ key, counted: false });
+    } else if (step > 0) {
+      break;
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  // Bridges only count between counted days.
+  while (run.length && !run[0].counted) run.shift();
+  while (run.length && !run[run.length - 1].counted) run.pop();
+  return {
+    days: run.filter((day) => day.counted).length,
+    chain: new Set(run.map((day) => day.key)),
+  };
+}
+
+function monthLabel(date: Date): string {
+  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function renderCalendar(streak: { chain: Set<string> }): string {
+  const focus = dayFocusMap();
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
-  const byDate = new Map(trends.daily_focus.map((day) => [day.date, day]));
-  const days = WEEK_LETTERS.map((letter, index) => {
-    const date = new Date(monday);
-    date.setDate(monday.getDate() + index);
-    const match = byDate.get(dayKey(date));
-    return { letter, name: WEEK_NAMES[index], seconds: match?.focus_seconds ?? 0, sessions: match?.session_count ?? 0 };
+  const first = new Date(today.getFullYear(), today.getMonth(), 1);
+  const start = mondayOf(first);
+  const last = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  const cells = Math.ceil(((last.getTime() - start.getTime()) / 86400000 + 1) / 7) * 7;
+  const letters = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const days: string[] = [];
+  for (let index = 0; index < cells; index += 1) {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    const key = dayKey(date);
+    const seconds = focus.get(key) ?? 0;
+    const classes = ["cal-day"];
+    if (date.getMonth() !== today.getMonth()) classes.push("is-out");
+    if (date > today) classes.push("is-future");
+    else if (key === dayKey(today)) classes.push("is-today");
+    else if (seconds >= 90 * 60) classes.push("l3");
+    else if (seconds >= 45 * 60) classes.push("l2");
+    else if (seconds >= STREAK_DAY_SECONDS) classes.push("l1");
+    if (streak.chain.has(key)) {
+      classes.push("in-chain");
+      if (seconds < STREAK_DAY_SECONDS && key !== dayKey(today)) classes.push("is-bridge");
+      const next = new Date(date);
+      next.setDate(date.getDate() + 1);
+      if (date.getDay() === 0 || !streak.chain.has(dayKey(next))) classes.push("chain-end");
+    }
+    const label = `${date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}, ${formatMinutes(seconds)}`;
+    days.push(
+      `<span class="${classes.join(" ")}" style="animation-delay: ${index * 12}ms" title="${attr(label)}">${date.getDate()}</span>`,
+    );
+  }
+  return `
+    <div class="cal-grid" role="img" aria-label="${attr(monthLabel(today))}, days with focus shaded">
+      ${letters.map((letter) => `<span class="cal-dow">${letter}</span>`).join("")}
+      ${days.join("")}
+    </div>
+  `;
+}
+
+/** The newest session's report, for the card on Home. Loaded once per session id. */
+let lastReport: SessionReport | null = null;
+let lastReportId: number | null = null;
+
+async function ensureLastReport(): Promise<void> {
+  const newest = history[0]?.id ?? null;
+  if (newest === lastReportId) {
+    return;
+  }
+  lastReportId = newest;
+  lastReport = null;
+  if (newest === null) {
+    return;
+  }
+  try {
+    const report = await invoke<SessionReport>("get_session_report", { id: newest });
+    if (lastReportId === newest) {
+      lastReport = report;
+      render();
+    }
+  } catch {
+    // The card just stays off until the next snapshot.
+  }
+}
+
+const STRIP_COLORS: Record<string, string> = {
+  focused: "#a8eb37",
+  suspicious: "#ffcf31",
+  distracted: "#ff684f",
+  phone: "#ff684f",
+  neutral: "#fff7df",
+  unrated: "#fff7df",
+  idle: "#cfc6b0",
+  unknown: "#cfc6b0",
+  paused: "#cfc6b0",
+};
+
+function cardDate(report: SessionReport): string {
+  return new Date(report.started_at).toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+}
+
+function renderLastSessionCard(streakDays: number): string {
+  const report = lastReport;
+  if (!report) {
+    return "";
+  }
+  const duration = timelineSeconds(report);
+  const strip = report.spans
+    .map(
+      (span) =>
+        `<i style="left: ${((span.started_offset_seconds / duration) * 100).toFixed(2)}%; width: ${((span.seconds / duration) * 100).toFixed(2)}%; background: ${STRIP_COLORS[span.state] ?? STRIP_COLORS.idle}"></i>`,
+    )
+    .join("");
+  const ticks = report.events
+    .filter((event) => event.kind === "nudge")
+    .map((event) => `<b style="left: ${Math.min(100, (event.at_offset_seconds / duration) * 100).toFixed(2)}%"></b>`)
+    .join("");
+  return `
+    <section class="panel last-session-card">
+      <p class="eyebrow">Last session</p>
+      <button class="share-card" type="button" data-action="copy-card" title="Copy the card as an image">
+        <span class="share-head">
+          <strong>${escapeHtml(report.goal)}</strong>
+          <span>${escapeHtml(cardDate(report))}</span>
+        </span>
+        <span class="share-strip" aria-hidden="true">${ticks}${strip}</span>
+        <span class="share-stats">
+          <span><small>Focused</small><strong>${escapeHtml(formatHours(report.focused_seconds))}</strong></span>
+          <span><small>Best stretch</small><strong>${escapeHtml(formatMinutes(report.longest_stretch_seconds))}</strong></span>
+          <span><small>Streak</small><strong>${streakDays} day${streakDays === 1 ? "" : "s"}</strong></span>
+        </span>
+      </button>
+    </section>
+  `;
+}
+
+/** Draws the card to a canvas and puts the PNG on the clipboard. Always light, whatever the theme. */
+async function copyCard(streakDays: number): Promise<void> {
+  const report = lastReport;
+  if (!report) {
+    return;
+  }
+  const scale = 2;
+  const width = 640;
+  const height = 360;
+  const canvas = document.createElement("canvas");
+  canvas.width = width * scale;
+  canvas.height = height * scale;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return;
+  }
+  ctx.scale(scale, scale);
+  const ink = "#101010";
+  const mono = "ui-monospace, Menlo, Consolas, monospace";
+  const sans = "Inter, system-ui, sans-serif";
+  ctx.fillStyle = "#f4ead7";
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = "rgba(16,16,16,0.08)";
+  ctx.lineWidth = 1;
+  for (let x = 0; x < width; x += 14) {
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, height);
+    ctx.stroke();
+  }
+  for (let y = 0; y < height; y += 14) {
+    ctx.beginPath();
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(width, y + 0.5);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 6;
+  ctx.strokeRect(3, 3, width - 6, height - 6);
+
+  ctx.fillStyle = "#5d564a";
+  ctx.font = `600 12px ${mono}`;
+  ctx.textBaseline = "top";
+  ctx.fillText("SUPERVISOR", 36, 34);
+  ctx.textAlign = "right";
+  ctx.fillText(cardDate(report).toUpperCase(), width - 36, 34);
+  ctx.textAlign = "left";
+
+  ctx.fillStyle = ink;
+  ctx.font = `700 30px ${sans}`;
+  let goal = report.goal;
+  while (goal.length > 3 && ctx.measureText(goal).width > width - 72) {
+    goal = `${goal.slice(0, -2).trimEnd()}…`;
+  }
+  ctx.fillText(goal, 36, 62);
+
+  const duration = timelineSeconds(report);
+  const stripX = 36;
+  const stripY = 130;
+  const stripW = width - 72;
+  const stripH = 44;
+  for (const span of report.spans) {
+    ctx.fillStyle = STRIP_COLORS[span.state] ?? STRIP_COLORS.idle;
+    const x = stripX + (span.started_offset_seconds / duration) * stripW;
+    const w = Math.max(2, (span.seconds / duration) * stripW);
+    ctx.fillRect(x, stripY, w, stripH);
+  }
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(stripX, stripY, stripW, stripH);
+  ctx.fillStyle = ink;
+  for (const event of report.events) {
+    if (event.kind !== "nudge") continue;
+    const x = stripX + Math.min(1, event.at_offset_seconds / duration) * stripW;
+    ctx.beginPath();
+    ctx.moveTo(x - 6, stripY - 12);
+    ctx.lineTo(x + 6, stripY - 12);
+    ctx.lineTo(x, stripY - 3);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  const stats: [string, string][] = [
+    ["FOCUSED", formatHours(report.focused_seconds)],
+    ["BEST STRETCH", formatMinutes(report.longest_stretch_seconds)],
+    ["STREAK", `${streakDays} day${streakDays === 1 ? "" : "s"}`],
+  ];
+  stats.forEach(([label, value], index) => {
+    const x = 36 + index * ((width - 72) / 3);
+    ctx.fillStyle = ink;
+    ctx.fillRect(x, 222, 3, 70);
+    ctx.fillStyle = "#5d564a";
+    ctx.font = `600 11px ${mono}`;
+    ctx.fillText(label, x + 14, 226);
+    ctx.fillStyle = ink;
+    ctx.font = `800 36px ${sans}`;
+    ctx.fillText(value, x + 14, 246);
   });
-  const seconds = days.reduce((sum, day) => sum + day.seconds, 0);
-  const count = days.reduce((sum, day) => sum + day.sessions, 0);
-  return {
-    total: formatHours(seconds),
-    caption: `across ${count} session${count === 1 ? "" : "s"}`,
-    days,
-    max: Math.max(...days.map((day) => day.seconds), 1),
-  };
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) {
+    showFeedback("Could not draw the card");
+    return;
+  }
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    showFeedback("Card copied");
+  } catch (error) {
+    showFeedback(`Could not copy: ${errorText(error)}`);
+  }
 }
 
 function dayKey(date: Date): string {
