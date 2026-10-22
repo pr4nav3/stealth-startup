@@ -15,11 +15,12 @@
       const addDays = (d,n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
       // 6 weeks of plausible data
       const weeks = []; const daily = [];
-      const seed = [1.2, 2.4, 3.1, 2.0, 4.2, 1.6]; // hours per week
+      const big = q.get("big") === "1";
+      const seed = big ? [30, 30, 30, 30, 30, 30] : [1.2, 2.4, 3.1, 2.0, 4.2, 1.6]; // hours per week
       for (let w = 5; w >= 0; w--) {
         const start = addDays(monday, -7*w);
         const hours = w === 0 ? 2.4 : seed[5-w];
-        const perDay = [0.3,0.25,0.15,0.15,0.15,0,0];
+        const perDay = big ? [0.2,0.2,0.2,0.2,0.2,0,0] : [0.3,0.25,0.15,0.15,0.15,0,0];
         let total = 0, count = 0;
         for (let d = 0; d < 7; d++) {
           const day = addDays(start, d);
@@ -38,8 +39,12 @@
         sessions.push({id: id++, goal: ["Finish lab 3 writeup","Read chapter 7","Supervisor UI pass","Grind leetcode","Thesis intro"][id%5], started_at: started.toISOString(), duration_seconds: dur, focus_seconds: d.focus_seconds, neutral_seconds: Math.round(dur*0.1), unrated_seconds: 0, distracted_seconds: Math.round(dur*0.12), idle_seconds: Math.round(dur*0.06), nudges: 2, top_hints:["VS Code","youtube.com"]});
       }
       sessions.sort((a,b)=> b.started_at.localeCompare(a.started_at));
+      if (q.get("long") === "1" && sessions[0]) sessions[0].goal = "Finish the entire Supervisor history redesign and the weekly card before the demo on Friday";
+      if (q.get("two") === "1" && sessions[0]) { const d = new Date(sessions[0].started_at); d.setHours(14, 5, 0, 0); sessions.unshift({...sessions[0], id: 999, goal: "Thesis intro", started_at: d.toISOString(), duration_seconds: 2700, focus_seconds: 1900, distracted_seconds: 300, nudges: 1}); }
+      if (q.get("back")) { const t = new Date(); t.setHours(0,0,0,0); t.setDate(t.getDate() - Number(q.get("back")) + 1); for (let i = sessions.length - 1; i >= 0; i--) if (new Date(sessions[i].started_at) >= t) sessions.splice(i, 1); }
+      if (q.get("nottoday") === "1") { const t = new Date(); t.setHours(0,0,0,0); for (let i = sessions.length - 1; i >= 0; i--) if (new Date(sessions[i].started_at) >= t) sessions.splice(i, 1); }
       const report = s => ({ id:s.id, goal:s.goal, strictness:"normal", started_at:s.started_at, ended_at:null, ended_reason:"completed", planned_seconds:s.duration_seconds, duration_seconds:s.duration_seconds, focus_percent:72, focused_seconds:s.focus_seconds, unrated_seconds:0, distracted_seconds:s.distracted_seconds, idle_seconds:s.idle_seconds, away_seconds:0, phone_seconds:0, drift_count:3, nudge_count:2, longest_stretch_seconds:1140, median_stretch_seconds:540,
-        spans:[{started_offset_seconds:0,seconds:600,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"},{started_offset_seconds:600,seconds:180,app:"chrome",kind:"website",activity_key:"youtube.com",label:"YouTube",state:"distracted"},{started_offset_seconds:780,seconds:900,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"},{started_offset_seconds:1680,seconds:120,app:"chrome",kind:"website",activity_key:"docs.google.com",label:"Google Docs",state:"neutral"},{started_offset_seconds:1800,seconds:s.duration_seconds-1800,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"}],
+        spans: big ? [{started_offset_seconds:0,seconds:s.duration_seconds,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"}] : [{started_offset_seconds:0,seconds:600,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"},{started_offset_seconds:600,seconds:180,app:"chrome",kind:"website",activity_key:"youtube.com",label:"YouTube",state:"distracted"},{started_offset_seconds:780,seconds:900,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"},{started_offset_seconds:1680,seconds:120,app:"chrome",kind:"website",activity_key:"docs.google.com",label:"Google Docs",state:"neutral"},{started_offset_seconds:1800,seconds:s.duration_seconds-1800,app:"Code",kind:"app",activity_key:"code",label:"VS Code",state:"focused"}],
         apps:[{group:"Focus",kind:"app",key:"code",label:"VS Code",seconds:s.focus_seconds,ratable:true,rating:"focused"},{group:"Distracting",kind:"website",key:"youtube.com",label:"YouTube",seconds:s.distracted_seconds,ratable:true,rating:"distracting"},{group:"Neutral",kind:"website",key:"docs.google.com",label:"Google Docs",seconds:s.neutral_seconds,ratable:true,rating:"neutral"}],
         events:[{at_offset_seconds:660,kind:"nudge",detail:null},{at_offset_seconds:720,kind:"nudge",detail:null}] });
       const settings = {default_strictness:"normal", voice_profile:"starter-female", status_window_enabled:true, status_window_on_top:true, webcam_gpu:false, webcam_enabled:false, webcam_camera:0};
@@ -58,7 +63,7 @@
         get_history_week: a => { const ws = a.weekStart; return {week_start:ws, sessions: hist.filter(s=>{const d=new Date(s.started_at); const m=new Date(d); m.setHours(0,0,0,0); m.setDate(m.getDate()-((m.getDay()+6)%7)); return key(m)===ws;}), oldest_day: hist.length? hist[hist.length-1].started_at.slice(0,10):null}; },
         get_session_report: a => report(hist.find(s=>s.id===a.id) || hist[0]),
         get_week_recap: a => weekRecap(a.start),
-        get_voice_backend_status: () => { throw "mock: voice offline"; },
+        get_voice_backend_status: () => { if (q.get("done") !== "1") throw "mock: voice offline"; return {model:{id:"m",display_name:"Chatterbox",repo:"",revision:"",install_dir:"",installed:true,installed_bytes:1,required_bytes:1,recommended_free_bytes:1,files:[]},runtime:{target:"win",install_dir:"",installed:true,executable_path:null,version:"1",worker_api:1,source:"release",required_bytes:1,installed_bytes:1},system:{os:"windows",arch:"x64",cpu_threads:8,total_ram_bytes:16e9,available_ram_bytes:8e9,min_required_ram_bytes:1,min_free_ram_bytes:1,last_peak_ram_bytes:null,has_enough_ram:true,available_disk_bytes:1e11,recommended_free_disk_bytes:1,has_enough_disk:true},profiles:[{profile_id:"mum",display_name:"Mum",profile_dir:"",reference_path:"c:/x.wav",reference_retained:true,clip_count:0,clips:[]}]}; },
         get_voice_model_download: () => { throw "mock"; },
         "plugin:event|listen": () => 1,
         "plugin:event|unlisten": () => null,

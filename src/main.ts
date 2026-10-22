@@ -920,6 +920,11 @@ function closeTopLayer(): void {
     render();
     return;
   }
+  if (onboardingOpen) {
+    onboardingOpen = false;
+    render();
+    return;
+  }
   if (preflightOpen) {
     preflightOpen = false;
     ruleEditor = null;
@@ -1025,11 +1030,11 @@ function viewKey(): string {
     voiceError,
     history.length,
     // The Getting started card ticks itself off from rules, voice and settings.
-    onboardingSteps().map((step) => (step.done ? "1" : "0")).join("") + (localStorage.getItem(ONBOARDING_KEY) ?? ""),
+    onboardingSteps().map((step) => (step.done ? "1" : "0")).join("") + (onboardingOpen ? "o" : ""),
     historyWeekStart,
     historyWeek?.sessions.length ?? "",
     sessionReport?.id ?? "",
-    lastReportId ?? "",
+    dayCardKey,
     trends.daily_focus.length,
   ].join("\u001f");
 }
@@ -1167,12 +1172,14 @@ function render(): void {
   bindEvents();
   fitVoiceCardNames();
   fitQuote();
+  fitShareStats();
   if (document.fonts.status !== "loaded") {
     void document.fonts.ready.then(() => {
       if (document.querySelector(".voice-card")) {
         fitVoiceCardNames();
         fitQuote();
       }
+      fitShareStats();
     });
   }
   restoreUiState(ui);
@@ -1185,10 +1192,9 @@ function render(): void {
 
 function renderSession(current: CurrentSession | null): string {
   if (!current) {
-    void ensureLastReport();
+    void ensureDayCard();
     const note = dailyNote();
     const streak = streakInfo();
-    const todaySeconds = dayFocusMap().get(dayKey(new Date())) ?? 0;
     return `
       <section class="home-ready">
         <div class="home-grid">
@@ -1198,30 +1204,22 @@ function renderSession(current: CurrentSession | null): string {
               <strong>${streak.days}</strong>
               <span>day streak</span>
             </div>
+            <p class="streak-rule">25 min a day keeps it. Weekends don't count or break it.</p>
             ${renderCalendar(streak)}
-            <div class="today-line">
-              <span class="eyebrow">Today</span>
-              <div class="today-track" role="img" aria-label="${attr(`${Math.round(todaySeconds / 60)} of ${STREAK_DAY_SECONDS / 60} minutes today`)}">
-                <span style="width: ${Math.min(100, (todaySeconds / STREAK_DAY_SECONDS) * 100).toFixed(1)}%"></span>
-              </div>
-              <span class="today-value">${escapeHtml(formatMinutes(todaySeconds))}</span>
-            </div>
           </article>
           <div class="home-side">
-            ${
-              onboardingVisible()
-                ? renderGettingStarted()
-                : `<article class="panel quote-card">
-                    <p class="eyebrow">Daily note · ${escapeHtml(note.date)}</p>
-                    <blockquote>“${escapeHtml(note.text)}”</blockquote>
-                    <p class="quote-by">— ${escapeHtml(note.by)}</p>
-                  </article>`
-            }
-            ${renderLastSessionCard(streak.days)}
+            ${onboardingVisible() ? renderOnboardingLine() : ""}
+            <article class="panel quote-card">
+              <p class="eyebrow">Daily note · ${escapeHtml(note.date)}</p>
+              <blockquote>“${escapeHtml(note.text)}”</blockquote>
+              <p class="quote-by">— ${escapeHtml(note.by)}</p>
+            </article>
+            ${renderDayCard(streak.days)}
           </div>
         </div>
         ${renderStartAction()}
       </section>
+      ${onboardingOpen && onboardingVisible() ? renderOnboardingModal() : ""}
       ${preflightOpen ? renderPreflightModal() : ""}
     `;
   }
@@ -1522,7 +1520,8 @@ function renderOverlayProgress(current: CurrentSession): string {
   `;
 }
 
-const ONBOARDING_KEY = "supervisor-onboarding";
+/** The Getting started steps, open as a popup over Home. */
+let onboardingOpen = false;
 
 /** What a new user has to set up, each read from real state so it ticks itself off. */
 function onboardingSteps() {
@@ -1561,48 +1560,54 @@ function onboardingSteps() {
   ];
 }
 
-/** Shown until the required steps are done. "Hide" only folds it to one line, so it is never lost. */
+/** Shown until the required steps are done. The line stays on Home; the steps open as a popup. */
 function onboardingVisible(): boolean {
   return onboardingSteps().some((step) => !step.done && !step.optional);
 }
 
-function renderGettingStarted(): string {
+function renderOnboardingLine(): string {
   const required = onboardingSteps().filter((step) => !step.optional);
   const done = required.filter((step) => step.done).length;
-  if (localStorage.getItem(ONBOARDING_KEY) === "collapsed") {
-    return `
-      <article class="panel onboard-card is-collapsed">
-        <div class="onboard-head">
-          <p class="eyebrow">Getting started · ${done} of ${required.length} done</p>
-          <button class="small-button" type="button" data-action="onboard-show">Show</button>
-        </div>
-      </article>
-    `;
-  }
   return `
     <article class="panel onboard-card">
       <div class="onboard-head">
-        <p class="eyebrow">Getting started</p>
-        <button class="small-button" type="button" data-action="onboard-hide">Hide</button>
+        <p class="eyebrow">Getting started · ${done} of ${required.length} done</p>
+        <button class="small-button" type="button" data-action="onboard-show">Show</button>
       </div>
-      <p class="onboard-intro">Supervisor watches what's in front of you and nudges you back. Nothing leaves this computer.</p>
-      <ol class="onboard-steps">
-        ${onboardingSteps()
-          .map(
-            (step) => `
-              <li class="onboard-step ${step.done ? "is-done" : ""}">
-                <i class="onboard-dot" aria-hidden="true"></i>
-                <div>
-                  <strong>${escapeHtml(step.title)}${step.optional ? ` <span class="onboard-optional">optional</span>` : ""}</strong>
-                  <span>${escapeHtml(step.copy)}</span>
-                </div>
-                ${step.done ? `<span class="onboard-done">Done</span>` : `<button class="small-button" type="button" data-action="onboard-${step.id}">${escapeHtml(step.label)}</button>`}
-              </li>
-            `,
-          )
-          .join("")}
-      </ol>
     </article>
+  `;
+}
+
+function renderOnboardingModal(): string {
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel onboard-panel" role="dialog" aria-modal="true" aria-labelledby="onboard-title">
+        <div class="modal-head onboard-head">
+          <div>
+            <p class="eyebrow">Getting started</p>
+            <h2 id="onboard-title">Set up Supervisor</h2>
+          </div>
+          <button class="small-button" type="button" data-action="onboard-hide">Close</button>
+        </div>
+        <p class="onboard-intro">Supervisor watches what's in front of you and nudges you back. Nothing leaves this computer.</p>
+        <ol class="onboard-steps">
+          ${onboardingSteps()
+            .map(
+              (step) => `
+                <li class="onboard-step ${step.done ? "is-done" : ""}">
+                  <i class="onboard-dot" aria-hidden="true"></i>
+                  <div>
+                    <strong>${escapeHtml(step.title)}${step.optional ? ` <span class="onboard-optional">optional</span>` : ""}</strong>
+                    <span>${escapeHtml(step.copy)}</span>
+                  </div>
+                  ${step.done ? `<span class="onboard-done">Done</span>` : `<button class="small-button" type="button" data-action="onboard-${step.id}">${escapeHtml(step.label)}</button>`}
+                </li>
+              `,
+            )
+            .join("")}
+        </ol>
+      </section>
+    </div>
   `;
 }
 
@@ -1986,6 +1991,20 @@ function renderVoiceSettings(): string {
 }
 
 /** The biggest quote that still fits its card: short quotes grow, long ones shrink. */
+/** A stat value never wraps or clips: it steps down (to a floor) until it fits its tile. */
+window.addEventListener("resize", () => requestAnimationFrame(fitShareStats));
+
+function fitShareStats(): void {
+  document.querySelectorAll<HTMLElement>(".share-stats strong").forEach((value) => {
+    let size = 1.1;
+    value.style.fontSize = `${size}rem`;
+    while (size > 0.72 && value.scrollWidth > value.clientWidth) {
+      size -= 0.04;
+      value.style.fontSize = `${size.toFixed(2)}rem`;
+    }
+  });
+}
+
 function fitQuote(): void {
   const card = document.querySelector<HTMLElement>(".quote-card");
   const quote = card?.querySelector<HTMLElement>("blockquote");
@@ -4016,17 +4035,18 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "onboard-hide" || action === "onboard-show") {
-    localStorage.setItem(ONBOARDING_KEY, action === "onboard-hide" ? "collapsed" : "open");
+    onboardingOpen = action === "onboard-show";
     render();
     return;
   }
 
   if (action === "copy-card") {
-    await copyCard(streakInfo().days);
+    await copyCard();
     return;
   }
 
   if (action === "onboard-rules") {
+    onboardingOpen = false;
     activeTab = "settings";
     settingsView = "home";
     render();
@@ -4035,12 +4055,14 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "onboard-voice" || action === "onboard-webcam") {
+    onboardingOpen = false;
     activeTab = "settings";
     await runAction(action === "onboard-voice" ? "open-voice-settings" : "open-webcam-settings");
     return;
   }
 
   if (action === "onboard-session") {
+    onboardingOpen = false;
     draft.duration_minutes = 15;
     await runAction("open-preflight");
     // A first session should show the rules it runs on.
@@ -6855,11 +6877,11 @@ function isWeekend(date: Date): boolean {
  * The current streak: consecutive counted days ending today or yesterday. Weekends never
  * break it; a weekend inside the run is a bridge. `chain` is every day drawn as part of it.
  */
-function streakInfo(): { days: number; chain: Set<string> } {
+function streakInfo(asOf = dayKey(new Date())): { days: number; chain: Set<string> } {
   const focus = dayFocusMap();
   const run: { key: string; counted: boolean }[] = [];
-  const cursor = new Date();
-  cursor.setHours(0, 0, 0, 0);
+  const todayKey = dayKey(new Date());
+  const cursor = parseDayKey(asOf);
   for (let step = 0; step < 400; step += 1) {
     const key = dayKey(cursor);
     const counted = (focus.get(key) ?? 0) >= STREAK_DAY_SECONDS;
@@ -6867,7 +6889,8 @@ function streakInfo(): { days: number; chain: Set<string> } {
       run.push({ key, counted: true });
     } else if (isWeekend(cursor)) {
       run.push({ key, counted: false });
-    } else if (step > 0) {
+    } else if (!(step === 0 && key === todayKey)) {
+      // A past weekday with no counted time broke the streak; today still has time to count.
       break;
     }
     cursor.setDate(cursor.getDate() - 1);
@@ -6904,9 +6927,7 @@ function renderCalendar(streak: { chain: Set<string> }): string {
     if (date.getMonth() !== today.getMonth()) classes.push("is-out");
     if (date > today) classes.push("is-future");
     else if (key === dayKey(today)) classes.push("is-today");
-    else if (seconds >= 90 * 60) classes.push("l3");
-    else if (seconds >= 45 * 60) classes.push("l2");
-    else if (seconds >= STREAK_DAY_SECONDS) classes.push("l1");
+    else if (seconds >= STREAK_DAY_SECONDS) classes.push("is-on");
     if (streak.chain.has(key)) {
       classes.push("in-chain");
       if (seconds < STREAK_DAY_SECONDS && key !== dayKey(today)) classes.push("is-bridge");
@@ -6927,105 +6948,268 @@ function renderCalendar(streak: { chain: Set<string> }): string {
   `;
 }
 
-/** The newest session's report, for the card on Home. Loaded once per session id. */
-let lastReport: SessionReport | null = null;
-let lastReportId: number | null = null;
+/**
+ * The day the Home card shows: today once it has a session, else the latest day with one. The
+ * card never goes blank in the morning; it flips to Today with the first session.
+ */
+let dayCard: { day: string; reports: SessionReport[] } | null = null;
+/** Day plus the session ids in it; a new session on that day refetches. */
+let dayCardKey = "";
 
-async function ensureLastReport(): Promise<void> {
-  const newest = history[0]?.id ?? null;
-  if (newest === lastReportId) {
+async function ensureDayCard(): Promise<void> {
+  const newest = history[0];
+  if (!newest) {
+    dayCard = null;
+    dayCardKey = "";
     return;
   }
-  lastReportId = newest;
-  lastReport = null;
-  if (newest === null) {
+  const day = dayKey(new Date(newest.started_at));
+  const items = history.filter((item) => dayKey(new Date(item.started_at)) === day);
+  const key = `${day}:${items.map((item) => item.id).join(",")}`;
+  if (key === dayCardKey) {
     return;
   }
+  dayCardKey = key;
+  dayCard = null;
   try {
-    const report = await invoke<SessionReport>("get_session_report", { id: newest });
-    if (lastReportId === newest) {
-      lastReport = report;
+    const reports = await Promise.all(items.map((item) => invoke<SessionReport>("get_session_report", { id: item.id })));
+    if (dayCardKey === key) {
+      reports.sort((a, b) => a.started_at.localeCompare(b.started_at));
+      dayCard = { day, reports };
       render();
     }
   } catch {
-    // The card just stays off until the next snapshot.
+    // The card stays off until the next snapshot.
   }
 }
 
-const STRIP_COLORS: Record<string, string> = {
-  focused: "#a8eb37",
-  suspicious: "#ffcf31",
-  distracted: "#ff684f",
-  phone: "#ff684f",
-  neutral: "#fff7df",
-  unrated: "#fff7df",
-  idle: "#cfc6b0",
-  unknown: "#cfc6b0",
-  paused: "#cfc6b0",
-};
-
-function cardDate(report: SessionReport): string {
-  return new Date(report.started_at).toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+/** Mirrors the backend: on-task time runs together until a drift, an absence or a gap breaks it. */
+function focusedStretches(spans: ReportSpan[]): number[] {
+  const stretches: number[] = [];
+  let current = 0;
+  let previousEnd = 0;
+  for (const span of spans) {
+    if (span.started_offset_seconds > previousEnd && current > 0) {
+      stretches.push(current);
+      current = 0;
+    }
+    previousEnd = span.started_offset_seconds + span.seconds;
+    if (stripOnTask(span.state)) {
+      current += span.seconds;
+    } else if (current > 0) {
+      stretches.push(current);
+      current = 0;
+    }
+  }
+  if (current > 0) {
+    stretches.push(current);
+  }
+  return stretches;
 }
 
-function renderLastSessionCard(streakDays: number): string {
-  const report = lastReport;
-  if (!report) {
-    return "";
+function medianOf(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
   }
-  const duration = timelineSeconds(report);
-  const strip = report.spans
-    .map(
-      (span) =>
-        `<i style="left: ${((span.started_offset_seconds / duration) * 100).toFixed(2)}%; width: ${((span.seconds / duration) * 100).toFixed(2)}%; background: ${STRIP_COLORS[span.state] ?? STRIP_COLORS.idle}"></i>`,
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? Math.floor((sorted[mid - 1] + sorted[mid]) / 2) : sorted[mid];
+}
+
+/** The strip has two colours: on task (focused and neutral) and off task. Time away is left blank. */
+function stripOnTask(state: string): boolean {
+  return state === "focused" || state === "neutral" || state === "unrated";
+}
+
+function stripOffTask(state: string): boolean {
+  return state === "distracted" || state === "phone" || state === "suspicious";
+}
+
+interface DaySummary {
+  day: string;
+  isToday: boolean;
+  focusedSeconds: number;
+  attentionSeconds: number;
+  /** Sessions laid end to end: each segment's share of the strip and its spans and nudges. */
+  segments: { start: number; width: number; report: SessionReport; duration: number }[];
+}
+
+function summarizeDay(card: { day: string; reports: SessionReport[] }): DaySummary {
+  const durations = card.reports.map((report) => timelineSeconds(report));
+  const total = Math.max(1, durations.reduce((sum, seconds) => sum + seconds, 0));
+  let start = 0;
+  const segments = card.reports.map((report, index) => {
+    const segment = { start, width: durations[index] / total, report, duration: durations[index] };
+    start += segment.width;
+    return segment;
+  });
+  return {
+    day: card.day,
+    isToday: card.day === dayKey(new Date()),
+    focusedSeconds: card.reports.reduce((sum, report) => sum + report.focused_seconds, 0),
+    attentionSeconds: medianOf(card.reports.flatMap((report) => focusedStretches(report.spans))),
+    segments,
+  };
+}
+
+/** "Today", "Yesterday", else the weekday. The date itself is said once, in the corner. */
+function dayTitle(day: string): string {
+  const today = dayKey(new Date());
+  if (day === today) {
+    return "Today";
+  }
+  if (day === addDaysKey(today, -1)) {
+    return "Yesterday";
+  }
+  return parseDayKey(day).toLocaleDateString(undefined, { weekday: "long" });
+}
+
+/** The full date with the year, on the app card and the PNG alike. */
+function cardDate(day: string): string {
+  return parseDayKey(day).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** While today is short of the streak threshold, the card says how far there is to go. */
+function cardNote(summary: DaySummary): string {
+  if (summary.isToday && summary.focusedSeconds < STREAK_DAY_SECONDS) {
+    return `${Math.round(summary.focusedSeconds / 60)} / ${STREAK_DAY_SECONDS / 60} min to keep the streak`;
+  }
+  return cardDate(summary.day);
+}
+
+function streakLabel(days: number): string {
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function renderDayCard(todayStreakDays: number): string {
+  if (!dayCard) {
+    if (history.length > 0) {
+      return "";
+    }
+    // Nothing recorded yet: the card's outline, so the first session has a visible place to land.
+    return `
+      <section class="panel last-session-card">
+        <p class="eyebrow">Your day</p>
+        <div class="share-card is-empty" aria-label="No sessions yet">
+          <span class="share-head">
+            <strong>Your first card</strong>
+            <span>Today</span>
+          </span>
+          <span class="share-strip" aria-hidden="true"></span>
+          <span class="share-stats">
+            <span><small>Focused</small><strong>—</strong></span>
+            <span><small>Attention span</small><strong>—</strong></span>
+            <span><small>Streak</small><strong>${streakLabel(todayStreakDays)}</strong></span>
+          </span>
+        </div>
+        <p class="share-hint">Finish a session and its card lands here</p>
+      </section>
+    `;
+  }
+  const summary = summarizeDay(dayCard);
+  const streakText = streakLabel(streakInfo(summary.day).days);
+  const strip = summary.segments
+    .flatMap((segment) =>
+      segment.report.spans
+        .filter((span) => stripOnTask(span.state) || stripOffTask(span.state))
+        .map((span) => {
+          const left = (segment.start + (span.started_offset_seconds / segment.duration) * segment.width) * 100;
+          const width = ((span.seconds / segment.duration) * segment.width) * 100;
+          return `<i class="${stripOnTask(span.state) ? "strip-on" : "strip-off"}" style="left: ${left.toFixed(2)}%; width: ${width.toFixed(2)}%"></i>`;
+        }),
     )
     .join("");
-  const ticks = report.events
-    .filter((event) => event.kind === "nudge")
-    .map((event) => `<b style="left: ${Math.min(100, (event.at_offset_seconds / duration) * 100).toFixed(2)}%"></b>`)
+  const ticks = summary.segments
+    .flatMap((segment) =>
+      segment.report.events
+        .filter((event) => event.kind === "nudge")
+        .map((event) => {
+          const left = (segment.start + Math.min(1, event.at_offset_seconds / segment.duration) * segment.width) * 100;
+          return `<b style="left: ${left.toFixed(2)}%"></b>`;
+        }),
+    )
     .join("");
   return `
     <section class="panel last-session-card">
-      <p class="eyebrow">Last session</p>
+      <p class="eyebrow">Your day</p>
       <button class="share-card" type="button" data-action="copy-card" title="Copy the card as an image">
         <span class="share-head">
-          <strong>${escapeHtml(report.goal)}</strong>
-          <span>${escapeHtml(cardDate(report))}</span>
+          <strong>${escapeHtml(dayTitle(summary.day))}</strong>
+          <span>${escapeHtml(cardNote(summary))}</span>
         </span>
-        <span class="share-strip" aria-hidden="true">${ticks}${strip}</span>
+        <span class="share-strip" aria-hidden="true">${ticks}<span class="share-strip-fill">${strip}</span></span>
         <span class="share-stats">
-          <span><small>Focused</small><strong>${escapeHtml(formatHours(report.focused_seconds))}</strong></span>
-          <span><small>Best stretch</small><strong>${escapeHtml(formatMinutes(report.longest_stretch_seconds))}</strong></span>
-          <span><small>Streak</small><strong>${streakDays} day${streakDays === 1 ? "" : "s"}</strong></span>
+          <span><small>Focused</small><strong>${escapeHtml(formatHours(summary.focusedSeconds))}</strong></span>
+          <span><small>Attention span</small><strong>${escapeHtml(formatMinutes(summary.attentionSeconds))}</strong></span>
+          <span><small>Streak</small><strong>${streakText}</strong></span>
         </span>
       </button>
+      <p class="share-hint">Click the card to copy it and share it</p>
     </section>
   `;
 }
 
-/** Draws the card to a canvas and puts the PNG on the clipboard. Always light, whatever the theme. */
-async function copyCard(streakDays: number): Promise<void> {
-  const report = lastReport;
-  if (!report) {
+/** The card's colours in the current theme (the same tokens as styles.css). */
+function cardPalette() {
+  return theme === "dark"
+    ? { canvas: "#40403c", panel: "#353530", grid: "rgba(255,255,255,0.12)", ink: "#fff8e9", muted: "#ddd5c5", border: "#151512", track: "#4c4b46", shadow: "#0b0b09" }
+    : { canvas: "#f4ead7", panel: "#fff4cf", grid: "rgba(16,16,16,0.08)", ink: "#101010", muted: "#5d564a", border: "#101010", track: "#fff7df", shadow: "rgba(17,16,14,0.68)" };
+}
+
+/** Sets the largest font (down to `min`) at which `text` fits in `maxWidth`; returns the size used. */
+function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, weight: number, family: string, max: number, min: number, maxWidth: number): number {
+  let size = max;
+  ctx.font = `${weight} ${size}px ${family}`;
+  while (size > min && ctx.measureText(text).width > maxWidth) {
+    size -= 1;
+    ctx.font = `${weight} ${size}px ${family}`;
+  }
+  return size;
+}
+
+const STRIP_GREEN = "#a8eb37";
+const STRIP_RED = "#ff684f";
+
+/** Draws the card to a canvas and puts the PNG on the clipboard, in the current theme's colours. */
+async function copyCard(): Promise<void> {
+  if (!dayCard) {
     return;
   }
+  const summary = summarizeDay(dayCard);
+  const streakDays = streakInfo(summary.day).days;
   const scale = 2;
   const width = 640;
-  const height = 360;
+  const height = 316;
+  // Room around the card for its hard shadow; the rest of the PNG is transparent.
+  const pad = 14;
+  const shadow = 8;
+  const radius = 12;
   const canvas = document.createElement("canvas");
-  canvas.width = width * scale;
-  canvas.height = height * scale;
+  canvas.width = (width + pad * 2) * scale;
+  canvas.height = (height + pad * 2) * scale;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return;
   }
   ctx.scale(scale, scale);
-  const ink = "#101010";
+  ctx.translate(pad, pad);
+  const palette = cardPalette();
+  const ink = palette.ink;
   const mono = "ui-monospace, Menlo, Consolas, monospace";
   const sans = "Inter, system-ui, sans-serif";
-  ctx.fillStyle = "#f4ead7";
+
+  ctx.fillStyle = palette.shadow;
+  ctx.beginPath();
+  ctx.roundRect(shadow, shadow, width, height, radius);
+  ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(0, 0, width, height, radius);
+  ctx.clip();
+  ctx.fillStyle = palette.canvas;
   ctx.fillRect(0, 0, width, height);
-  ctx.strokeStyle = "rgba(16,16,16,0.08)";
+  ctx.strokeStyle = palette.grid;
   ctx.lineWidth = 1;
   for (let x = 0; x < width; x += 14) {
     ctx.beginPath();
@@ -7039,67 +7223,96 @@ async function copyCard(streakDays: number): Promise<void> {
     ctx.lineTo(width, y + 0.5);
     ctx.stroke();
   }
-  ctx.strokeStyle = ink;
+  // Half the stroke falls outside the clip, so 3px of border shows.
+  ctx.strokeStyle = palette.border;
   ctx.lineWidth = 6;
-  ctx.strokeRect(3, 3, width - 6, height - 6);
+  ctx.beginPath();
+  ctx.roundRect(0, 0, width, height, radius);
+  ctx.stroke();
+  ctx.restore();
 
-  ctx.fillStyle = "#5d564a";
-  ctx.font = `600 12px ${mono}`;
+  ctx.fillStyle = palette.muted;
+  ctx.font = `600 14px ${mono}`;
   ctx.textBaseline = "top";
-  ctx.fillText("SUPERVISOR", 36, 34);
+  ctx.fillText("SUPERVISOR", 36, 32);
   ctx.textAlign = "right";
-  ctx.fillText(cardDate(report).toUpperCase(), width - 36, 34);
+  ctx.fillText(cardDate(summary.day).toUpperCase(), width - 36, 32);
   ctx.textAlign = "left";
 
   ctx.fillStyle = ink;
-  ctx.font = `700 30px ${sans}`;
-  let goal = report.goal;
-  while (goal.length > 3 && ctx.measureText(goal).width > width - 72) {
-    goal = `${goal.slice(0, -2).trimEnd()}…`;
-  }
-  ctx.fillText(goal, 36, 62);
+  fitCanvasText(ctx, dayTitle(summary.day), 700, sans, 30, 20, width - 72 - 170);
+  ctx.fillText(dayTitle(summary.day), 36, 62);
 
-  const duration = timelineSeconds(report);
   const stripX = 36;
-  const stripY = 130;
+  const stripY = 112;
   const stripW = width - 72;
   const stripH = 44;
-  for (const span of report.spans) {
-    ctx.fillStyle = STRIP_COLORS[span.state] ?? STRIP_COLORS.idle;
-    const x = stripX + (span.started_offset_seconds / duration) * stripW;
-    const w = Math.max(2, (span.seconds / duration) * stripW);
-    ctx.fillRect(x, stripY, w, stripH);
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(stripX, stripY, stripW, stripH, 6);
+  ctx.clip();
+  ctx.fillStyle = palette.track;
+  ctx.fillRect(stripX, stripY, stripW, stripH);
+  for (const segment of summary.segments) {
+    for (const span of segment.report.spans) {
+      if (!stripOnTask(span.state) && !stripOffTask(span.state)) continue;
+      ctx.fillStyle = stripOnTask(span.state) ? STRIP_GREEN : STRIP_RED;
+      const x = stripX + (segment.start + (span.started_offset_seconds / segment.duration) * segment.width) * stripW;
+      const w = Math.max(2, (span.seconds / segment.duration) * segment.width * stripW);
+      ctx.fillRect(x, stripY, w, stripH);
+    }
   }
-  ctx.strokeStyle = ink;
+  ctx.restore();
+  ctx.strokeStyle = palette.border;
   ctx.lineWidth = 3;
-  ctx.strokeRect(stripX, stripY, stripW, stripH);
+  ctx.beginPath();
+  ctx.roundRect(stripX, stripY, stripW, stripH, 6);
+  ctx.stroke();
   ctx.fillStyle = ink;
-  for (const event of report.events) {
-    if (event.kind !== "nudge") continue;
-    const x = stripX + Math.min(1, event.at_offset_seconds / duration) * stripW;
-    ctx.beginPath();
-    ctx.moveTo(x - 6, stripY - 12);
-    ctx.lineTo(x + 6, stripY - 12);
-    ctx.lineTo(x, stripY - 3);
-    ctx.closePath();
-    ctx.fill();
+  for (const segment of summary.segments) {
+    for (const event of segment.report.events) {
+      if (event.kind !== "nudge") continue;
+      const x = stripX + (segment.start + Math.min(1, event.at_offset_seconds / segment.duration) * segment.width) * stripW;
+      ctx.beginPath();
+      ctx.moveTo(x - 6, stripY - 12);
+      ctx.lineTo(x + 6, stripY - 12);
+      ctx.lineTo(x, stripY - 3);
+      ctx.closePath();
+      ctx.fill();
+    }
   }
 
   const stats: [string, string][] = [
-    ["FOCUSED", formatHours(report.focused_seconds)],
-    ["BEST STRETCH", formatMinutes(report.longest_stretch_seconds)],
-    ["STREAK", `${streakDays} day${streakDays === 1 ? "" : "s"}`],
+    ["FOCUSED", formatHours(summary.focusedSeconds)],
+    ["ATTENTION SPAN", formatMinutes(summary.attentionSeconds)],
+    ["STREAK", streakLabel(streakDays)],
   ];
+  // Three tiles in the app's card language: border, hard shadow, slightly rounded.
+  const tileGap = 12;
+  const tileW = (width - 72 - tileGap * 2) / 3;
+  const tileY = 186;
+  const tileH = 94;
   stats.forEach(([label, value], index) => {
-    const x = 36 + index * ((width - 72) / 3);
+    const x = 36 + index * (tileW + tileGap);
+    ctx.fillStyle = palette.shadow;
+    ctx.beginPath();
+    ctx.roundRect(x + 4, tileY + 4, tileW, tileH, 6);
+    ctx.fill();
+    ctx.fillStyle = palette.panel;
+    ctx.beginPath();
+    ctx.roundRect(x, tileY, tileW, tileH, 6);
+    ctx.fill();
+    ctx.strokeStyle = palette.border;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    const inner = tileW - 32;
+    ctx.fillStyle = palette.muted;
+    fitCanvasText(ctx, label, 600, mono, 11, 8, inner);
+    ctx.fillText(label, x + 16, tileY + 16);
     ctx.fillStyle = ink;
-    ctx.fillRect(x, 222, 3, 70);
-    ctx.fillStyle = "#5d564a";
-    ctx.font = `600 11px ${mono}`;
-    ctx.fillText(label, x + 14, 226);
-    ctx.fillStyle = ink;
-    ctx.font = `800 36px ${sans}`;
-    ctx.fillText(value, x + 14, 246);
+    const valueSize = fitCanvasText(ctx, value, 800, sans, 34, 18, inner);
+    // Smaller values sit on the same baseline as full-size ones.
+    ctx.fillText(value, x + 16, tileY + 40 + (34 - valueSize));
   });
 
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
