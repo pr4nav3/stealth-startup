@@ -2270,7 +2270,42 @@ audio {
 }
 
 .ram-lock.is-locked {
+  grid-auto-flow: column;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
   background: #ff684f;
+  color: var(--sv-colored-ink);
+}
+
+.ram-lock.is-locked p {
+  margin: 0;
+  color: inherit;
+  font-size: var(--sv-type-4);
+}
+
+.ram-lock-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ram-lock-actions button {
+  min-height: 28px;
+  padding: 0 10px;
+  background: var(--panel);
+  font-size: 0.68rem;
+}
+
+.ram-lock-panel {
+  display: grid;
+  gap: 12px;
+  width: min(460px, calc(100vw - 32px));
+}
+
+.ram-lock-panel p {
+  margin: 0;
+  font-size: var(--sv-type-3);
 }
 
 /* Clear: one quiet line. Locked: the loud red panel with the numbers and a recheck. */
@@ -2287,19 +2322,6 @@ audio {
   margin: 0;
   color: var(--sv-muted);
   font-size: var(--sv-type-4);
-}
-
-.ram-lock-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ram-lock-head button {
-  margin-left: auto;
-  min-height: 28px;
-  padding: 0 10px;
-  font-size: 0.68rem;
 }
 
 .ram-lock-stamp,
@@ -2321,21 +2343,6 @@ audio {
   text-transform: uppercase;
 }
 
-.ram-lock-copy {
-  display: grid;
-  gap: 4px;
-  border: var(--border);
-  border-radius: var(--radius-control);
-  padding: 8px 10px;
-  background: var(--white-soft);
-  color: var(--ink);
-}
-
-.ram-lock-copy p {
-  margin: 0;
-  color: inherit;
-  font-size: calc(var(--sv-type-3) - 1px);
-}
 
 
 .create-voice-panel {

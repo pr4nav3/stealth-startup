@@ -632,6 +632,8 @@ let voiceDownload: VoiceDownloadSnapshot | null = null;
 let voiceBusy: VoiceBusy = null;
 let voiceDeleteTargetId: string | null = null;
 let voiceInfoId: string | null = null;
+/** The RAM lock's details, opened from its strip. */
+let ramLockOpen = false;
 let voicePreviewAudio: HTMLAudioElement | null = null;
 const waveformPeaks = new Map<string, number[]>();
 const waveformPending = new Map<string, Promise<AudioBuffer>>();
@@ -867,6 +869,11 @@ function closeTopLayer(): void {
   }
   if (historyConfirm) {
     historyConfirm = null;
+    render();
+    return;
+  }
+  if (ramLockOpen) {
+    ramLockOpen = false;
     render();
     return;
   }
@@ -2137,16 +2144,41 @@ function renderRamLock(): string {
   }
   return `
     <aside class="ram-lock is-locked" role="status" aria-live="polite">
-      <div class="ram-lock-head">
-        <div class="ram-lock-stamp">${locked ? "Voice clone locked" : "Clone clear"}</div>
-        <span class="ram-lock-machine">${escapeHtml(ramMachineLabel(system?.total_ram_bytes ?? null))}</span>
-        ${locked ? `<button type="button" data-action="check-ram">Check again</button>` : ""}
-      </div>
-      <div class="ram-lock-copy">
-        <p data-ram-copy>${escapeHtml(ramLockCopy(locked, free, need, peak))}</p>
-        <p>Once generated, saved clips don't need RAM.</p>
+      <span class="ram-lock-stamp">Voice clone locked</span>
+      <p>Not enough free RAM to generate clips right now.</p>
+      <div class="ram-lock-actions">
+        <button type="button" data-action="open-ram-lock">Details</button>
+        <button type="button" data-action="check-ram">Check again</button>
       </div>
     </aside>
+  `;
+}
+
+/** The lock's numbers and what to do about it, as a popup over the voice page. */
+function renderRamLockModal(): string {
+  const system = voiceBackend?.system;
+  const free = system?.available_ram_bytes ?? null;
+  const need = system?.min_free_ram_bytes ?? 0;
+  const peak = system?.last_peak_ram_bytes ?? null;
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel ram-lock-panel" role="dialog" aria-modal="true" aria-labelledby="ram-lock-title">
+        <div class="voice-info-head">
+          <div>
+            <p class="eyebrow">Voice clips</p>
+            <h2 id="ram-lock-title">Voice clone locked</h2>
+          </div>
+          <button class="small-button" type="button" data-action="close-ram-lock">Close</button>
+        </div>
+        <span class="ram-lock-machine">${escapeHtml(ramMachineLabel(system?.total_ram_bytes ?? null))}</span>
+        <p data-ram-copy>${escapeHtml(ramLockCopy(true, free, need, peak))}</p>
+        <p>Generating a clip loads the voice model into memory for a few seconds. Once a clip is saved it plays without the model, so nothing already generated is affected.</p>
+        <div class="modal-actions">
+          <button class="primary" type="button" data-action="check-ram">Check again</button>
+          <button type="button" data-action="close-ram-lock">Close</button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -2175,14 +2207,12 @@ function paintVoiceRam(): void {
   const system = voiceBackend.system;
   const free = system.available_ram_bytes ?? null;
   const need = system.min_free_ram_bytes ?? 0;
-  const copy = document.querySelector("[data-ram-copy]");
-  if (copy) {
+  document.querySelectorAll("[data-ram-copy]").forEach((copy) => {
     copy.textContent = ramLockCopy(locked, free, need, system.last_peak_ram_bytes ?? null);
-  }
-  const machine = document.querySelector(".ram-lock-machine");
-  if (machine) {
+  });
+  document.querySelectorAll(".ram-lock-machine").forEach((machine) => {
     machine.textContent = ramMachineLabel(system.total_ram_bytes ?? null);
-  }
+  });
 }
 
 function renderPhraseEditor(): string {
@@ -2279,6 +2309,7 @@ function renderVoiceDialogs(): string {
     ${showVoiceDialog && voiceInfoId && !voiceDeleteTargetId && !clipGenerate && !voiceBusy ? renderVoiceInfoModal() : ""}
     ${showVoiceDialog && voiceDeleteTargetId ? renderDeleteVoiceModal() : ""}
     ${showVoiceDialog && modelDeleteOpen ? renderDeleteModelModal() : ""}
+    ${showVoiceDialog && ramLockOpen && ramGenerationLocked() ? renderRamLockModal() : ""}
     ${showVoiceDialog && clipGenerate ? renderClipGenerateModal() : ""}
     ${voiceBusy && !clipGenerate ? renderVoiceBusyModal() : ""}
   `;
@@ -4204,6 +4235,16 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "check-ram") {
     await refreshVoiceStatus(true);
+    if (!ramGenerationLocked()) {
+      ramLockOpen = false;
+      render();
+    }
+    return;
+  }
+
+  if (action === "open-ram-lock" || action === "close-ram-lock") {
+    ramLockOpen = action === "open-ram-lock";
+    render();
     return;
   }
 
