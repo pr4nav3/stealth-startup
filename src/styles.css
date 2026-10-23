@@ -3430,8 +3430,7 @@ audio {
 /* Bars rise from the baseline once, left to right; `backwards` keeps them flat through the delay
    and leaves hover transforms alone once done. */
 .week-hero-bars.is-animated .recap-bar.is-on,
-.trend-door-chart.is-animated .door-bar {
-  transform-box: fill-box;
+.trend-spark.is-animated .trend-spark-bar {
   transform-origin: bottom;
   animation: bar-rise 600ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   animation-delay: calc(var(--i, 0) * 55ms);
@@ -3448,7 +3447,7 @@ audio {
 
 @media (prefers-reduced-motion: reduce) {
   .week-hero-bars.is-animated .recap-bar.is-on,
-  .trend-door-chart.is-animated .door-bar {
+  .trend-spark.is-animated .trend-spark-bar {
     animation: none;
   }
 }
@@ -3457,53 +3456,16 @@ audio {
   border-color: #141410;
 }
 
-button.panel.trend-door {
+.panel.trend-door {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  justify-content: flex-start;
   gap: 6px;
-  height: auto;
-  min-height: 0;
   padding: 16px 18px;
-  box-shadow: var(--shadow);
-  color: inherit;
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  letter-spacing: 0;
-  line-height: 1.45;
-  text-align: left;
-  text-transform: none;
-}
-
-/* The whole door is the button: it lifts on hover and carries a control-shaped "View trends". */
-button.panel.trend-door:hover,
-button.panel.trend-door:focus-visible {
-  transform: translate(-2px, -2px);
-  box-shadow: 6px 6px 0 var(--sv-shadow-color);
-}
-
-button.panel.trend-door:active {
-  transform: translate(2px, 2px);
-  box-shadow: var(--shadow-control);
-}
-
-.trend-door-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
 .trend-door .eyebrow {
   margin: 0;
-}
-
-.trend-door-chevron {
-  font-size: 1.3rem;
-  font-weight: 600;
-  line-height: 1;
-  color: var(--sv-muted);
 }
 
 .trend-door-chart-title {
@@ -3515,53 +3477,51 @@ button.panel.trend-door:active {
   text-transform: uppercase;
 }
 
-.trend-door-chart {
+/* Four weeks of bars, no axis; the viewed week is solid, the running week dashed. */
+.trend-spark {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: 8px;
+  min-height: 90px;
+  margin-top: 4px;
+}
+
+.trend-spark-track {
+  display: flex;
+  flex: 1;
+  align-items: flex-end;
+  min-width: 0;
+}
+
+.trend-spark-bar {
   display: block;
   width: 100%;
-  height: auto;
-  margin-top: 2px;
-  overflow: visible;
+  min-height: 4px;
+  border: 2px solid color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
 }
 
-.door-grid {
-  stroke: color-mix(in srgb, var(--sv-ink) 16%, transparent);
-  stroke-width: 1;
+.trend-spark-bar.is-empty {
+  height: 4px;
+  border-color: transparent;
+  background: color-mix(in srgb, var(--sv-ink) 14%, var(--sv-panel));
 }
 
-.door-grid.is-base {
-  stroke: var(--sv-ink);
-  stroke-width: 1.5;
+.trend-spark-bar.is-viewed {
+  border-color: var(--sv-ink);
+  background: var(--sv-ink);
 }
 
-.door-axis {
-  fill: var(--sv-muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.trend-spark-bar.is-running {
+  border-style: dashed;
+  border-color: var(--sv-muted);
+  background: transparent;
 }
 
-.door-bar {
-  fill: color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
-}
-
-.door-bar.is-empty {
-  fill: color-mix(in srgb, var(--sv-ink) 14%, var(--sv-panel));
-}
-
-.door-bar.is-viewed {
-  fill: var(--sv-ink);
-}
-
-.door-bar.is-running {
-  fill: none;
-  stroke: var(--sv-muted);
-  stroke-width: 2;
-  stroke-dasharray: 4 3;
-}
-
-.door-bar.is-running.is-viewed {
-  stroke: var(--sv-ink);
+.trend-spark-bar.is-running.is-viewed {
+  border-color: var(--sv-ink);
 }
 
 .trend-door-value {
@@ -3584,36 +3544,14 @@ button.panel.trend-door:active {
   text-transform: uppercase;
 }
 
-.trend-door-go {
-  display: inline-flex;
-  align-self: flex-start;
-  align-items: center;
-  margin-top: auto;
-  padding: 0 12px;
-  min-height: 32px;
-  border: var(--border);
-  border-radius: 6px;
-  background: var(--panel);
-  box-shadow: var(--shadow-control);
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-4);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.trend-door-go::after {
-  content: "›";
-  margin-left: 8px;
-  font-size: 1rem;
-  line-height: 1;
-}
-
-.trend-door-chart-title + .trend-door-chart + .trend-door-go,
-.trend-door-caption + .trend-door-go {
+button.trend-door-go {
+  width: 100%;
+  min-height: 40px;
   margin-top: 14px;
+  background: var(--panel);
 }
 
-button.panel.trend-door .trend-door-go {
+.trend-door-caption + button.trend-door-go {
   margin-top: auto;
   padding-top: 0;
 }

@@ -2778,67 +2778,36 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: b
   }
   const shown = weeks.slice(-DOOR_WEEKS);
   return `
-    <button type="button" class="panel trend-door" data-action="open-trends">
-      <span class="trend-door-head"><span class="eyebrow">Trends</span><span class="trend-door-chevron" aria-hidden="true">›</span></span>
+    <section class="panel trend-door" aria-label="Trends">
+      <p class="eyebrow">Trends</p>
       <strong class="trend-door-value">${escapeHtml(value)}</strong>
       <span class="trend-door-caption">${escapeHtml(caption)}</span>
       ${shown.length ? `<span class="trend-door-chart-title">Focused hours, last ${shown.length === 1 ? "week" : `${shown.length} weeks`}</span>${renderDoorChart(shown, weekStart, animate)}` : ""}
-      <span class="trend-door-go">View trends</span>
-    </button>
+      <button type="button" class="trend-door-go" data-action="open-trends">View trends ›</button>
+    </section>
   `;
 }
 
 /** Weeks on the door's chart; Trends itself keeps eight. */
 const DOOR_WEEKS = 4;
 
-/** A small bar chart of focused hours per week with a real axis, newest week at the right. */
+/** Plain bars, newest week at the right, no axis: the figure above says what they mean. */
 function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean): string {
-  const width = 220;
-  const height = 118;
-  const left = 34;
-  const right = 6;
-  const top = 10;
-  const bottom = 24;
-  const plotW = width - left - right;
-  const plotH = height - top - bottom;
-  const { max: axisMax, step } = niceAxis(Math.max(...shown.map((week) => week.focus_seconds / 3600), 0));
-  const yAt = (hours: number) => top + plotH - (hours / axisMax) * plotH;
+  const maxWeek = Math.max(...shown.map((week) => week.focus_seconds), 1);
   const pad = DOOR_WEEKS - shown.length;
-  const colW = plotW / DOOR_WEEKS;
-  const barW = Math.min(30, colW * 0.6);
-  const ticks = [0, step, step * 2, step * 3];
-  const grid = ticks
-    .map((tick) => {
-      const y = yAt(tick).toFixed(1);
-      const label = tick === 0 ? "0" : formatStretchChip(Math.round(tick * 3600));
-      return `
-        <line class="door-grid ${tick === 0 ? "is-base" : ""}" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" />
-        <text class="door-axis" x="${left - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${escapeHtml(label)}</text>
-      `;
-    })
-    .join("");
-  const bars = shown
-    .map((week, index) => {
-      const x = left + (pad + index + 0.5) * colW;
-      const hours = week.focus_seconds / 3600;
-      const running = week.week_start === thisMondayKey();
-      const classes = ["door-bar", week.week_start === weekStart ? "is-viewed" : "", running ? "is-running" : "", hours === 0 ? "is-empty" : ""].filter(Boolean).join(" ");
-      const barH = hours === 0 ? 3 : Math.max(3, yAt(0) - yAt(hours));
-      const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
-      return `
-        <g>
-          <title>${escapeHtml(`${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)} · ${sessions}${running ? " · so far" : ""}`)}</title>
-          <rect class="${classes}" style="--i: ${index}" x="${(x - barW / 2).toFixed(1)}" y="${(yAt(0) - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="3" />
-          <text class="door-axis" x="${x.toFixed(1)}" y="${height - 7}" text-anchor="middle">${escapeHtml(formatWeekStart(week.week_start))}</text>
-        </g>
-      `;
-    })
-    .join("");
+  const running = thisMondayKey();
   return `
-    <svg class="trend-door-chart ${animate ? "is-animated" : ""}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Focused hours per week, last ${shown.length} weeks">
-      ${grid}
-      ${bars}
-    </svg>
+    <div class="trend-spark ${animate ? "is-animated" : ""}" role="img" aria-label="Focused hours per week, last ${shown.length} weeks">
+      ${'<span class="trend-spark-track"><span class="trend-spark-bar is-empty"></span></span>'.repeat(pad)}
+      ${shown
+        .map((week, index) => {
+          const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", week.week_start === running ? "is-running" : ""].filter(Boolean).join(" ");
+          const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
+          const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)} · ${sessions}${week.week_start === running ? " · so far" : ""}`;
+          return `<span class="trend-spark-track" title="${attr(tip)}"><span class="${classes}" style="--i: ${index}; height: ${Math.max(6, Math.round((week.focus_seconds / maxWeek) * 100))}%"></span></span>`;
+        })
+        .join("")}
+    </div>
   `;
 }
 
