@@ -1864,11 +1864,11 @@ function renderRuleEditor(editor: RuleEditor): string {
         <span>Website or app</span>
         <input id="rule-value" name="value" maxlength="300" spellcheck="false" value="${attr(editor.value)}" placeholder="youtube.com or Spotify" />
       </label>
-      <p class="rule-entry-help">Paste a web address to match every page on that site, or enter an app name to match its windows. Check the match below before saving.</p>
       <label class="rule-name-field" ${site ? "" : "hidden"}>
         <span>Shown as</span>
         <input id="rule-name" name="name" maxlength="60" value="${attr(editor.name)}" placeholder="${attr(site ?? "")}" />
       </label>
+      <p class="rule-entry-help">Paste a web address to match every page on that site, or enter an app name to match its windows. Check the match below before saving.</p>
       <p class="rule-preview" id="rule-preview" aria-live="polite">${renderRulePreview(editor)}</p>
       <div class="rule-editor-actions">
         <button class="primary" type="submit">Save</button>
