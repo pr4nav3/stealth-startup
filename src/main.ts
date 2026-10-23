@@ -218,7 +218,7 @@ interface TrendsData {
   week_recap: FocusRecap;
 }
 
-type HistoryView = "list" | "report" | "recap" | "trends";
+type HistoryView = "list" | "report" | "trends";
 
 /** Trends need this many completed weeks before week-over-week lines mean anything. */
 const TRENDS_UNLOCK_WEEKS = 2;
@@ -890,10 +890,9 @@ function closeTopLayer(): void {
     render();
     return;
   }
-  if (historyView === "report" || historyView === "recap" || historyView === "trends") {
+  if (historyView === "report" || historyView === "trends") {
     historyView = "list";
     sessionReport = null;
-    weekRecap = null;
     historyConfirm = null;
     void refreshHistoryWeek();
     return;
@@ -2603,9 +2602,6 @@ function renderHistory(): string {
   if (historyView === "report" && sessionReport) {
     return renderSessionReport(sessionReport);
   }
-  if (historyView === "recap" && weekRecap) {
-    return renderWeekRecap(weekRecap);
-  }
   if (historyView === "trends") {
     return renderTrends();
   }
@@ -2616,21 +2612,30 @@ function renderHistory(): string {
   const prevDisabled = !oldestMonday || weekStart <= oldestMonday;
   const nextDisabled = weekStart >= thisMondayKey();
 
+  const recap = weekRecap && weekRecap.start === weekStart ? weekRecap : null;
   return `
     <section class="history-page">
-      ${renderHistoryOverview()}
+      <div class="subpage-head history-week-head">
+        <div>
+          <p class="eyebrow">History</p>
+          <h2>${escapeHtml(weekStart === thisMondayKey() ? "This week" : formatWeekRange(weekStart))}</h2>
+        </div>
+        <div class="history-head-actions">
+          <div class="history-week-nav">
+            <button type="button" data-action="history-week-prev" ${prevDisabled ? "disabled" : ""} aria-label="Previous week">‹</button>
+            <span>${escapeHtml(formatWeekRange(weekStart))}</span>
+            <button type="button" data-action="history-week-next" ${nextDisabled ? "disabled" : ""} aria-label="Next week">›</button>
+          </div>
+          <button type="button" data-action="open-trends">Trends ›</button>
+        </div>
+      </div>
+      ${recap ? renderWeekSummary(recap) : ""}
+      ${recap && recap.apps.length ? renderWeekApps(recap) : ""}
       <section class="panel history-list-panel">
         <div class="history-list-head">
           <div>
-            <p class="eyebrow">SESSIONS</p>
-            <h2>Local history</h2>
-          </div>
-          <div class="history-head-actions">
-            <div class="history-week-nav">
-              <button type="button" data-action="history-week-prev" ${prevDisabled ? "disabled" : ""} aria-label="Previous week">‹</button>
-              <span>${escapeHtml(formatWeekRange(weekStart))}</span>
-              <button type="button" data-action="history-week-next" ${nextDisabled ? "disabled" : ""} aria-label="Next week">›</button>
-            </div>
+            <p class="eyebrow">Sessions</p>
+            <h2>${sessions.length === 1 ? "1 session" : `${sessions.length} sessions`}</h2>
           </div>
         </div>
         <div class="history-list">
@@ -2677,166 +2682,73 @@ function renderHistoryItem(item: SessionSummary): string {
   `;
 }
 
-function renderHistoryOverview(): string {
-  const weeks = trends.weeks.slice(-5);
-  const empty = weeks.length === 0;
-  const current = weeks[weeks.length - 1];
-  const thisWeek = !empty && current.session_count > 0;
-  const currentLabel = empty
-    ? "No sessions yet"
-    : thisWeek
-      ? formatMinutes(current.median_stretch_seconds)
-      : "No sessions this week";
-  const caption = empty
-    ? "Your attention span will appear after your first session."
-    : thisWeek
-      ? "Typical uninterrupted stretch this week"
-      : "This week's attention span will appear after your first session.";
-  return `
-    <div class="history-overview">
-      <section class="panel span-card">
-        <p class="eyebrow">Attention span</p>
-        <p class="span-value">${escapeHtml(currentLabel)}</p>
-        <p class="span-caption">${escapeHtml(caption)}</p>
-        ${
-          weeks.length === 0
-            ? ""
-            : renderWeekPlot(
-                weeks.map((week) => ({
-                  weekStart: week.week_start,
-                  value: week.session_count > 0 ? week.median_stretch_seconds / 60 : null,
-                  chip: formatStretchChip(week.median_stretch_seconds),
-                })),
-                "Typical stretch for the last five weeks",
-              )
-        }
-      </section>
-      <div class="history-recaps">
-        ${renderRecapCard(trends.week_recap)}
-        ${renderTrendsCard()}
-      </div>
-    </div>
-  `;
-}
-
-function renderRecapCard(recap: FocusRecap): string {
-  const sessions =
-    recap.session_count === 1 ? "1 session" : `${recap.session_count} sessions`;
-  return `
-    <section class="panel recap-card">
-      <p class="eyebrow">Weekly recap</p>
-      <p class="recap-value">${escapeHtml(formatHours(recap.focus_seconds))} focused</p>
-      <p class="recap-meta">${escapeHtml(formatWeekRange(recap.start || thisMondayKey()))} · ${escapeHtml(sessions)}</p>
-      <button type="button" data-action="open-week-recap">View recap ›</button>
-    </section>
-  `;
-}
-
-function renderTrendsCard(): string {
-  const locked = trends.full_weeks < TRENDS_UNLOCK_WEEKS;
-  const [previous, last] = completedWeeks();
-  let value = "Unlocks after 2 full weeks";
-  let meta = `${Math.min(trends.full_weeks, TRENDS_UNLOCK_WEEKS)} of ${TRENDS_UNLOCK_WEEKS} full weeks so far`;
-  if (!locked) {
-    const change = last && previous ? last.focus_seconds - previous.focus_seconds : 0;
-    value = Math.abs(change) < 60 ? "Steady focused time" : `${change > 0 ? "↑" : "↓"} ${formatHours(Math.abs(change))} focused`;
-    meta = "Last week vs the week before";
-  }
-  return `
-    <section class="panel recap-card">
-      <p class="eyebrow">Trends</p>
-      <p class="recap-value">${escapeHtml(value)}</p>
-      <p class="recap-meta">${escapeHtml(meta)}</p>
-      <button type="button" data-action="open-trends">View trends ›</button>
-    </section>
-  `;
-}
-
 /** The two most recent completed weeks (oldest first); the current week is still running. */
 function completedWeeks(): [TrendWeek | undefined, TrendWeek | undefined] {
   const done = trends.weeks.slice(0, -1);
   return [done[done.length - 2], done[done.length - 1]];
 }
 
-function renderWeekRecap(recap: WeekRecap): string {
-  const range = formatWeekRange(recap.start);
+/** Focused hours with the daily bars, beside the week's best stretch and recovery. */
+function renderWeekSummary(recap: WeekRecap): string {
   const sessions =
     recap.session_count === 1 ? "1 recorded session" : `${recap.session_count} recorded sessions`;
-  const typical = recap.median_stretch_seconds
-    ? formatMinutes(recap.median_stretch_seconds)
-    : "—";
-  const longest = recap.longest_stretch_seconds
-    ? `Longest stretch · ${formatMinutes(recap.longest_stretch_seconds)}`
-    : "No stretch recorded";
+  const best = recap.longest_stretch_seconds ? formatMinutes(recap.longest_stretch_seconds) : "—";
+  const typical = recap.median_stretch_seconds ? `Typical stretch · ${formatMinutes(recap.median_stretch_seconds)}` : "No stretch recorded";
   const maxBucket = Math.max(...recap.buckets.map((bucket) => bucket.focus_seconds), 1);
-
   return `
-    <section class="history-page recap-page">
-      <div class="subpage-head recap-head">
-        <button type="button" data-action="close-recap">Back</button>
-        <div>
-          <p class="eyebrow">History</p>
-          <h2>Weekly recap</h2>
-        </div>
-        ${renderHistorySwitch("week")}
-      </div>
-
-      <div class="recap-layout">
-        <section class="panel recap-focus">
-          <p class="eyebrow">Focused time · ${escapeHtml(range)}</p>
-          <p class="recap-hero">${escapeHtml(formatHours(recap.focus_seconds))}</p>
-          <p class="recap-caption">across ${escapeHtml(sessions)}</p>
-          <div class="recap-bars" style="grid-template-columns: repeat(${recap.buckets.length}, minmax(0, 1fr))">
-            ${recap.buckets
-              .map((bucket) => {
-                const on = bucket.focus_seconds > 0;
-                const height = barHeight(bucket.focus_seconds, maxBucket, 12);
-                const focused = formatHours(bucket.focus_seconds);
-                return `
-                  <button type="button" class="recap-bar-col" aria-label="${attr(bucket.label)}, ${attr(focused)} focused">
-                    <span class="recap-bar-track">
-                      <span class="recap-bar ${on ? "is-on" : ""}" style="height: ${height}%">
-                        <span class="week-tip">${escapeHtml(focused)}</span>
-                      </span>
+    <div class="recap-layout">
+      <section class="panel recap-focus">
+        <p class="eyebrow">Focused time</p>
+        <p class="recap-hero">${escapeHtml(formatHours(recap.focus_seconds))}</p>
+        <p class="recap-caption">across ${escapeHtml(sessions)}</p>
+        <div class="recap-bars" style="grid-template-columns: repeat(${recap.buckets.length}, minmax(0, 1fr))">
+          ${recap.buckets
+            .map((bucket) => {
+              const on = bucket.focus_seconds > 0;
+              const height = barHeight(bucket.focus_seconds, maxBucket, 12);
+              const focused = formatHours(bucket.focus_seconds);
+              return `
+                <button type="button" class="recap-bar-col" aria-label="${attr(bucket.label)}, ${attr(focused)} focused">
+                  <span class="recap-bar-track">
+                    <span class="recap-bar ${on ? "is-on" : ""}" style="height: ${height}%">
+                      <span class="week-tip">${escapeHtml(focused)}</span>
                     </span>
-                    <span class="recap-bar-label">${escapeHtml(bucket.label)}</span>
-                  </button>
-                `;
-              })
-              .join("")}
-          </div>
-        </section>
-
-        <div class="recap-side">
-          <section class="panel recap-stat-card">
-            <p class="eyebrow">Sustained attention</p>
-            <p class="recap-stat-value">${escapeHtml(typical)}</p>
-            <p class="recap-caption">Typical uninterrupted stretch</p>
-            <p class="recap-stat-note">${escapeHtml(longest)}</p>
-          </section>
-          ${renderRecoveryCard(recap)}
+                  </span>
+                  <span class="recap-bar-label">${escapeHtml(bucket.label)}</span>
+                </button>
+              `;
+            })
+            .join("")}
         </div>
-      </div>
-
-      <section class="panel recap-apps">
-        <p class="eyebrow">Apps & sites</p>
-        <h2>Where session time went</h2>
-        ${
-          recap.apps.some((item) => item.kind === "app" || item.kind === "website")
-            ? `<div class="recap-name-tools">
-                <p>Unfamiliar name? Give apps and sites your own names to make history easier to read.</p>
-                <button type="button" data-action="toggle-recap-names">${editingRecapNames ? "Done naming" : "Edit names"}</button>
-              </div>`
-            : recap.apps.length
-              ? `<p class="recap-caption">Unidentified browser time has no site name to edit.</p>`
-              : ""
-        }
-        ${
-          recap.apps.length === 0
-            ? `<p class="empty">No app time in this recap.</p>`
-            : renderAppGroups(recap.apps, APP_GROUPS)
-        }
       </section>
+
+      <div class="recap-side">
+        <section class="panel recap-stat-card">
+          <p class="eyebrow">Best stretch</p>
+          <p class="recap-stat-value">${escapeHtml(best)}</p>
+          <p class="recap-caption">Longest unbroken run of work</p>
+          <p class="recap-stat-note">${escapeHtml(typical)}</p>
+        </section>
+        ${renderRecoveryCard(recap)}
+      </div>
+    </div>
+  `;
+}
+
+function renderWeekApps(recap: WeekRecap): string {
+  return `
+    <section class="panel recap-apps">
+      <p class="eyebrow">Apps & sites</p>
+      <h2>Where the week went</h2>
+      ${
+        recap.apps.some((item) => item.kind === "app" || item.kind === "website")
+          ? `<div class="recap-name-tools">
+              <p>Unfamiliar name? Give apps and sites your own names to make history easier to read.</p>
+              <button type="button" data-action="toggle-recap-names">${editingRecapNames ? "Done naming" : "Edit names"}</button>
+            </div>`
+          : `<p class="recap-caption">Unidentified browser time has no site name to edit.</p>`
+      }
+      ${renderAppGroups(recap.apps, APP_GROUPS)}
     </section>
   `;
 }
@@ -2931,15 +2843,6 @@ function renderRecapAppName(app: RecapApp): string {
   `;
 }
 
-function renderHistorySwitch(active: "week" | "trends"): string {
-  return `
-    <div class="recap-switch">
-      <button type="button" class="${active === "week" ? "active" : ""}" data-action="open-week-recap" data-start="${attr(active === "week" ? weekRecap?.start ?? thisMondayKey() : thisMondayKey())}">Week</button>
-      <button type="button" class="${active === "trends" ? "active" : ""}" data-action="open-trends">Trends</button>
-    </div>
-  `;
-}
-
 function renderRecoveryCard(recap: WeekRecap): string {
   const typical = recap.recovery_median_seconds;
   const stuck = recap.unrecovered_count;
@@ -3000,7 +2903,6 @@ function renderTrends(): string {
           <p class="eyebrow">History</p>
           <h2>Trends</h2>
         </div>
-        ${renderHistorySwitch("trends")}
       </div>
       ${locked ? renderTrendsLocked() : renderTrendRows()}
     </section>
@@ -3013,7 +2915,7 @@ function renderTrendsLocked(): string {
     <section class="panel span-card trends-slab trends-locked">
       <p class="eyebrow">Trends</p>
       <p class="span-value">Unlocks after two full weeks</p>
-      <p class="span-caption">Week-over-week lines for focused time, attention span, and recovery need a couple of complete weeks before they mean anything.</p>
+      <p class="span-caption">Week-over-week lines for focused time, typical stretch, and recovery need a couple of complete weeks before they mean anything.</p>
       <div class="trend-pips" role="img" aria-label="${have} of ${TRENDS_UNLOCK_WEEKS} full weeks">
         ${Array.from({ length: TRENDS_UNLOCK_WEEKS }, (_, index) => `<span class="${index < have ? "is-on" : ""}"></span>`).join("")}
         <strong>${have} of ${TRENDS_UNLOCK_WEEKS} full weeks</strong>
@@ -3065,7 +2967,7 @@ function renderTrendRows(): string {
       })}
       ${renderTrendCard({
         tone: "span",
-        title: "Attention span",
+        title: "Typical stretch",
         value: has(last) ? formatMinutes(last.median_stretch_seconds) : "—",
         compare: noLast || span,
         plot: renderWeekPlot(
@@ -3203,7 +3105,7 @@ function renderWeekPlot(weeks: WeekPoint[], ariaLabel: string, options: WeekPlot
   const baseline = yAt(0);
   const barWidth = Math.min(46, (plotW / weeks.length) * 0.58);
   // Eight labels crowd the axis; keep every other one, always ending on this week.
-  const showLabel = (index: number) => weeks.length <= 6 || (last - index) % 2 === 0;
+  const showLabel = (index: number) => weeks.length <= 5 || (last - index) % 2 === 0;
   const tickLabel = (tick: number) => (step < 1 ? tick.toFixed(1) : String(Math.round(tick)));
   const grid = ticks
     .map((tick) => {
@@ -3334,6 +3236,7 @@ function renderSessionReport(report: SessionReport): string {
         <aside class="report-stats" aria-label="Session stats">
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds))}
           ${reportStat("Focused", `${report.focus_percent}%`)}
+          ${reportStat("Best stretch", formatMinutes(report.longest_stretch_seconds))}
           ${reportStat("Nudges", String(report.nudge_count))}
           ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds)) : ""}
         </aside>
@@ -3863,15 +3766,8 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "open-week-recap") {
-    const start = source?.dataset.start || trends.week_recap.start || thisMondayKey();
-    await openWeekRecap(start);
-    return;
-  }
-
   if (action === "open-trends") {
     historyView = "trends";
-    weekRecap = null;
     sessionReport = null;
     editingRecapNames = false;
     historyRename = null;
@@ -3882,11 +3778,9 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "close-recap") {
     historyView = "list";
-    weekRecap = null;
-    void refreshTrends();
     editingRecapNames = false;
     historyRename = null;
-    render();
+    await refreshHistoryWeek();
     return;
   }
 
@@ -6227,11 +6121,17 @@ async function refreshHistoryWeek(shouldRender = true): Promise<void> {
   }
   const request = ++historyWeekRequest;
   try {
-    const week = await invoke<HistoryWeek>("get_history_week", { weekStart: historyWeekStart });
+    const [week, recap, names] = await Promise.all([
+      invoke<HistoryWeek>("get_history_week", { weekStart: historyWeekStart }),
+      invoke<WeekRecap>("get_week_recap", { start: historyWeekStart }),
+      invoke<Record<string, string>>("get_app_names"),
+    ]);
     if (request !== historyWeekRequest) {
       return;
     }
     historyWeek = week;
+    weekRecap = recap;
+    appNames = names;
     historyWeekStart = week.week_start;
   } catch (error) {
     if (request !== historyWeekRequest) {
@@ -6255,31 +6155,6 @@ function noteNewHistory(items: SessionSummary[]): number | null {
     }
   }
   return newest;
-}
-
-async function openWeekRecap(start: string): Promise<void> {
-  const request = ++historyWeekRequest;
-  try {
-    const [recap, names] = await Promise.all([
-      invoke<WeekRecap>("get_week_recap", { start }),
-      invoke<Record<string, string>>("get_app_names"),
-    ]);
-    if (request !== historyWeekRequest) {
-      return;
-    }
-    weekRecap = recap;
-    appNames = names;
-    historyView = "recap";
-    sessionReport = null;
-    historyRename = null;
-    lastError = "";
-  } catch (error) {
-    if (request !== historyWeekRequest) {
-      return;
-    }
-    lastError = errorText(error);
-  }
-  render();
 }
 
 async function openHistoryReport(id: number): Promise<void> {
@@ -6313,16 +6188,14 @@ async function confirmHistoryAction(): Promise<void> {
     await runHistoryCommand("delete_session", { id: confirm.id }, "Session deleted");
     historyView = "list";
     sessionReport = null;
-    weekRecap = null;
-    render();
+    await refreshHistoryWeek();
     return;
   }
   if (confirm.kind === "delete-all") {
     await runHistoryCommand("delete_all_history", undefined, "History cleared");
     historyView = "list";
     sessionReport = null;
-    weekRecap = null;
-    render();
+    await refreshHistoryWeek();
   }
 }
 
@@ -6347,12 +6220,12 @@ async function runHistoryCommand(
   }
 }
 
-/** "18 October 2026, 11:13 AM · Attention span 9 min · Normal" */
+/** "18 October 2026, 11:13 AM · Normal" */
 function reportSummaryLine(report: SessionReport): string {
   const started = new Date(report.started_at);
   const date = started.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
   const time = started.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  return `${date}, ${time} · Attention span ${formatMinutes(report.median_stretch_seconds)} · ${label(report.strictness)}`;
+  return `${date}, ${time} · ${label(report.strictness)}`;
 }
 
 

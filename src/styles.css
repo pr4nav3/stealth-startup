@@ -3292,11 +3292,8 @@ audio {
   font-weight: 700;
 }
 
-.history-overview {
-  display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(240px, 0.55fr);
-  gap: 14px;
-  align-items: stretch;
+.history-week-head {
+  margin-bottom: 14px;
 }
 
 .span-card {
@@ -3399,57 +3396,12 @@ audio {
   outline: none;
 }
 
-.history-recaps {
-  display: grid;
-  grid-template-rows: 1fr 1fr;
-  gap: 14px;
-  min-width: 0;
-}
-
-.recap-card {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  padding: 16px;
-}
-
-.recap-value {
-  margin: 0;
-  color: var(--ink);
-  font-size: clamp(1.15rem, 2.4cqi, 1.45rem);
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1.1;
-}
-
-.recap-meta {
-  margin: 0 0 auto;
-  font-size: var(--sv-type-3);
-}
-
-.recap-card button {
-  width: 100%;
-  margin-top: 12px;
-}
-
 .recap-head {
   justify-content: flex-start;
 }
 
 .recap-head > div:first-of-type {
   margin-right: auto;
-}
-
-.recap-switch {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.recap-switch button.active {
-  background: var(--warning);
-  color: #141410;
 }
 
 .recap-layout {
@@ -4180,7 +4132,6 @@ button.report-stat-action strong {
 }
 
 @container history (max-width: 520px) {
-  .history-overview,
   .recap-layout {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -4503,7 +4454,6 @@ button.report-stat-action strong {
   .webcam-home,
   .recording-grid,
   .report-grid,
-  .history-overview,
   .recap-layout,
   .history-item {
     grid-template-columns: 1fr;
@@ -4623,7 +4573,6 @@ button.report-stat-action strong {
 .notice,
 .feedback-toast,
 .tabs button.active,
-.recap-switch button.active,
 .rule-chip-distracting,
 .chips span,
 .overlay-pause,
