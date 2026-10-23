@@ -145,6 +145,11 @@ fn get_history_week(week_start: String, state: State<'_, AppState>) -> Result<Hi
 }
 
 #[tauri::command]
+fn search_sessions(query: String, state: State<'_, AppState>) -> Result<Vec<SessionSummary>, String> {
+    lock_sessions(&state)?.search_sessions(query)
+}
+
+#[tauri::command]
 fn get_week_recap(start: String, state: State<'_, AppState>) -> Result<WeekRecap, String> {
     lock_sessions(&state)?.week_recap(start)
 }
@@ -537,6 +542,7 @@ pub fn run() {
             get_history,
             get_history_week,
             get_week_recap,
+            search_sessions,
             get_session_report,
             get_trends,
             delete_session,

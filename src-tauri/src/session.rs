@@ -88,6 +88,10 @@ impl SessionManager {
         self.storage()?.get_history_week(&week_start)
     }
 
+    pub fn search_sessions(&self, query: String) -> Result<Vec<SessionSummary>, String> {
+        self.storage()?.search_sessions(&query)
+    }
+
     pub fn week_recap(&self, start: String) -> Result<WeekRecap, String> {
         self.storage()?.get_week_recap(&start)
     }

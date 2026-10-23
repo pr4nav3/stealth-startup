@@ -1669,6 +1669,33 @@ impl SessionStorage {
         Ok(sessions)
     }
 
+    /// Finished sessions whose goal contains `query` (case-insensitive), newest first.
+    pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSummary>, String> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "{SUMMARY_SELECT}
+                 WHERE ended_at IS NOT NULL
+                   AND lower(goal) LIKE ?1 ESCAPE '\\'
+                 ORDER BY started_at DESC
+                 LIMIT 100"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([format!("%{escaped}%")], summary_from_row)
+            .map_err(|error| error.to_string())?;
+        let mut summaries = Vec::new();
+        for row in rows {
+            summaries.push(self.complete_summary(row.map_err(|error| error.to_string())?)?);
+        }
+        Ok(summaries)
+    }
+
     fn list_history_between(&self, start_day: &str, end_day: &str) -> Result<Vec<SessionSummary>, String> {
         let (from, to) = padded_day_bounds(start_day, end_day);
         let mut stmt = self
@@ -2998,6 +3025,36 @@ mod tests {
             .expect("empty week");
         assert!(empty.sessions.is_empty());
         assert!(storage.get_history_week("09-21-2026").is_err());
+    }
+
+    #[test]
+    fn search_matches_goals_case_insensitively_and_escapes_wildcards() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        for (goal, at) in [
+            ("Thesis intro", "2026-09-22T12:00:00Z"),
+            ("Read chapter 7", "2026-09-23T12:00:00Z"),
+            ("100% thesis", "2026-09-24T12:00:00Z"),
+        ] {
+            let id = storage
+                .insert_session(goal, Strictness::Normal, at, 1800)
+                .expect("insert");
+            storage.insert_span(id, &app("Code"), "focused", 0, 600).expect("span");
+            storage.close_session(id, at, "stopped", 600).expect("close");
+        }
+        let open = storage
+            .insert_session("thesis still running", Strictness::Normal, "2026-09-25T12:00:00Z", 1800)
+            .expect("insert open");
+        let _ = open;
+
+        let found: Vec<String> = storage
+            .search_sessions("THESIS")
+            .expect("search")
+            .into_iter()
+            .map(|s| s.goal)
+            .collect();
+        assert_eq!(found, vec!["100% thesis", "Thesis intro"]);
+        assert_eq!(storage.search_sessions("%").expect("search").len(), 1);
+        assert!(storage.search_sessions("   ").expect("search").is_empty());
     }
 
     #[test]
