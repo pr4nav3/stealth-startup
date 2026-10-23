@@ -2595,6 +2595,7 @@ function renderDownloadBusyModal(): string {
   const download = voiceDownload;
   const phase = download?.phase ?? "downloading";
   const done = phase === "complete";
+  const checking = phase === "checking";
   const total = Math.max(0, download?.total_bytes ?? voiceBackend?.model.required_bytes ?? 0);
   const downloaded = Math.max(0, Math.min(download?.downloaded_bytes ?? 0, total || Number.MAX_SAFE_INTEGER));
   const percent = done ? 100 : total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
@@ -2612,7 +2613,9 @@ function renderDownloadBusyModal(): string {
     ? "The installed model and voice runtime are the latest. Nothing was downloaded."
     : done
       ? "The voice model is installed. Saved clips play without keeping this window open."
-      : download?.message ?? "Downloading model pack.";
+      : checking
+        ? "Comparing the installed files with the pack. Nothing is downloading."
+        : download?.message ?? "Downloading model pack.";
   const eta = done
     ? "Done"
     : phase === "checking"
@@ -2622,10 +2625,16 @@ function renderDownloadBusyModal(): string {
         : download?.eta_seconds === null || download?.eta_seconds === undefined
           ? "Estimating time left"
           : `${formatDuration(download.eta_seconds)} left`;
-  const progressText = total > 0 ? `${formatBytes(downloaded)} / ${formatBytes(total)}` : formatBytes(downloaded);
+  const progressText = checking
+    ? "Verifying"
+    : total > 0
+      ? `${formatBytes(downloaded)} / ${formatBytes(total)}`
+      : formatBytes(downloaded);
   const note = done
     ? "You can close this and start cloning a voice."
-    : `This is a ${total > 0 ? formatBytes(total) : "large"} first-time download and can take several minutes depending on your connection.`;
+    : checking
+      ? "Only a missing or damaged file gets fetched; matching files are kept as they are."
+      : `This is a ${total > 0 ? formatBytes(total) : "large"} download and can take several minutes depending on your connection.`;
 
   return `
     <div class="modal-backdrop busy-backdrop" role="presentation">
@@ -2633,9 +2642,11 @@ function renderDownloadBusyModal(): string {
         <p class="eyebrow">VOICE WORKER</p>
         <h2>${escapeHtml(title)}</h2>
         <p>${escapeHtml(copy)}</p>
-        <div class="loading-bar determinate" aria-label="Model download progress">
-          <span style="width: ${percent}%"></span>
-        </div>
+        ${
+          checking
+            ? `<div class="loading-bar" aria-label="Checking installed files"><span></span></div>`
+            : `<div class="loading-bar determinate" aria-label="Model download progress"><span style="width: ${percent}%"></span></div>`
+        }
         <div class="download-meta">
           <span>${escapeHtml(progressText)}</span>
           <span>${escapeHtml(eta)}</span>
@@ -2645,7 +2656,7 @@ function renderDownloadBusyModal(): string {
           ${
             done || phase === "cancelling" || phase === "error"
               ? `<button type="button" data-action="close-model-download">Close</button>`
-              : `<button class="danger" type="button" data-action="cancel-model-download">Cancel download</button>`
+              : `<button class="danger" type="button" data-action="cancel-model-download">${checking ? "Cancel" : "Cancel download"}</button>`
           }
         </div>
       </section>
@@ -4937,6 +4948,14 @@ function paintDownloadProgress(): void {
   }
   const download = voiceDownload;
   if (!download || !document.querySelector(".busy-panel")) {
+    return;
+  }
+  // Checking has no determinate bar; the first real fetch flips the phase and the modal is
+  // rebuilt by the next render. Only the downloading and cancelling phases repaint in place.
+  if (download.phase === "checking" || !document.querySelector(".loading-bar.determinate")) {
+    if (download.phase !== "checking") {
+      render();
+    }
     return;
   }
   const total = Math.max(0, download.total_bytes ?? voiceBackend?.model.required_bytes ?? 0);

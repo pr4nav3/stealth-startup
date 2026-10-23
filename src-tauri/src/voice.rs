@@ -1494,9 +1494,20 @@ fn discard_partial_download(path: &Path) {
 fn download_model_to_with_progress(
     root: &Path,
     cancel: Arc<AtomicBool>,
+    progress: impl FnMut(VoiceDownloadProgress),
+) -> Result<bool, String> {
+    download_model_files(&model_dir(root), MODEL_FILES, cancel, progress)
+}
+
+/// Fetches only the files whose size or hash disagrees with the table; a file that matches is
+/// counted and never touched. Ok(true) when anything was fetched.
+fn download_model_files(
+    dir: &Path,
+    files: &[ModelFile],
+    cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(VoiceDownloadProgress),
 ) -> Result<bool, String> {
-    let dir = model_dir(root);
+    let total: u64 = files.iter().map(|file| file.bytes).sum();
     let client = reqwest::Client::builder()
         .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
         .read_timeout(DOWNLOAD_READ_TIMEOUT)
@@ -1506,7 +1517,7 @@ fn download_model_to_with_progress(
     let mut completed_bytes = 0u64;
     let mut fetched = false;
 
-    for file in MODEL_FILES {
+    for file in files {
         if cancel.load(Ordering::SeqCst) {
             return Err(DOWNLOAD_CANCELLED.to_string());
         }
@@ -1517,7 +1528,7 @@ fn download_model_to_with_progress(
             completed_bytes += file.bytes;
             progress(VoiceDownloadProgress {
                 downloaded_bytes: completed_bytes,
-                total_bytes: Some(required_model_bytes()),
+                total_bytes: Some(total),
                 current_file: None,
             });
             continue;
@@ -1540,7 +1551,7 @@ fn download_model_to_with_progress(
         let mut bytes = 0u64;
         progress(VoiceDownloadProgress {
             downloaded_bytes: completed_bytes,
-            total_bytes: Some(required_model_bytes()),
+            total_bytes: Some(total),
             current_file: Some(file.path.to_string()),
         });
         loop {
@@ -1566,7 +1577,7 @@ fn download_model_to_with_progress(
             bytes += chunk.len() as u64;
             progress(VoiceDownloadProgress {
                 downloaded_bytes: completed_bytes + bytes,
-                total_bytes: Some(required_model_bytes()),
+                total_bytes: Some(total),
                 current_file: Some(file.path.to_string()),
             });
         }
@@ -1602,7 +1613,7 @@ fn download_model_to_with_progress(
         completed_bytes += file.bytes;
         progress(VoiceDownloadProgress {
             downloaded_bytes: completed_bytes,
-            total_bytes: Some(required_model_bytes()),
+            total_bytes: Some(total),
             current_file: None,
         });
     }
@@ -2967,6 +2978,49 @@ mod tests {
         assert!(listed.valid);
         assert!(!status.model.installed);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matching_model_files_are_never_fetched() {
+        // The path would 404 on the hub, so any attempt to fetch it fails the call: Ok(false)
+        // proves the matching file was skipped without touching the network.
+        let dir = test_dir("skip-valid");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("already-here.bin");
+        fs::write(&path, b"installed and intact").unwrap();
+        let table = [ModelFile {
+            path: "already-here.bin",
+            bytes: fs::metadata(&path).unwrap().len(),
+            sha256: Box::leak(sha256_file(&path).unwrap().into_boxed_str()),
+        }];
+
+        let mut reports = Vec::new();
+        let fetched = download_model_files(&dir, &table, Arc::new(AtomicBool::new(false)), |progress| {
+            reports.push(progress);
+        })
+        .unwrap();
+
+        assert!(!fetched);
+        assert_eq!(fs::read(&path).unwrap(), b"installed and intact");
+        assert!(reports.iter().all(|report| report.current_file.is_none()));
+        assert_eq!(reports.last().map(|report| report.downloaded_bytes), Some(table[0].bytes));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_wrong_sized_model_file_is_what_triggers_a_fetch() {
+        let dir = test_dir("fetch-wrong-size");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("short.bin");
+        fs::write(&path, b"short").unwrap();
+        let table = [ModelFile { path: "short.bin", bytes: 999, sha256: "00" }];
+
+        // The fetch of a path that does not exist on the hub cannot succeed, online or off.
+        let result = download_model_files(&dir, &table, Arc::new(AtomicBool::new(false)), |_| {});
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"short");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
