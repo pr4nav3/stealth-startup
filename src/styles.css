@@ -3497,10 +3497,16 @@ audio {
 }
 
 .trend-spark-track {
+  position: relative;
   display: flex;
   flex: 1;
   align-items: flex-end;
   min-width: 0;
+}
+
+/* A hovered bar's tip paints over its neighbours and the card's text. */
+.trend-spark-track:hover {
+  z-index: 2;
 }
 
 .trend-spark-bar {
@@ -3525,6 +3531,7 @@ audio {
 }
 
 .trend-spark-bar .week-tip {
+  z-index: 2;
   transform: translate(-50%, 6px);
   transition: opacity 100ms ease-out, transform 100ms ease-out;
 }
@@ -3591,34 +3598,19 @@ button.trend-door-go {
 
 .history-seg {
   display: inline-flex;
-  overflow: hidden;
-  border: var(--border);
-  border-radius: 6px;
-  background: var(--panel);
-  box-shadow: var(--shadow-control);
+  gap: 12px;
 }
 
 .history-seg button {
   min-width: 170px;
-  min-height: 36px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.history-seg button + button {
-  border-left: var(--border);
+  min-height: 38px;
+  background: var(--panel);
 }
 
 .history-seg button.is-on {
   background: var(--sv-yellow);
   color: var(--sv-colored-ink);
   font-weight: 600;
-}
-
-.history-seg button:active {
-  transform: none;
 }
 
 .week-apps {
