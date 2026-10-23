@@ -3484,8 +3484,9 @@ audio {
 }
 
 /* Four weeks of bars, no axis; the viewed week is solid, the running week dashed. */
-/* The same bars as the week's days: ink border, green fill, a short outline for nothing, the
-   running week lighter like today. The viewed week is the full green; the rest sit back. */
+/* The same bars as the week's days, in ink rather than green: the viewed week is solid, the
+   rest sit back, the running week is a dashed outline, an empty week a short outline. Every
+   colour is a theme token, so dark mode flips them with the panel. */
 .trend-spark {
   display: flex;
   flex: 1 1 auto;
@@ -3510,7 +3511,7 @@ audio {
   min-height: 0;
   border: var(--border);
   border-radius: 5px;
-  background: color-mix(in srgb, var(--sv-green) 45%, var(--panel));
+  background: color-mix(in srgb, var(--sv-ink) 38%, var(--panel));
   transition: transform 100ms ease-out;
 }
 
@@ -3529,22 +3530,25 @@ audio {
 }
 
 .trend-spark-bar.is-viewed {
-  background: var(--sv-green);
+  background: var(--sv-ink);
 }
 
 .trend-spark-bar.is-running {
   border-style: dashed;
-  background: color-mix(in srgb, var(--sv-green) 30%, var(--panel));
+  border-color: var(--sv-muted);
+  background: transparent;
 }
 
 .trend-spark-bar.is-running.is-viewed {
-  background: color-mix(in srgb, var(--sv-green) 60%, var(--panel));
+  border-color: var(--sv-ink);
+  background: color-mix(in srgb, var(--sv-ink) 18%, var(--panel));
 }
 
 .trend-spark-bar.is-empty {
   border-color: color-mix(in srgb, var(--sv-ink) 35%, transparent);
   background: transparent;
 }
+
 
 
 .trend-door-value {
