@@ -2691,8 +2691,8 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null): string {
       <div class="week-hero-top">
         <strong class="week-hero-value">${escapeHtml(formatHours(recap?.focus_seconds ?? 0))}</strong>
         <div class="week-hero-stats">
-          <div title="Longest unbroken run of work"><span class="eyebrow">Longest stretch</span><strong>${escapeHtml(longest)}</strong></div>
-          <div title="Typical time back on task after a drift"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
+          <div class="week-hero-stat" title="Longest unbroken run of work"><span class="eyebrow">Longest stretch</span><strong>${escapeHtml(longest)}</strong></div>
+          <div class="week-hero-stat" title="Typical time back on task after a drift"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
         </div>
       </div>
       <div class="recap-bars week-hero-bars" style="grid-template-columns: repeat(${buckets.length}, minmax(0, 1fr))">
@@ -2741,14 +2741,15 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null): string {
   }
   const maxWeek = Math.max(...weeks.map((week) => week.focus_seconds), 1);
   const spark = weeks.length
-    ? `<div class="trend-spark" aria-hidden="true">
+    ? `<div class="trend-spark" role="img" aria-label="Focused hours over the last ${weeks.length} weeks">
         ${weeks
           .map((week, index) => {
-            const classes = ["", week.week_start === weekStart ? "is-viewed" : "", index === weeks.length - 1 ? "is-running" : ""].join(" ").trim();
-            return `<i class="${classes}" style="height: ${Math.max(6, Math.round((week.focus_seconds / maxWeek) * 100))}%"></i>`;
+            const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", index === weeks.length - 1 ? "is-running" : ""].filter(Boolean).join(" ");
+            return `<span class="trend-spark-track"><span class="${classes}" style="height: ${Math.max(6, Math.round((week.focus_seconds / maxWeek) * 100))}%"></span></span>`;
           })
           .join("")}
-      </div>`
+      </div>
+      <div class="trend-spark-axis" aria-hidden="true"><span>${escapeHtml(formatWeekStart(weeks[0].week_start))}</span><span>${escapeHtml(formatWeekStart(weeks[weeks.length - 1].week_start))}</span></div>`
     : "";
   const locked = trends.full_weeks < TRENDS_UNLOCK_WEEKS;
   const go = locked ? `${trends.full_weeks} of ${TRENDS_UNLOCK_WEEKS} full weeks ›` : `${weeks.length} weeks ›`;

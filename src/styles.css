@@ -3324,7 +3324,7 @@ audio {
 /* The week's hero beside the door into Trends. */
 .history-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr) 250px;
   gap: 14px;
   align-items: stretch;
 }
@@ -3339,8 +3339,8 @@ audio {
 }
 
 .week-hero .eyebrow,
-.week-hero .recap-bar-label {
-  color: inherit;
+.week-hero .recap-bar-col {
+  color: var(--sv-colored-ink);
 }
 
 .week-hero-top {
@@ -3360,18 +3360,31 @@ audio {
 
 .week-hero-stats {
   display: flex;
-  gap: 28px;
-  padding-bottom: 4px;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
-.week-hero-stats .eyebrow {
+/* The two figures sit on the app's own card colour, whichever theme is on. */
+.week-hero-stat {
+  min-width: 128px;
+  padding: 8px 12px 9px;
+  border: var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: var(--shadow-control);
+  color: var(--ink);
+}
+
+.week-hero-stat .eyebrow {
   margin: 0;
+  color: var(--sv-muted);
   font-size: 0.66rem;
 }
 
-.week-hero-stats strong {
+.week-hero-stat strong {
   display: block;
-  font-size: 1.4rem;
+  margin-top: 2px;
+  font-size: 1.35rem;
   font-weight: 750;
   letter-spacing: -0.03em;
   line-height: 1.1;
@@ -3439,7 +3452,7 @@ button.panel.trend-door:active {
 }
 
 .trend-door-value {
-  font-size: 1.6rem;
+  font-size: 1.45rem;
   font-weight: 750;
   letter-spacing: -0.03em;
   line-height: 1.1;
@@ -3452,36 +3465,56 @@ button.panel.trend-door:active {
 
 .trend-spark {
   display: flex;
-  align-items: flex-end;
-  gap: 4px;
-  height: 56px;
-  margin-top: 8px;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: 5px;
+  min-height: 96px;
+  margin-top: 10px;
 }
 
-.trend-spark i {
+.trend-spark-track {
+  display: flex;
   flex: 1;
-  min-height: 3px;
-  border-radius: 3px 3px 0 0;
-  background: color-mix(in srgb, var(--sv-ink) 28%, var(--sv-panel));
+  align-items: flex-end;
+  min-width: 0;
 }
 
-.trend-spark i.is-viewed {
+.trend-spark-bar {
+  display: block;
+  width: 100%;
+  min-height: 4px;
+  border: 2px solid color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
+}
+
+.trend-spark-bar.is-viewed {
+  border-color: var(--sv-ink);
   background: var(--sv-ink);
 }
 
-.trend-spark i.is-running {
-  border: 2px dashed var(--sv-muted);
-  border-bottom: 0;
+.trend-spark-bar.is-running {
+  border-style: dashed;
+  border-color: var(--sv-muted);
   background: transparent;
 }
 
-.trend-spark i.is-running.is-viewed {
+.trend-spark-bar.is-running.is-viewed {
   border-color: var(--sv-ink);
 }
 
+.trend-spark-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .trend-door-go {
-  margin-top: auto;
-  padding-top: 8px;
+  padding-top: 10px;
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
   letter-spacing: 0.04em;
