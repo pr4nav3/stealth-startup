@@ -1923,6 +1923,18 @@ function renderVoiceSettings(): string {
       </div>
 
       <section class="voice-grid">
+        <details class="panel create-voice-panel" data-create-voice ${createVoiceOpen ? "open" : ""}>
+          <summary>
+            <span>How to clone a voice</span>
+            ${
+              modelInstalled()
+                ? `<span class="create-voice-ready">Model installed</span>`
+                : `<span class="create-voice-missing">Model not installed</span>`
+            }
+          </summary>
+          ${renderCreateVoiceGuide()}
+        </details>
+
         <section class="panel voice-roster-panel">
           <div class="rule-toolbar">
             <p class="eyebrow">Voices</p>
@@ -1932,18 +1944,6 @@ function renderVoiceSettings(): string {
             ${voices.map(renderVoiceCard).join("")}
           </div>
         </section>
-
-        <details class="panel create-voice-panel" data-create-voice ${createVoiceOpen ? "open" : ""}>
-          <summary>
-            <span>Clone a voice</span>
-            ${
-              modelInstalled()
-                ? `<span class="create-voice-ready">Model installed</span>`
-                : `<span class="create-voice-missing">Model not installed</span>`
-            }
-          </summary>
-          ${renderCreateVoiceGuide()}
-        </details>
 
         ${renderVoiceClipsPanel()}
       </section>
@@ -2059,13 +2059,19 @@ function renderCreateVoiceGuide(): string {
 
   return `
     <div class="create-voice-body">
+      <p class="create-voice-intro">Supervisor nudges you in short spoken clips. Record anyone for about twenty seconds, generate their clips once, and from then on those clips play instantly, offline, without the model.</p>
+      <ol class="create-voice-steps">
+        <li><strong>1. Record a voice</strong><span>Press + New voice under Voices and read the prompt aloud. The starter voices are ready as they are.</span></li>
+        <li><strong>2. Generate its clips</strong><span>Under Voice clips, choose the voice and press Generate on a phrase. Each clip takes a moment and needs the model installed.</span></li>
+        <li><strong>3. Pick it for sessions</strong><span>Back under Voices, press Select. Only phrases with a ready clip are spoken.</span></li>
+      </ol>
       <div class="create-voice-model">
         <div>
           <strong>Voice model</strong>
           <p>${
             installed
-              ? "Installed, can clone voice clips. Saved clips play without the model."
-              : "Download once to generate voice clips. Saved clips play without the model."
+              ? "Installed. Only needed while generating clips."
+              : "Download once to generate clips. Saved clips play without it."
           }</p>
         </div>
         ${
@@ -2077,11 +2083,6 @@ function renderCreateVoiceGuide(): string {
             : `<button class="overlay-pause" type="button" data-action="download-model-pack" ${busy ? "disabled" : ""}>${downloadLabel}</button>`
         }
       </div>
-      <ol class="create-voice-steps">
-        <li><strong>1. Add a voice</strong><span>Click + New voice above, then record a short sample.</span></li>
-        <li><strong>2. Generate your clips</strong><span>Open a phrase set below and press Generate on a phrase. One at a time, so you can hear each one.</span></li>
-        <li><strong>3. Listen and keep</strong><span>Listen to each clip. Try again if needed, then keep the version you like.</span></li>
-      </ol>
     </div>
   `;
 }
@@ -2125,10 +2126,17 @@ function renderRamLock(): string {
   const free = system?.available_ram_bytes ?? null;
   const need = system?.min_free_ram_bytes ?? 0;
   const peak = system?.last_peak_ram_bytes ?? null;
-  const fill = need > 0 && free !== null ? Math.max(4, Math.min(100, Math.round((free / need) * 100))) : 0;
 
+  if (!locked) {
+    return `
+      <aside class="ram-lock is-clear" role="status" aria-live="polite">
+        <span class="ram-lock-machine">${escapeHtml(ramMachineLabel(system?.total_ram_bytes ?? null))}</span>
+        <p data-ram-copy>${escapeHtml(ramLockCopy(false, free, need, peak))}</p>
+      </aside>
+    `;
+  }
   return `
-    <aside class="ram-lock ${locked ? "is-locked" : "is-clear"}" role="status" aria-live="polite">
+    <aside class="ram-lock is-locked" role="status" aria-live="polite">
       <div class="ram-lock-head">
         <div class="ram-lock-stamp">${locked ? "Voice clone locked" : "Clone clear"}</div>
         <span class="ram-lock-machine">${escapeHtml(ramMachineLabel(system?.total_ram_bytes ?? null))}</span>
@@ -2136,15 +2144,8 @@ function renderRamLock(): string {
       </div>
       <div class="ram-lock-copy">
         <p data-ram-copy>${escapeHtml(ramLockCopy(locked, free, need, peak))}</p>
-        ${locked ? "<p>Once generated, saved clips don't need RAM.</p>" : ""}
+        <p>Once generated, saved clips don't need RAM.</p>
       </div>
-      ${
-        locked
-          ? ""
-          : `<div class="ram-tank" aria-label="Free RAM versus clone budget">
-        <span class="ram-tank-fill" style="width: ${fill}%"></span>
-      </div>`
-      }
     </aside>
   `;
 }
@@ -2154,8 +2155,8 @@ function ramLockCopy(locked: boolean, free: number | null, need: number, peak: n
     return `Generating voice clips needs about ${need ? formatBytes(need) : "enough"} of available RAM. You currently have ${free === null ? "?" : formatBytes(free)}. Close other apps, then check again.`;
   }
   return peak
-    ? `Clone is allowed. Last job peaked at ${formatBytes(peak)}. Supervisor will refuse again if available RAM drops below ${formatBytes(need)}.`
-    : `Clone is allowed. Keep about ${formatBytes(need)} available before generating. Saved clips still play.`;
+    ? `Enough free RAM to generate clips. The last one peaked at ${formatBytes(peak)}; generating pauses if less than ${formatBytes(need)} is free.`
+    : `Enough free RAM to generate clips. Keep about ${formatBytes(need)} free while generating.`;
 }
 
 function ramMachineLabel(total: number | null): string {
@@ -2181,10 +2182,6 @@ function paintVoiceRam(): void {
   const machine = document.querySelector(".ram-lock-machine");
   if (machine) {
     machine.textContent = ramMachineLabel(system.total_ram_bytes ?? null);
-  }
-  const fill = document.querySelector<HTMLElement>(".ram-tank-fill");
-  if (fill && need > 0 && free !== null) {
-    fill.style.width = `${Math.max(4, Math.min(100, Math.round((free / need) * 100)))}%`;
   }
 }
 

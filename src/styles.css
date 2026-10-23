@@ -2273,8 +2273,20 @@ audio {
   background: #ff684f;
 }
 
+/* Clear: one quiet line. Locked: the loud red panel with the numbers and a recheck. */
 .ram-lock.is-clear {
-  background: var(--acid);
+  grid-auto-flow: column;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--white-soft);
+}
+
+.ram-lock.is-clear p {
+  margin: 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
 }
 
 .ram-lock-head {
@@ -2325,19 +2337,6 @@ audio {
   font-size: calc(var(--sv-type-3) - 1px);
 }
 
-.ram-tank {
-  position: relative;
-  height: 12px;
-  overflow: hidden;
-  border: var(--border);
-  background: var(--paper);
-}
-
-.ram-tank-fill {
-  display: block;
-  height: 100%;
-  background: var(--cobalt);
-}
 
 .create-voice-panel {
   display: block;
@@ -2408,6 +2407,12 @@ audio {
 
 .create-voice-panel[open] summary::before {
   transform: rotate(90deg);
+}
+
+.create-voice-intro {
+  margin: 0;
+  max-width: 70ch;
+  font-size: var(--sv-type-3);
 }
 
 .create-voice-body {
