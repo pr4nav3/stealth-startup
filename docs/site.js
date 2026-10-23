@@ -148,9 +148,9 @@
     },
     watch: {
       className: "",
-      status: "Drift watch",
+      status: "Distraction open",
       strictness: "Normal",
-      title: "Drift watch",
+      title: "Distraction open",
       copy: "Two minutes on YouTube.",
       progress: 61,
       elapsed: "Elapsed 36:40",
@@ -158,10 +158,10 @@
     },
     drifting: {
       className: "is-drifting",
-      status: "Drifting",
+      status: "Distracted",
       strictness: "Normal",
-      title: "Drifting",
-      copy: "Off task for six minutes. Playing a nudge in Mum.",
+      title: "Distracted",
+      copy: "Six minutes on YouTube. Playing a nudge in Mum.",
       progress: 66,
       elapsed: "Elapsed 39:05",
       nudges: "Nudges 1"

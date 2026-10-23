@@ -1237,7 +1237,7 @@ function renderSession(current: CurrentSession | null): string {
         <aside class="panel session-rules-card">
           <p class="eyebrow">Distractions</p>
           ${renderSessionDistractions(current.exceptions)}
-          <button type="button" data-action="open-session-rules">Edit rules</button>
+          <button type="button" data-action="open-session-rules">Edit distractions</button>
         </aside>
       </div>
 
@@ -1292,7 +1292,7 @@ function renderSessionRulesModal(): string {
         <div class="modal-head">
           <div>
             <p class="eyebrow">CURRENT SESSION</p>
-            <h2 id="session-rules-title">Edit rules</h2>
+            <h2 id="session-rules-title">Edit distractions</h2>
           </div>
           <button class="small-button" type="button" data-action="close-session-rules">Done</button>
         </div>
@@ -1644,6 +1644,7 @@ function renderPreflightModal(): string {
               <label>
                 <span>Strictness</span>
                 <select id="preflight-strictness">${strictnessOptions(draft.strictness)}</select>
+                <small class="field-help">${STRICTNESS_HELP}</small>
               </label>
               <label>
                 <span>Voice</span>
@@ -1677,6 +1678,7 @@ function renderSettings(): string {
             <select id="default-strictness">
               ${strictnessOptions(settings.default_strictness)}
             </select>
+            <small class="field-help">${STRICTNESS_HELP}</small>
           </label>
           <label class="default-control">
             <strong>Show session timer</strong>
@@ -2848,7 +2850,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
     recap?.recovery_median_seconds != null
       ? formatRecovery(recap.recovery_median_seconds)
       : recap && recap.session_count > 0
-        ? "No drifts"
+        ? "None"
         : "—";
   return `
     <section class="panel week-hero" aria-label="${current ? "This week" : "That week"}">
@@ -2860,7 +2862,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
         </div>
         <div class="week-hero-stats">
           <div class="week-hero-stat" title="${empty ? "Longest unbroken run of work, once there is one" : "Longest unbroken run of work"}"><span class="eyebrow">Longest stretch</span><strong>${escapeHtml(longest)}</strong></div>
-          <div class="week-hero-stat" title="${recovery === "No drifts" ? "Nothing pulled you off task, so there was nothing to recover from" : "Typical time back on task after a drift"}"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
+          <div class="week-hero-stat" title="${recovery === "None" ? "No distraction pulled you off work this week, so there was nothing to recover from" : "Typical time back to work after a distraction"}"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
         </div>
       </div>
       <div class="recap-bars week-hero-bars ${animate ? "is-animated" : ""}" style="grid-template-columns: repeat(${buckets.length}, minmax(0, 1fr))">
@@ -3062,9 +3064,9 @@ function renderHistoryItem(item: SessionSummary): string {
       </div>
       <div class="history-item-stats">
         <dl>
-          <div><dt>Focused</dt><dd>${escapeHtml(formatHours(item.focus_seconds))}</dd></div>
-          <div><dt>Duration</dt><dd>${formatDuration(item.duration_seconds)}</dd></div>
-          <div><dt>Nudges</dt><dd>${item.nudges}</dd></div>
+          <div title="Time not spent on a distraction"><dt>Focused</dt><dd>${escapeHtml(formatHours(item.focus_seconds))}</dd></div>
+          <div title="How long the session ran"><dt>Duration</dt><dd>${formatDuration(item.duration_seconds)}</dd></div>
+          <div title="Times Supervisor spoke up about a distraction"><dt>Nudges</dt><dd>${item.nudges}</dd></div>
         </dl>
         ${renderMiniTimeline(item)}
       </div>
@@ -3224,6 +3226,7 @@ function renderTrendRows(): string {
       ${renderTrendCard({
         tone: "span",
         title: "Attention span",
+        hint: "typical unbroken stretch of work",
         value: has(last) ? formatMinutes(last.median_stretch_seconds) : "—",
         compare: noLast || span,
         plot: renderWeekPlot(
@@ -3239,17 +3242,17 @@ function renderTrendRows(): string {
       ${renderTrendCard({
         tone: "recovery",
         title: "Recovery",
-        hint: "lower is better",
+        hint: "time back to work after a distraction · lower is better",
         value: lastRecovery == null ? "—" : formatRecovery(lastRecovery),
-        compare: noLast || (lastRecovery == null ? { line: "No drifts last week" } : recovery),
+        compare: noLast || (lastRecovery == null ? { line: "No distractions last week" } : recovery),
         plot: renderWeekPlot(
           weeks.map((week) => ({
             weekStart: week.week_start,
             value: week.recovery_median_seconds == null ? null : week.recovery_median_seconds / 60,
             chip: week.recovery_median_seconds == null ? "" : formatRecovery(week.recovery_median_seconds),
           })),
-          "Typical time back on task after a drift, per week",
-          { unit: "MIN", width: 440, height: 250, partialLast: true, emptyNote: "No drifts yet, so nothing to recover from" },
+          "Typical time back to work after a distraction, per week",
+          { unit: "MIN", width: 440, height: 250, partialLast: true, emptyNote: "No distractions yet, so nothing to recover from" },
         ),
       })}
     </div>
@@ -3493,11 +3496,11 @@ function renderSessionReport(report: SessionReport): string {
           ${legend ? `<div class="report-inset">${legend}</div>` : ""}
         </section>
         <aside class="report-stats" aria-label="Session stats">
-          ${reportStat("Duration", formatClockWithUnit(report.duration_seconds))}
-          ${reportStat("Focused", `${report.focus_percent}%`)}
-          ${reportStat("Best stretch", formatMinutes(report.longest_stretch_seconds))}
-          ${reportStat("Nudges", String(report.nudge_count))}
-          ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds)) : ""}
+          ${reportStat("Duration", formatClockWithUnit(report.duration_seconds), "How long the session ran, pauses included")}
+          ${reportStat("Focused", `${report.focus_percent}%`, "Share of the session not spent on a distraction")}
+          ${reportStat("Longest stretch", formatMinutes(report.longest_stretch_seconds), "Longest unbroken run of work")}
+          ${reportStat("Nudges", String(report.nudge_count), "Times Supervisor spoke up about a distraction")}
+          ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds), "Time the webcam saw a phone") : ""}
         </aside>
       </div>
       <section class="panel recap-apps">
@@ -3513,9 +3516,9 @@ function renderSessionReport(report: SessionReport): string {
   `;
 }
 
-function reportStat(labelText: string, value: string): string {
+function reportStat(labelText: string, value: string, help: string): string {
   return `
-    <div class="report-stat">
+    <div class="report-stat" title="${attr(help)}">
       <span>${escapeHtml(labelText)}</span>
       <strong>${escapeHtml(value)}</strong>
     </div>
@@ -5644,9 +5647,9 @@ function stateTitle(current: CurrentSession | null): string {
     case "focused":
       return "Locked in";
     case "suspicious":
-      return "Drift watch";
+      return "Distraction open";
     case "distracted":
-      return "Drifting";
+      return "Distracted";
     case "idle":
       return "Away";
     default:
@@ -5656,7 +5659,7 @@ function stateTitle(current: CurrentSession | null): string {
 
 function stateCopy(current: CurrentSession | null): string {
   if (!current) {
-    return "One clear start. Rules and voice live in the preflight.";
+    return "One clear start. Distractions and voice live in the preflight.";
   }
 
   if (current.status === "paused") {
@@ -6096,6 +6099,10 @@ async function toggleVoicePreview(): Promise<void> {
     render();
   }
 }
+
+/** Mirrors `Strictness::focus_config` in the backend: the seconds a distraction may stay open
+ * before Supervisor speaks up. */
+const STRICTNESS_HELP = "How long a distraction can stay open before a nudge: Gentle 90 s, Normal 60 s, Strict 30 s.";
 
 function strictnessOptions(selected: Strictness): string {
   return (["gentle", "normal", "strict"] as Strictness[])

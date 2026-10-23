@@ -1416,6 +1416,14 @@ dt {
   background: rgba(16, 16, 16, 0.28);
 }
 
+.field-help {
+  display: block;
+  margin-top: 4px;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
+  line-height: 1.3;
+}
+
 .default-control {
   display: flex;
   align-items: center;

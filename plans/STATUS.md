@@ -42,7 +42,7 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
       `plans/v2-distractions-only.md`
 - [x] Session report: timeline, Apps & sites grouped by recorded decision,
       "now X" when today's rule differs. Weekly recap with daily bars,
-      attention span and Recovery (time back on task after a drift). Trends
+      attention span and Recovery (time back to work after a distraction). Trends
       page (focused hours, attention span, recovery, 8 weeks; unlocks after two
       full weeks). Monthly recap and category guesses removed
 - [x] Day headers in History show that day's focused time and session count
