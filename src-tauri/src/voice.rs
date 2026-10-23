@@ -721,6 +721,8 @@ pub struct VoiceProfileSummary {
     pub profile_dir: String,
     pub reference_path: Option<String>,
     pub reference_retained: bool,
+    /// The tone this voice speaks in sessions; `None` until the user picks one.
+    pub tone: Option<String>,
     pub clip_count: usize,
     pub clips: Vec<VoiceClipSummary>,
 }
@@ -752,6 +754,9 @@ struct VoiceProfileMetadata {
     profile_id: String,
     display_name: String,
     reference_retained: bool,
+    /// Older profiles have none.
+    #[serde(default)]
+    tone: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -1025,6 +1030,7 @@ pub fn save_reference_from_path(
         profile_id: profile_id.clone(),
         display_name,
         reference_retained: true,
+        tone: read_profile_metadata(&dir).and_then(|existing| existing.tone),
     };
     write_json(&dir.join("profile.json"), &metadata)?;
     profile_summary(&dir, &profile_id)
@@ -1148,6 +1154,33 @@ pub fn clear_recording(
     recording.error = None;
     fs::create_dir_all(recordings_dir(&root)).map_err(|error| error.to_string())?;
     Ok(recording_snapshot(&recording))
+}
+
+/// Records which tone a voice speaks in sessions. Starter voices included: they have profiles too.
+pub fn set_profile_tone(
+    app: &AppHandle,
+    profile_id: String,
+    tone: String,
+) -> Result<VoiceProfileSummary, String> {
+    let root = voice_root(app)?;
+    let profile_id = clean_id(&profile_id)?;
+    let dir = profile_dir(&root, &profile_id);
+    if !dir.exists() {
+        return Err(format!("voice profile not found: {profile_id}"));
+    }
+    let tone = tone.trim();
+    if tone.is_empty() || tone.chars().count() > 80 {
+        return Err("tone name must be 1 to 80 characters".to_string());
+    }
+    let mut metadata = read_profile_metadata(&dir).unwrap_or_else(|| VoiceProfileMetadata {
+        profile_id: profile_id.clone(),
+        display_name: profile_id.clone(),
+        reference_retained: dir.join("reference.wav").exists(),
+        tone: None,
+    });
+    metadata.tone = Some(tone.to_string());
+    write_json(&dir.join("profile.json"), &metadata)?;
+    profile_summary(&dir, &profile_id)
 }
 
 pub fn delete_profile_clips(
@@ -1322,6 +1355,7 @@ fn generate_clips_inner(
         profile_id: profile_id.clone(),
         display_name,
         reference_retained,
+        tone: read_profile_metadata(&dir).and_then(|existing| existing.tone),
     };
     write_json(&dir.join("profile.json"), &metadata)?;
     profile_summary(&dir, &profile_id)
@@ -1739,6 +1773,7 @@ fn profile_summary(dir: &Path, fallback_id: &str) -> Result<VoiceProfileSummary,
         profile_id: fallback_id.to_string(),
         display_name: fallback_id.to_string(),
         reference_retained: dir.join("reference.wav").exists(),
+        tone: None,
     });
     let clips = clip_summaries(&dir.join("clips"))?;
     let reference_path = dir.join("reference.wav");
@@ -1750,6 +1785,7 @@ fn profile_summary(dir: &Path, fallback_id: &str) -> Result<VoiceProfileSummary,
         profile_dir: dir.to_string_lossy().into_owned(),
         reference_path: reference_retained.then(|| reference_path.to_string_lossy().into_owned()),
         reference_retained,
+        tone: metadata.tone,
         clip_count: clips.len(),
         clips,
     })
@@ -2774,6 +2810,7 @@ fn seed_starter_profiles(root: &Path, app: Option<&AppHandle>) {
                 profile_id: (*id).to_string(),
                 display_name: (*name).to_string(),
                 reference_retained: true,
+                tone: read_profile_metadata(&dir).and_then(|existing| existing.tone),
             },
         );
     }
@@ -3113,6 +3150,36 @@ mod tests {
         assert!(!clips.join("old.wav").exists());
         assert_eq!(fs::read(clips.join("new.wav")).unwrap(), b"new");
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_profile_keeps_its_tone_through_reseeding_and_metadata_rewrites() {
+        let root = test_dir("tone-keeps");
+        let dir = profile_dir(&root, "derek");
+        fs::create_dir_all(&dir).unwrap();
+        write_json(
+            &dir.join("profile.json"),
+            &VoiceProfileMetadata {
+                profile_id: "derek".into(),
+                display_name: "Starter Male".into(),
+                reference_retained: true,
+                tone: Some("stern".into()),
+            },
+        )
+        .unwrap();
+
+        seed_starter_profiles(&root, None);
+        let summary = profile_summary(&dir, "derek").unwrap();
+        assert_eq!(summary.tone.as_deref(), Some("stern"));
+
+        // A profile written before tones existed reads back without one.
+        fs::write(
+            dir.join("profile.json"),
+            br#"{"profile_id":"derek","display_name":"Starter Male","reference_retained":true}"#,
+        )
+        .unwrap();
+        assert_eq!(profile_summary(&dir, "derek").unwrap().tone, None);
         let _ = fs::remove_dir_all(root);
     }
 

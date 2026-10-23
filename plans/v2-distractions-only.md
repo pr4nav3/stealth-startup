@@ -137,6 +137,15 @@ Changed:
   summary line keeps attention span.
 - **Legend**: Work, Distraction, Away, Paused (phone and suspicious draw red).
 - **State copy**: `stateTitle` loses "neutral"; default stays "Watching".
+- **Voice page** (mockup "Voice v2", 920×760, no scrolling): Voices as before;
+  a "?" on the title row opens the how-to; Voice model and Memory are two tiles
+  that turn red when they block and open popups (`›`); Clips for one voice
+  shows its tones (left) and the viewed tone's lines (right). A voice speaks
+  one tone (`set_voice_tone`, stored in profile.json); it is selectable once
+  every line of that tone has a clip, and nudges draw only from that tone.
+  "Generate N missing" makes the lines one after another in place (about 90 s
+  each), with Stop after this line and per-line Redo. Edit lines adds, edits
+  and deletes lines; custom tones can be renamed or deleted.
 - **Onboarding**: clone a voice, webcam (optional), first session. The "Add
   rules" step is replaced by a line in the intro: "Five common distractions are
   already on the list."

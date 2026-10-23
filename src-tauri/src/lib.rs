@@ -422,6 +422,15 @@ fn delete_voice_profile(
 }
 
 #[tauri::command]
+fn set_voice_tone(
+    app: AppHandle,
+    profile_id: String,
+    tone: String,
+) -> Result<voice::VoiceProfileSummary, String> {
+    voice::set_profile_tone(&app, profile_id, tone)
+}
+
+#[tauri::command]
 fn delete_voice_profile_clips(
     app: AppHandle,
     profile_id: String,
@@ -585,6 +594,7 @@ pub fn run() {
             list_voice_profiles,
             delete_voice_profile,
             delete_voice_profile_clips,
+            set_voice_tone,
             delete_voice_clip,
             start_webcam_preview,
             stop_webcam_preview

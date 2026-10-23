@@ -17,11 +17,15 @@ type WebcamReaction = "alarm" | "voice";
 type VoiceTone = string;
 type VoiceSource = "none" | "starter" | "custom";
 type VoiceBusy = "download-model" | "delete-model" | "generate-clips" | "delete-voice" | null;
-type ClipGeneratePhase = "working" | "ready" | "error";
-type ClipGenerate = {
-  phraseId: string;
-  phase: ClipGeneratePhase;
+/** Lines being made one after another for one voice; `index` is the line in progress. */
+type ClipQueue = {
+  voiceId: string;
+  phraseIds: string[];
+  index: number;
+  phase: "working" | "error";
   error: string;
+  startedAt: number;
+  stopAfter: boolean;
 };
 type VoiceDownloadPhase = "idle" | "checking" | "downloading" | "cancelling" | "complete" | "error";
 type RecordingState = "idle" | "recording" | "recorded" | "error";
@@ -346,6 +350,8 @@ interface VoiceProfileSummary {
   profile_dir: string;
   reference_path: string | null;
   reference_retained: boolean;
+  /** The tone this voice speaks in sessions; null until the user picks one. */
+  tone: string | null;
   clip_count: number;
   clips: VoiceClipSummary[];
 }
@@ -618,22 +624,26 @@ let customPhraseSets: string[] = [];
 let phraseOverrides: Record<string, PhraseDefinition> = {};
 let phraseEditor: PhraseEditor | null = null;
 let hiddenPhrases = new Set<string>();
-const openPhraseGroups = new Set<string>();
 let clipsVoiceId = "starter-female";
 let clipsVoiceTouched = false;
-let readyClipsOnly = false;
-let clipGenerate: ClipGenerate | null = null;
+/** The tone whose lines the Clips panel shows; null means the voice's own tone. */
+let clipsTone: VoiceTone | null = null;
+let clipsEditing = false;
+let toneRename: { from: VoiceTone; value: string } | null = null;
+let toneDeleteArmed = false;
+let clipQueue: ClipQueue | null = null;
+let clipQueueTicker: number | null = null;
 let ignoreVoiceWorkerError = false;
 const clipAssetRevision = new Map<string, number>();
-let createVoiceOpen = true;
+let voiceHelpOpen = false;
+let modelInfoOpen = false;
+let memoryInfoOpen = false;
 let modelDeleteOpen = false;
 let voiceBackend: VoiceBackendStatus | null = null;
 let voiceDownload: VoiceDownloadSnapshot | null = null;
 let voiceBusy: VoiceBusy = null;
 let voiceDeleteTargetId: string | null = null;
 let voiceInfoId: string | null = null;
-/** The RAM lock's details, opened from its strip. */
-let ramLockOpen = false;
 let voicePreviewAudio: HTMLAudioElement | null = null;
 const waveformPeaks = new Map<string, number[]>();
 const waveformPending = new Map<string, Promise<AudioBuffer>>();
@@ -841,12 +851,17 @@ function closeTopLayer(): void {
     dismissDownloadModal();
     return;
   }
-  if (clipGenerate?.phase === "working") {
-    void cancelClipGenerate();
+  if (voiceHelpOpen || modelInfoOpen || memoryInfoOpen) {
+    voiceHelpOpen = false;
+    modelInfoOpen = false;
+    memoryInfoOpen = false;
+    render();
     return;
   }
-  if (clipGenerate) {
-    void discardClipGenerate();
+  if (toneRename || toneDeleteArmed) {
+    toneRename = null;
+    toneDeleteArmed = false;
+    render();
     return;
   }
   if (voiceBusy) {
@@ -869,11 +884,6 @@ function closeTopLayer(): void {
   }
   if (historyConfirm) {
     historyConfirm = null;
-    render();
-    return;
-  }
-  if (ramLockOpen) {
-    ramLockOpen = false;
     render();
     return;
   }
@@ -952,7 +962,10 @@ function editorIsOpen(): boolean {
     historyConfirm !== null ||
     voiceDeleteTargetId !== null ||
     voiceInfoId !== null ||
-    clipGenerate !== null ||
+    clipQueue !== null ||
+    voiceHelpOpen ||
+    modelInfoOpen ||
+    memoryInfoOpen ||
     modelDeleteOpen ||
     voiceBusy !== null
   );
@@ -1923,27 +1936,16 @@ function renderVoiceSettings(): string {
   const creating = voiceBusy !== null || ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
   return `
     <section class="voice-page">
-      <div class="subpage-head">
+      <div class="subpage-head voice-head">
         <button type="button" data-action="back-settings">Back</button>
         <div>
           <p class="eyebrow">VOICE SETTINGS</p>
-          <h2>Voice library</h2>
+          <h2>Voices</h2>
         </div>
+        <button class="voice-help-button" type="button" data-action="open-voice-help" aria-label="How voice cloning works" aria-haspopup="dialog" title="How voice cloning works">?</button>
       </div>
 
       <section class="voice-grid">
-        <details class="panel create-voice-panel" data-create-voice ${createVoiceOpen ? "open" : ""}>
-          <summary>
-            <span>How to clone a voice</span>
-            ${
-              modelInstalled()
-                ? `<span class="create-voice-ready">Model installed</span>`
-                : `<span class="create-voice-missing">Model not installed</span>`
-            }
-          </summary>
-          ${renderCreateVoiceGuide()}
-        </details>
-
         <section class="panel voice-roster-panel">
           <div class="rule-toolbar">
             <p class="eyebrow">Voices</p>
@@ -1954,6 +1956,7 @@ function renderVoiceSettings(): string {
           </div>
         </section>
 
+        ${renderVoiceTiles()}
         ${renderVoiceClipsPanel()}
       </section>
     </section>
@@ -2019,12 +2022,7 @@ function fitVoiceCardNames(): void {
 function renderVoiceCard(voice: VoiceOption): string {
   const selected = draft.voiceId === voice.id;
   const profile = voice.profile;
-  const needsGeneration =
-    voice.source === "custom" &&
-    Boolean(
-      profile?.reference_retained &&
-        effectivePhrases().every((phrase) => !clipForPhraseId(profile.clips, phrase.id)),
-    );
+  const needsGeneration = voice.source === "custom" && Boolean(profile?.reference_retained) && !voice.selectable;
   const canUse = voice.selectable && voiceBusy === null;
   const action = needsGeneration ? "set-up-clips" : "select-voice";
   const disabled = needsGeneration ? voiceBusy !== null : !canUse || selected;
@@ -2053,131 +2051,318 @@ function voiceCardMark(voice: VoiceOption): string {
   return `<canvas class="voice-card-wave" width="88" height="32" data-wave-path="${attr(path)}" data-wave-bars="11"></canvas>`;
 }
 
-function renderCreateVoiceGuide(): string {
-  const installed = modelInstalled();
-  const downloading = ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
-  const busy = voiceBusy !== null || downloading;
-  const downloadLabel =
-    voiceDownload?.phase === "cancelling"
-      ? "Cancelling..."
-      : voiceDownload?.phase === "checking"
-        ? "Checking..."
-        : voiceDownload?.phase === "downloading"
-        ? "Downloading..."
-        : "Download model";
+/** About 90 seconds per clip on a typical laptop; the estimates and the hint quote it. */
+const CLIP_SECONDS = 90;
 
+/** Model and memory, the two things that can stop a clip being made. Each tile opens its numbers. */
+function renderVoiceTiles(): string {
+  const busyDownload = ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
+  const modelOk = modelInstalled() || busyDownload;
+  const modelValue = busyDownload ? "Updating…" : modelInstalled() ? "Installed" : "Not installed";
   return `
-    <div class="create-voice-body">
-      <p class="create-voice-intro">Supervisor nudges you in short spoken clips. Record anyone for about twenty seconds, generate their clips once, and from then on those clips play instantly, offline, without the model.</p>
-      <ol class="create-voice-steps">
-        <li><strong>1. Record a voice</strong><span>Press + New voice under Voices and read the prompt aloud. The starter voices are ready as they are.</span></li>
-        <li><strong>2. Generate its clips</strong><span>Under Voice clips, choose the voice and press Generate on a phrase. Each clip takes a moment and needs the model installed.</span></li>
-        <li><strong>3. Pick it for sessions</strong><span>Back under Voices, press Select. Only phrases with a ready clip are spoken.</span></li>
-      </ol>
-      <div class="create-voice-model">
-        <div>
-          <strong>Voice model</strong>
-          <p>${
-            installed
-              ? "Installed. Only needed while generating clips."
-              : "Download once to generate clips. Saved clips play without it."
-          }</p>
-        </div>
-        ${
-          installed
-            ? `<div class="modal-actions">
-                <button type="button" data-action="download-model-pack" ${busy ? "disabled" : ""}>${downloading ? downloadLabel : "Check for updates"}</button>
-                <button class="danger" type="button" data-action="ask-delete-model" ${busy ? "disabled" : ""}>Delete model</button>
-              </div>`
-            : `<button class="overlay-pause" type="button" data-action="download-model-pack" ${busy ? "disabled" : ""}>${downloadLabel}</button>`
-        }
+    <div class="voice-tiles">
+      <div class="voice-tile ${modelOk ? "" : "is-bad"}">
+        <span class="voice-tile-dot" aria-hidden="true"></span>
+        <div><p class="eyebrow">Voice model</p><strong>${escapeHtml(modelValue)}</strong></div>
+        <button type="button" data-action="open-model-info" aria-label="Voice model details" aria-haspopup="dialog">›</button>
+      </div>
+      <div class="voice-tile ${ramGenerationLocked() ? "is-bad" : ""}" data-memory-tile>
+        <span class="voice-tile-dot" aria-hidden="true"></span>
+        <div><p class="eyebrow">Memory</p><strong data-memory-value>${escapeHtml(memoryTileValue())}</strong></div>
+        <button type="button" data-action="open-memory-info" aria-label="Memory details" aria-haspopup="dialog">›</button>
       </div>
     </div>
   `;
 }
 
+function memoryTileValue(): string {
+  const system = voiceBackend?.system;
+  const free = system?.available_ram_bytes ?? null;
+  const need = system?.min_free_ram_bytes ?? 0;
+  if (free === null) {
+    return "Unknown";
+  }
+  return ramGenerationLocked() ? `${formatBytes(free)} free, needs ${formatBytes(need)}` : `${formatBytes(free)} free`;
+}
+
+/** Clips for one voice: its tones on the left, the viewed tone's lines on the right. */
 function renderVoiceClipsPanel(): string {
   const voice = clipsVoice();
-  const phrases = effectivePhrases();
-  const ready = readyClipCount(voice, phrases);
-
+  const speaks = voiceTone(voice);
+  const tones = phraseToneOrder();
+  const viewed = viewedTone(voice);
+  const viewedPhrases = tonePhrases(viewed);
+  const speaksPhrases = tonePhrases(speaks);
+  const summary = `· speaks ${toneLabel(speaks)} · ${readyClipCount(voice, speaksPhrases)} of ${speaksPhrases.length} lines ready`;
+  const editToggle = clipQueue
+    ? `<button type="button" class="small-button" disabled>Edit lines</button>`
+    : `<button type="button" class="small-button ${clipsEditing ? "is-on" : ""}" data-action="toggle-edit-lines" aria-pressed="${clipsEditing}">${clipsEditing ? "Done" : "Edit lines"}</button>`;
   return `
     <section class="panel phrase-panel">
-      <p class="eyebrow">Voice clips</p>
-      ${renderRamLock()}
-      <div class="rule-toolbar voice-clips-toolbar">
-        <div class="voice-clips-meta">
-          <label>
-            <span>Clips for</span>
-            <select id="voice-clips-voice">${voiceOptions(voice.id, true)}</select>
-          </label>
-          <strong class="voice-clips-count">${ready} of ${phrases.length} ready</strong>
+      <div class="clips-strip">
+        <div class="clips-for">
+          <p class="eyebrow">Clips</p>
+          <span class="clips-for-word">for</span>
+          <select id="voice-clips-voice" aria-label="Voice to make clips for" ${clipQueue ? "disabled" : ""}>${voiceOptions(voice.id, true)}</select>
+          <span class="clips-summary">${escapeHtml(summary)}</span>
         </div>
-        <div class="rule-toolbar-actions">
-          <button type="button" data-action="open-phrase-editor" ${canEditPhrases() ? "" : "disabled"}>+ Add phrase</button>
-          <button type="button" data-action="open-phrase-editor" data-new-set="1" ${canEditPhrases() ? "" : "disabled"}>+ New set</button>
-        </div>
-          <p class="voice-clips-note">${escapeHtml(clipGenerateLockTitle(voice) || "Only ready clips play during sessions.")}</p>
-        <label class="voice-clips-ready-only">
-          <input id="voice-clips-ready-only" type="checkbox" ${readyClipsOnly ? "checked" : ""} />
-          <span>Ready only</span>
-        </label>
+        ${editToggle}
       </div>
-      ${phraseEditor ? renderPhraseEditor() : ""}
-      ${renderPhraseLibrary()}
+      <div class="clips-grid">
+        <div class="clips-card">
+          <div class="clips-card-head"><p class="eyebrow">Tone</p><span>${tones.length === 1 ? "1 tone" : `${tones.length} tones`}</span></div>
+          <div class="tone-list" aria-label="Tones">
+            ${tones.map((tone) => renderToneRow(voice, tone, sameTone(tone, viewed), sameTone(tone, speaks))).join("")}
+            ${clipsEditing ? `<button type="button" class="tone-row is-add" data-action="new-tone" ${canEditPhrases() ? "" : "disabled"}><span class="tone-name">+ New tone</span></button>` : ""}
+          </div>
+        </div>
+        <div class="clips-card clips-lines">
+          <div class="clips-card-head">
+            ${toneRename ? renderToneRenameForm() : `<p class="eyebrow">${escapeHtml(toneLabel(viewed))} lines</p>`}
+            <span>${readyClipCount(voice, viewedPhrases)} of ${viewedPhrases.length} ready</span>
+          </div>
+          ${phraseEditor ? renderPhraseEditor() : ""}
+          <div class="line-list">
+            ${viewedPhrases.length ? viewedPhrases.map((phrase) => renderLineRow(voice, phrase)).join("") : `<p class="empty">No lines in this tone yet.</p>`}
+            ${clipsEditing ? `<button type="button" class="line-row is-add" data-action="add-line" data-tone="${attr(viewed)}" ${canEditPhrases() ? "" : "disabled"}><span class="line-dot" aria-hidden="true"></span><p>Add a line to ${escapeHtml(toneLabel(viewed))}</p></button>` : ""}
+          </div>
+          ${renderClipsFooter(voice, viewed, viewedPhrases)}
+        </div>
+      </div>
     </section>
   `;
 }
 
-function renderRamLock(): string {
-  const system = voiceBackend?.system;
-  const locked = ramGenerationLocked();
-  const free = system?.available_ram_bytes ?? null;
-  const need = system?.min_free_ram_bytes ?? 0;
-  const peak = system?.last_peak_ram_bytes ?? null;
-
-  if (!locked) {
-    return `
-      <aside class="ram-lock is-clear" role="status" aria-live="polite">
-        <span class="ram-lock-machine">${escapeHtml(ramMachineLabel(system?.total_ram_bytes ?? null))}</span>
-        <p data-ram-copy>${escapeHtml(ramLockCopy(false, free, need, peak))}</p>
-      </aside>
-    `;
-  }
+function renderToneRow(voice: VoiceOption, tone: VoiceTone, viewed: boolean, speaks: boolean): string {
+  const phrases = tonePhrases(tone);
+  const ready = readyClipCount(voice, phrases);
+  const complete = phrases.length > 0 && ready === phrases.length;
   return `
-    <aside class="ram-lock is-locked" role="status" aria-live="polite">
-      <span class="ram-lock-stamp">Voice clone locked</span>
-      <p>Not enough free RAM to generate clips right now.</p>
-      <div class="ram-lock-actions">
-        <button type="button" data-action="open-ram-lock">Details</button>
-        <button type="button" data-action="check-ram">Check again</button>
-      </div>
-    </aside>
+    <button type="button" class="tone-row ${viewed ? "is-on" : ""}" data-action="pick-tone" data-tone="${attr(tone)}" aria-pressed="${viewed}">
+      <span class="tone-dot ${complete ? "is-ready" : ""}" aria-hidden="true"></span>
+      <span class="tone-name">${escapeHtml(toneLabel(tone))}</span>
+      ${speaks ? `<span class="tone-speaks">speaks</span>` : ""}
+      <span class="tone-count">${ready}/${phrases.length}</span>
+    </button>
   `;
 }
 
-/** The lock's numbers and what to do about it, as a popup over the voice page. */
-function renderRamLockModal(): string {
+function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
+  const clip = clipForPhrase(voice, phrase);
+  const job = clipQueue && clipQueue.voiceId === voice.id ? clipQueue : null;
+  const position = job ? job.phraseIds.indexOf(phrase.id) : -1;
+  const busy = Boolean(job && position === job.index && job.phase === "working");
+  const failed = Boolean(job && position === job.index && job.phase === "error");
+  const queued = Boolean(job && position > job.index);
+  const dot = `<span class="line-dot ${clip ? "is-ready" : ""}" aria-hidden="true"></span>`;
+  const text = `<p>${escapeHtml(phrase.text)}</p>`;
+  if (clipsEditing) {
+    return `
+      <div class="line-row ${clip ? "" : "is-missing"}">
+        ${dot}${text}
+        <span class="line-actions">
+          <button class="small-button" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${canEditPhrases() ? "" : "disabled"}>Edit</button>
+          <button class="small-button is-danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(phrase.id)}" ${canEditPhrases() ? "" : "disabled"}>Delete</button>
+        </span>
+      </div>
+    `;
+  }
+  let trail: string;
+  if (busy) {
+    trail = `<span class="line-state is-busy" data-clip-elapsed>${escapeHtml(clipElapsedText())}</span>`;
+  } else if (failed) {
+    trail = `<span class="line-actions"><span class="line-state is-bad" title="${attr(job?.error ?? "")}">Failed</span><button class="small-button" type="button" data-action="generate-clip" data-phrase-id="${attr(phrase.id)}">Retry</button></span>`;
+  } else if (queued) {
+    trail = `<span class="line-state">Queued</span>`;
+  } else if (clip) {
+    const redoLock = clipQueue ? "Wait for the current line" : clipGenerateLockTitle(voice);
+    trail = `
+      <span class="line-actions">
+        <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>
+        </button>
+        <button class="small-button" type="button" data-action="generate-clip" data-phrase-id="${attr(phrase.id)}" ${redoLock ? "disabled" : ""} title="${attr(redoLock || "Make this line again")}">Redo</button>
+      </span>
+    `;
+  } else {
+    trail = `<span class="line-state">No clip</span>`;
+  }
+  return `<div class="line-row ${clip ? "" : "is-missing"} ${busy ? "is-busy" : ""}">${dot}${text}${trail}</div>`;
+}
+
+function clipElapsedText(): string {
+  const seconds = clipQueue ? Math.max(0, Math.round((performance.now() - clipQueue.startedAt) / 1000)) : 0;
+  return `Making · ${seconds} s of ~${CLIP_SECONDS} s`;
+}
+
+function paintClipQueue(): void {
+  const label = document.querySelector("[data-clip-elapsed]");
+  if (label && clipQueue?.phase === "working") {
+    label.textContent = clipElapsedText();
+  }
+}
+
+/** "4½ min", "1 min", "45 s". */
+function formatQueueTime(totalSeconds: number): string {
+  if (totalSeconds < 60) {
+    return `${totalSeconds} s`;
+  }
+  const halves = Math.round(totalSeconds / 30);
+  const whole = Math.floor(halves / 2);
+  return `${whole || ""}${halves % 2 ? "½" : ""} min`.replace(/^½/, "½").trim();
+}
+
+function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: PhraseDefinition[]): string {
+  const speaks = voiceTone(voice);
+  const custom = isCustomTone(viewed);
+  if (clipsEditing) {
+    const guard = custom && canEditPhrases();
+    const title = custom ? "" : "Built-in tones keep their name and stay";
+    const actions = toneDeleteArmed
+      ? `<span class="clips-hint">Delete ${escapeHtml(toneLabel(viewed))} and its ${phrases.length} ${phrases.length === 1 ? "line" : "lines"}?</span>
+         <button class="small-button is-danger" type="button" data-action="delete-tone">Delete</button>
+         <button class="small-button" type="button" data-action="cancel-delete-tone">Cancel</button>`
+      : `<button class="small-button" type="button" data-action="rename-tone" ${guard ? "" : "disabled"} title="${attr(title)}">Rename tone</button>
+         <button class="small-button is-danger" type="button" data-action="arm-delete-tone" ${guard ? "" : "disabled"} title="${attr(title)}">Delete tone</button>`;
+    return `
+      <div class="clips-foot">
+        <div class="clips-foot-actions">${actions}</div>
+        <span class="clips-hint">A changed line keeps its old clip until a new one is made.</span>
+      </div>
+    `;
+  }
+  const job = clipQueue && clipQueue.voiceId === voice.id ? clipQueue : null;
+  if (job && job.phase === "working") {
+    const total = job.phraseIds.length;
+    const left = Math.max(1, total - job.index) * CLIP_SECONDS;
+    return `
+      <div class="clips-foot">
+        <button class="small-button is-danger" type="button" data-action="stop-clip-queue" ${job.stopAfter ? "disabled" : ""}>${job.stopAfter ? "Stopping after this line" : "Stop after this line"}</button>
+        <span class="clips-hint">${job.index} of ${total} done · about ${escapeHtml(formatQueueTime(left))} left</span>
+      </div>
+    `;
+  }
+  const useTone = sameTone(viewed, speaks)
+    ? ""
+    : `<button class="small-button" type="button" data-action="use-tone" data-tone="${attr(viewed)}" ${voice.profile && voiceBusy === null ? "" : "disabled"}>Use this tone</button>`;
+  if (phrases.length === 0) {
+    return `<div class="clips-foot"><span class="clips-hint">Add a line to this tone under Edit lines.</span></div>`;
+  }
+  const missing = phrases.filter((phrase) => !clipForPhrase(voice, phrase));
+  if (missing.length === 0) {
+    return `
+      <div class="clips-foot">
+        <div class="clips-foot-actions"><span class="clips-hint is-ready">All ${phrases.length} lines ready.</span>${useTone}</div>
+      </div>
+    `;
+  }
+  const lock = clipGenerateLockTitle(voice);
+  const tileBad = !modelInstalled() || ramGenerationLocked();
+  const hint = tileBad ? "Fix the red card above first." : lock || `About ${CLIP_SECONDS} s a clip. Sounds off? Redo that line alone.`;
+  return `
+    <div class="clips-foot">
+      <div class="clips-foot-actions">
+        <button class="primary small-button clips-generate" type="button" data-action="generate-missing" ${lock || clipQueue ? "disabled" : ""}>Generate ${missing.length} missing · ~${escapeHtml(formatQueueTime(missing.length * CLIP_SECONDS))}</button>
+        ${useTone}
+      </div>
+      <span class="clips-hint">${escapeHtml(hint)}</span>
+    </div>
+  `;
+}
+
+function renderToneRenameForm(): string {
+  return `
+    <form class="tone-rename" id="tone-rename">
+      <input id="tone-rename-input" maxlength="80" value="${attr(toneRename?.value ?? "")}" aria-label="Tone name" autocomplete="off" />
+      <button class="primary small-button" type="submit">Save</button>
+      <button class="small-button" type="button" data-action="cancel-rename-tone">Cancel</button>
+    </form>
+  `;
+}
+
+function renderVoiceHelpModal(): string {
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel voice-popup" role="dialog" aria-modal="true" aria-labelledby="voice-help-title">
+        <div class="voice-info-head">
+          <div>
+            <p class="eyebrow">Voices</p>
+            <h2 id="voice-help-title">How voice cloning works</h2>
+          </div>
+          <button class="small-button" type="button" data-action="close-voice-help">Close</button>
+        </div>
+        <p>Supervisor nudges you in short spoken clips. Record anyone for about twenty seconds, make their clips once, and from then on those clips play instantly, offline, without the model.</p>
+        <ol class="voice-help-steps">
+          <li><strong>Record a voice.</strong> Press + New voice and read the prompt aloud. The starter voices come ready.</li>
+          <li><strong>Make its clips.</strong> Under Clips, pick the voice and a tone, then press Generate. Each clip takes about ${CLIP_SECONDS} seconds and needs the voice model installed and some free memory.</li>
+          <li><strong>Select it.</strong> A voice speaks one tone. Once every line in that tone has a clip, Select it under Voices.</li>
+        </ol>
+        <p class="quiet">Listen to each clip. If a line sounds off, press Redo on that line alone.</p>
+      </section>
+    </div>
+  `;
+}
+
+function renderModelInfoModal(): string {
+  const model = voiceBackend?.model;
+  const runtime = voiceBackend?.runtime;
+  const installed = modelInstalled();
+  const files = model ? `${model.files.filter((file) => file.valid).length} of ${model.files.length}` : "—";
+  const busy = voiceBusy !== null || ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel voice-popup" role="dialog" aria-modal="true" aria-labelledby="model-info-title">
+        <div class="voice-info-head">
+          <div>
+            <p class="eyebrow">Voice model</p>
+            <h2 id="model-info-title">${installed ? "Installed" : "Not installed"}</h2>
+          </div>
+          <button class="small-button" type="button" data-action="close-model-info">Close</button>
+        </div>
+        <div class="voice-kv">
+          <div><span>On disk</span><strong>${escapeHtml(model ? formatBytes(model.installed_bytes) : "—")}</strong></div>
+          <div><span>Files</span><strong>${escapeHtml(files)}</strong></div>
+          <div><span>Runtime</span><strong>${escapeHtml(runtime?.installed ? runtime.version ?? "installed" : "missing")}</strong></div>
+        </div>
+        <p>${
+          installed
+            ? "Loaded only while a clip is being made. Check for updates compares the installed files with the pack; nothing is downloaded unless a file is missing or damaged."
+            : `A one-time download of about ${escapeHtml(formatBytes(model?.required_bytes ?? 0))}. Saved clips play without it; making new ones needs it.`
+        }</p>
+        <div class="modal-actions">
+          ${installed ? `<button class="danger" type="button" data-action="ask-delete-model" ${busy ? "disabled" : ""}>Delete model</button>` : ""}
+          <button class="${installed ? "" : "primary"}" type="button" data-action="download-model-pack" ${busy ? "disabled" : ""}>${installed ? "Check for updates" : "Download model"}</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderMemoryInfoModal(): string {
   const system = voiceBackend?.system;
   const free = system?.available_ram_bytes ?? null;
   const need = system?.min_free_ram_bytes ?? 0;
   const peak = system?.last_peak_ram_bytes ?? null;
+  const locked = ramGenerationLocked();
   return `
     <div class="modal-backdrop" role="presentation">
-      <section class="modal-panel ram-lock-panel" role="dialog" aria-modal="true" aria-labelledby="ram-lock-title">
+      <section class="modal-panel voice-popup" role="dialog" aria-modal="true" aria-labelledby="memory-info-title">
         <div class="voice-info-head">
           <div>
-            <p class="eyebrow">Voice clips</p>
-            <h2 id="ram-lock-title">Voice clone locked</h2>
+            <p class="eyebrow">Memory</p>
+            <h2 id="memory-info-title">${locked ? "Not enough free memory" : "Enough memory"}</h2>
           </div>
-          <button class="small-button" type="button" data-action="close-ram-lock">Close</button>
+          <button class="small-button" type="button" data-action="close-memory-info">Close</button>
         </div>
-        <span class="ram-lock-machine">${escapeHtml(ramMachineLabel(system?.total_ram_bytes ?? null))}</span>
-        <p data-ram-copy>${escapeHtml(ramLockCopy(true, free, need, peak))}</p>
-        <p>Generating a clip loads the voice model into memory for a few seconds. Once a clip is saved it plays without the model, so nothing already generated is affected.</p>
+        <div class="voice-kv">
+          <div><span>Needs free</span><strong>${escapeHtml(need ? formatBytes(need) : "—")}</strong></div>
+          <div><span>Free now</span><strong class="${locked ? "is-bad" : ""}" data-ram-free>${escapeHtml(free === null ? "—" : formatBytes(free))}</strong></div>
+          <div><span>In this machine</span><strong data-ram-machine>${escapeHtml(system?.total_ram_bytes ? formatBytes(system.total_ram_bytes) : "—")}</strong></div>
+        </div>
+        <p data-ram-copy>${escapeHtml(ramLockCopy(locked, free, need, peak))}</p>
+        <p class="quiet">Clips you already have keep playing. They never need the model or this memory.</p>
         <div class="modal-actions">
-          <button class="primary" type="button" data-action="check-ram">Check again</button>
-          <button type="button" data-action="close-ram-lock">Close</button>
+          <button class="${locked ? "primary" : ""}" type="button" data-action="check-ram">Check again</button>
         </div>
       </section>
     </div>
@@ -2186,34 +2371,33 @@ function renderRamLockModal(): string {
 
 function ramLockCopy(locked: boolean, free: number | null, need: number, peak: number | null): string {
   if (locked) {
-    return `Generating voice clips needs about ${need ? formatBytes(need) : "enough"} of available RAM. You currently have ${free === null ? "?" : formatBytes(free)}. Close other apps, then check again.`;
+    return `Making a clip loads the voice model for about ${CLIP_SECONDS} seconds and needs about ${need ? formatBytes(need) : "enough"} free; you have ${free === null ? "?" : formatBytes(free)}. Close other apps, then check again.`;
   }
   return peak
-    ? `Enough free RAM to generate clips. The last one peaked at ${formatBytes(peak)}; generating pauses if less than ${formatBytes(need)} is free.`
-    : `Enough free RAM to generate clips. Keep about ${formatBytes(need)} free while generating.`;
+    ? `Making a clip loads the voice model for about ${CLIP_SECONDS} seconds, then frees it. The last one peaked at ${formatBytes(peak)}.`
+    : `Making a clip loads the voice model for about ${CLIP_SECONDS} seconds, then frees it.`;
 }
 
-function ramMachineLabel(total: number | null): string {
-  return `Machine RAM: ${total ? formatBytes(total) : "?"}`;
-}
-
+/** The memory tile and popup follow the live numbers without a full render. */
 function paintVoiceRam(): void {
-  const root = document.querySelector(".ram-lock");
-  if (!root || !voiceBackend) {
-    return;
-  }
-  const locked = ramGenerationLocked();
-  if (root.classList.contains("is-locked") !== locked) {
+  if (!voiceBackend) {
     return;
   }
   const system = voiceBackend.system;
   const free = system.available_ram_bytes ?? null;
   const need = system.min_free_ram_bytes ?? 0;
+  const locked = ramGenerationLocked();
+  const value = document.querySelector("[data-memory-value]");
+  if (value) {
+    value.textContent = memoryTileValue();
+    value.closest("[data-memory-tile]")?.classList.toggle("is-bad", locked);
+  }
   document.querySelectorAll("[data-ram-copy]").forEach((copy) => {
     copy.textContent = ramLockCopy(locked, free, need, system.last_peak_ram_bytes ?? null);
   });
-  document.querySelectorAll(".ram-lock-machine").forEach((machine) => {
-    machine.textContent = ramMachineLabel(system.total_ram_bytes ?? null);
+  document.querySelectorAll("[data-ram-free]").forEach((node) => {
+    node.textContent = free === null ? "—" : formatBytes(free);
+    node.classList.toggle("is-bad", locked);
   });
 }
 
@@ -2245,61 +2429,6 @@ function renderPhraseEditor(): string {
   `;
 }
 
-function renderPhraseLibrary(): string {
-  const voice = clipsVoice();
-  const phrases = effectivePhrases();
-  const editable = canEditPhrases();
-  return `
-    <div class="phrase-groups">
-      ${phraseToneOrder()
-        .map((tone) => {
-          const inSet = phrases.filter((phrase) => phrase.tone.toLowerCase() === tone.toLowerCase());
-          const readyInSet = readyClipCount(voice, inSet);
-          const items = readyClipsOnly ? inSet.filter((phrase) => clipForPhrase(voice, phrase)) : inSet;
-          if (!items.length) {
-            return "";
-          }
-          return `
-            <details class="phrase-group" data-phrase-group="${attr(tone)}" ${openPhraseGroups.has(tone) ? "open" : ""}>
-              <summary>
-                <span>${escapeHtml(toneLabel(tone))}</span>
-                <small>${readyInSet} of ${inSet.length} clips ready</small>
-              </summary>
-              <div class="rows phrase-group-rows">
-                ${items
-                  .map((phrase) => {
-                    const clip = clipForPhrase(voice, phrase);
-                    const ready = Boolean(clip);
-                    const canGenerate = canGenerateClip(voice);
-                    const generateTitle = clipGenerateLockTitle(voice);
-                    return `
-                      <div class="row phrase-row">
-                        <span class="clip-dot ${ready ? "is-ready" : "is-empty"}" aria-hidden="true"></span>
-                        <span class="clip-status ${ready ? "is-ready" : "is-empty"}">${ready ? "Ready" : "No clip"}</span>
-                        <strong>${escapeHtml(phrase.text)}</strong>
-                        <div class="phrase-row-actions">
-                          ${
-                            clip
-                              ? `<button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play clip">
-                                  <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>
-                                </button>`
-                              : `<button class="small-button" type="button" data-action="generate-clip" data-phrase-id="${escapeHtml(phrase.id)}" ${canGenerate ? "" : "disabled"} title="${attr(generateTitle)}">Generate</button>`
-                          }
-                          <button class="small-button" type="button" data-action="open-phrase-editor" data-phrase-id="${escapeHtml(phrase.id)}" ${editable ? "" : "disabled"}>Edit</button>
-                        </div>
-                      </div>
-                    `;
-                  })
-                  .join("")}
-              </div>
-            </details>
-          `;
-        })
-        .join("")}
-    </div>
-  `;
-}
-
 function renderVoiceDialogs(): string {
   if (appView !== "main") {
     return "";
@@ -2308,12 +2437,13 @@ function renderVoiceDialogs(): string {
   const showVoiceDialog = activeTab === "settings" && settingsView === "voice";
   return `
     ${showVoiceDialog && recordingOpen ? renderRecordingModal() : ""}
-    ${showVoiceDialog && voiceInfoId && !voiceDeleteTargetId && !clipGenerate && !voiceBusy ? renderVoiceInfoModal() : ""}
+    ${showVoiceDialog && voiceInfoId && !voiceDeleteTargetId && !voiceBusy ? renderVoiceInfoModal() : ""}
     ${showVoiceDialog && voiceDeleteTargetId ? renderDeleteVoiceModal() : ""}
     ${showVoiceDialog && modelDeleteOpen ? renderDeleteModelModal() : ""}
-    ${showVoiceDialog && ramLockOpen && ramGenerationLocked() ? renderRamLockModal() : ""}
-    ${showVoiceDialog && clipGenerate ? renderClipGenerateModal() : ""}
-    ${voiceBusy && !clipGenerate ? renderVoiceBusyModal() : ""}
+    ${showVoiceDialog && modelInfoOpen && !modelDeleteOpen && !voiceBusy ? renderModelInfoModal() : ""}
+    ${showVoiceDialog && memoryInfoOpen && !voiceBusy ? renderMemoryInfoModal() : ""}
+    ${showVoiceDialog && voiceHelpOpen ? renderVoiceHelpModal() : ""}
+    ${voiceBusy && !clipQueue ? renderVoiceBusyModal() : ""}
   `;
 }
 
@@ -2510,67 +2640,6 @@ function renderDeleteVoiceModal(): string {
           <button type="button" data-action="delete-voice-files" ${profile.clip_count === 0 ? "disabled" : ""}>Delete clips, keep the recording</button>
           <button class="danger" type="button" data-action="delete-voice-profile">Delete the voice</button>
         </div>
-      </section>
-    </div>
-  `;
-}
-
-function renderClipGenerateModal(): string {
-  const job = clipGenerate;
-  if (!job) {
-    return "";
-  }
-  const phrase = effectivePhrases().find((item) => item.id === job.phraseId);
-  const voice = clipsVoice();
-  const clip = phrase ? clipForPhrase(voice, phrase) : null;
-  const meta = [voice.name, phrase ? toneLabel(phrase.tone) : ""].filter(Boolean).join(" · ");
-  const body =
-    job.phase === "working"
-      ? `<div class="clip-generate-wait" aria-live="polite">
-          <p class="clip-generate-progress">
-            Generating clip
-            <span class="clip-generate-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-          </p>
-          <p class="clip-generate-eta">About 60-90 seconds left</p>
-          <p class="clip-generate-eta-note">The first clip takes the longest, because the model has to load. After that, new clips come faster.</p>
-        </div>`
-      : job.phase === "error"
-        ? `<div class="clip-generate-error" role="alert">
-            <p class="clip-generate-eta">Could not generate this clip</p>
-            <p class="clip-generate-eta-note">${escapeHtml(job.error || "The local worker could not generate this clip.")}</p>
-          </div>
-          <div class="clip-generate-actions is-two">
-            <button type="button" data-action="regenerate-clip">Try again</button>
-            <button type="button" data-action="close-clip-generate">Close</button>
-          </div>`
-        : `<p class="clip-generate-ready">Clip Generated</p>
-          <div class="clip-generate-player">
-            <button class="voice-preview-play" type="button" data-action="toggle-voice-preview" ${clip ? "" : "disabled"} aria-label="Play">
-              <span class="voice-preview-icon" aria-hidden="true"></span>
-            </button>
-            <div class="voice-info-wave">
-              <canvas id="voice-preview-wave" width="320" height="56" data-wave-path="${attr(clip?.path ?? "")}" data-wave-bars="40"></canvas>
-              <input id="voice-preview-bar" type="range" min="0" max="1" value="0" step="0.01" ${clip ? "" : "disabled"} aria-label="Playback" />
-              <div class="voice-info-times">
-                <span id="voice-preview-elapsed">0:00</span>
-                <span id="voice-preview-total">0:00</span>
-              </div>
-            </div>
-          </div>
-          <p class="clip-generate-hint">Listen before keeping this clip.</p>
-          <div class="clip-generate-actions">
-            <button type="button" data-action="regenerate-clip">Try again</button>
-            <button class="primary" type="button" data-action="keep-clip">Keep clip</button>
-            <button type="button" data-action="close-clip-generate">Close</button>
-          </div>`;
-
-  return `
-    <div class="modal-backdrop busy-backdrop" role="presentation">
-      <section class="modal-panel clip-generate-panel" role="dialog" aria-modal="true" aria-labelledby="clip-generate-title">
-        <p class="eyebrow">VOICE CLIP</p>
-        <h2 id="clip-generate-title">${escapeHtml(phrase?.text ?? "Voice clip")}</h2>
-        <p class="clip-generate-meta">${escapeHtml(meta)}</p>
-        ${body}
       </section>
     </div>
   `;
@@ -3302,7 +3371,8 @@ function renderTrendCard(card: {
   return `
     <section class="panel trend-card trend-${card.tone}">
       <div class="trend-head">
-        <p class="eyebrow">${escapeHtml(card.title)}${card.hint ? ` <span class="trend-hint">· ${escapeHtml(card.hint)}</span>` : ""}</p>
+        <p class="eyebrow">${escapeHtml(card.title)}</p>
+        ${card.hint ? `<p class="trend-hint">${escapeHtml(card.hint)}</p>` : ""}
         <div class="trend-figure">
           <p class="trend-value">${escapeHtml(card.value)}</p>
           ${compare.pill ? `<span class="trend-pill ${compare.good ? "is-good" : "is-bad"}">${escapeHtml(compare.pill)}</span>` : ""}
@@ -3768,37 +3838,30 @@ function bindEvents(): void {
     });
   });
 
-  document.querySelector("details[data-create-voice]")?.addEventListener("toggle", (event) => {
-    createVoiceOpen = (event.currentTarget as HTMLDetailsElement).open;
-  });
-
   document.getElementById("voice-clips-voice")?.addEventListener("change", (event) => {
     const voiceId = (event.target as HTMLSelectElement).value;
     if (!availableVoices().some((item) => item.id === voiceId)) {
       return;
     }
+    clearFailedQueue();
     clipsVoiceId = voiceId;
     clipsVoiceTouched = true;
+    clipsTone = null;
+    toneRename = null;
+    toneDeleteArmed = false;
+    phraseEditor = null;
     render();
   });
 
-  document.getElementById("voice-clips-ready-only")?.addEventListener("change", (event) => {
-    readyClipsOnly = (event.target as HTMLInputElement).checked;
-    render();
+  const toneForm = document.getElementById("tone-rename") as HTMLFormElement | null;
+  toneForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void renameTone();
   });
-
-  document.querySelectorAll<HTMLDetailsElement>("[data-phrase-group]").forEach((details) => {
-    details.addEventListener("toggle", () => {
-      const tone = details.dataset.phraseGroup;
-      if (!tone) {
-        return;
-      }
-      if (details.open) {
-        openPhraseGroups.add(tone);
-      } else {
-        openPhraseGroups.delete(tone);
-      }
-    });
+  document.getElementById("tone-rename-input")?.addEventListener("input", (event) => {
+    if (toneRename) {
+      toneRename.value = (event.target as HTMLInputElement).value;
+    }
   });
 
   document.getElementById("preflight-duration")?.addEventListener("input", (event) => {
@@ -3861,56 +3924,13 @@ function releaseVoiceWorker(): void {
 }
 
 function leaveVoiceScreen(): void {
-  if (clipGenerate?.phase === "working") {
-    stopVoicePreview();
-  } else if (clipGenerate) {
-    void discardClipGenerate();
+  if (clipQueue?.phase === "working") {
+    clipQueue.stopAfter = true;
   } else {
-    stopVoicePreview();
+    clipQueue = null;
   }
-  releaseVoiceWorker();
-}
-
-async function cancelClipGenerate(): Promise<void> {
-  if (voiceBusy === "generate-clips") {
-    ignoreVoiceWorkerError = true;
-  }
-  try {
-    await invoke("cancel_voice_generation");
-  } catch {
-    // worker may already be gone
-  }
-  dismissClipGenerate();
-}
-
-function dismissClipGenerate(): void {
   stopVoicePreview();
-  clipGenerate = null;
-  render();
-}
-
-async function discardClipGenerate(): Promise<void> {
-  const job = clipGenerate;
-  const voice = clipsVoice();
-  const phrase =
-    job?.phase === "ready" ? effectivePhrases().find((item) => item.id === job.phraseId) : undefined;
-  const clip = phrase ? clipForPhrase(voice, phrase) : null;
-  const profileId = voice.profile?.profile_id;
-  dismissClipGenerate();
-  if (job?.phase !== "ready" || !clip || !profileId) {
-    return;
-  }
-  try {
-    upsertProfile(
-      await invoke<VoiceProfileSummary>("delete_voice_clip", {
-        input: { profile_id: profileId, clip_id: clip.clip_id },
-      }),
-    );
-    bumpClipAsset(clip.path);
-    render();
-  } catch (error) {
-    showFeedback(`Could not discard clip: ${errorText(error)}`);
-  }
+  releaseVoiceWorker();
 }
 
 async function startSession(): Promise<boolean> {
@@ -4249,16 +4269,106 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "check-ram") {
     await refreshVoiceStatus(true);
-    if (!ramGenerationLocked()) {
-      ramLockOpen = false;
+    return;
+  }
+
+  if (action === "open-memory-info" || action === "close-memory-info") {
+    memoryInfoOpen = action === "open-memory-info";
+    render();
+    return;
+  }
+
+  if (action === "open-model-info" || action === "close-model-info") {
+    modelInfoOpen = action === "open-model-info";
+    render();
+    return;
+  }
+
+  if (action === "open-voice-help" || action === "close-voice-help") {
+    voiceHelpOpen = action === "open-voice-help";
+    render();
+    return;
+  }
+
+  if (action === "pick-tone") {
+    clearFailedQueue();
+    clipsTone = source?.dataset.tone ?? null;
+    toneRename = null;
+    toneDeleteArmed = false;
+    phraseEditor = null;
+    render();
+    return;
+  }
+
+  if (action === "use-tone") {
+    const tone = source?.dataset.tone;
+    if (tone) {
+      await setVoiceTone(clipsVoice(), tone);
+    }
+    return;
+  }
+
+  if (action === "generate-missing") {
+    const voice = clipsVoice();
+    const missing = tonePhrases(viewedTone(voice)).filter((phrase) => !clipForPhrase(voice, phrase));
+    await runClipQueue(missing.map((phrase) => phrase.id));
+    return;
+  }
+
+  if (action === "stop-clip-queue") {
+    if (clipQueue?.phase === "working") {
+      clipQueue.stopAfter = true;
       render();
     }
     return;
   }
 
-  if (action === "open-ram-lock" || action === "close-ram-lock") {
-    ramLockOpen = action === "open-ram-lock";
+  if (action === "toggle-edit-lines") {
+    clearFailedQueue();
+    clipsEditing = !clipsEditing;
+    phraseEditor = null;
+    toneRename = null;
+    toneDeleteArmed = false;
     render();
+    return;
+  }
+
+  if (action === "new-tone") {
+    openPhraseEditor(null, NEW_SET);
+    return;
+  }
+
+  if (action === "add-line") {
+    openPhraseEditor(null, source?.dataset.tone || viewedTone(clipsVoice()));
+    return;
+  }
+
+  if (action === "rename-tone") {
+    const tone = viewedTone(clipsVoice());
+    if (isCustomTone(tone)) {
+      toneRename = { from: tone, value: tone };
+      toneDeleteArmed = false;
+      render();
+      requestAnimationFrame(() => (document.getElementById("tone-rename-input") as HTMLInputElement | null)?.select());
+    }
+    return;
+  }
+
+  if (action === "cancel-rename-tone") {
+    toneRename = null;
+    render();
+    return;
+  }
+
+  if (action === "arm-delete-tone" || action === "cancel-delete-tone") {
+    toneDeleteArmed = action === "arm-delete-tone" && isCustomTone(viewedTone(clipsVoice()));
+    toneRename = null;
+    render();
+    return;
+  }
+
+  if (action === "delete-tone") {
+    await deleteTone(viewedTone(clipsVoice()));
     return;
   }
 
@@ -4344,7 +4454,10 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "set-up-clips") {
+    clearFailedQueue();
     clipsVoiceId = source?.dataset.voiceId ?? clipsVoiceId;
+    clipsVoiceTouched = true;
+    clipsTone = null;
     render();
     document.querySelector(".phrase-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
@@ -4409,25 +4522,9 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "generate-clip") {
     const phraseId = source?.dataset.phraseId;
     if (phraseId) {
-      await generateOneClip(phraseId);
+      clearFailedQueue();
+      await runClipQueue([phraseId]);
     }
-    return;
-  }
-
-  if (action === "regenerate-clip") {
-    if (clipGenerate?.phraseId) {
-      await generateOneClip(clipGenerate.phraseId);
-    }
-    return;
-  }
-
-  if (action === "keep-clip") {
-    dismissClipGenerate();
-    return;
-  }
-
-  if (action === "close-clip-generate") {
-    await discardClipGenerate();
     return;
   }
 
@@ -4723,11 +4820,11 @@ async function savePhraseForm(form: HTMLFormElement): Promise<void> {
     return;
   }
 
-  openPhraseGroups.add(tone);
+  clipsTone = tone;
   phraseEditor = null;
   render();
   if (reword && existing) {
-    if (!(await generateOneClip(existing.id))) {
+    if (!(await runClipQueue([existing.id]))) {
       showFeedback("Phrase saved");
     }
     return;
@@ -5120,61 +5217,185 @@ async function saveRecordedVoice(): Promise<void> {
   }
 }
 
-async function generateOneClip(phraseId: string): Promise<boolean> {
-  if (clipGenerate?.phase === "working" || voiceBusy !== null) {
+/** A failed line stays on screen until the user moves on; the next action clears it. */
+function clearFailedQueue(): void {
+  if (clipQueue?.phase === "error") {
+    clipQueue = null;
+  }
+}
+
+/** Makes the given lines for the Clips-for voice, one after another, in place. Returns false
+ * when nothing started. The busy modal stays away: the rows themselves show the progress. */
+async function runClipQueue(phraseIds: string[]): Promise<boolean> {
+  clearFailedQueue();
+  if (clipQueue || voiceBusy !== null || phraseIds.length === 0) {
     return false;
   }
   const voice = clipsVoice();
   const profile = voice.profile;
-  const phrase = effectivePhrases().find((item) => item.id === phraseId);
-  if (!phrase) {
-    showFeedback("Phrase not found");
-    return false;
-  }
   const reference = profile?.reference_path;
   const lock = clipGenerateLockTitle(voice);
   if (lock || !profile || !reference) {
     showFeedback(lock || "Pick a cloned voice under Clips for.");
     return false;
   }
-
   dismissVoiceInfo();
-  clipGenerate = { phraseId, phase: "working", error: "" };
-  const ok = await runVoiceBusy("generate-clips", async () => {
-    const generated = await invoke<VoiceProfileSummary>("generate_voice_clips", {
-      input: {
-        profile_id: profile.profile_id,
-        display_name: profile.display_name,
-        reference_audio_path: reference,
-        phrases: [{ id: phrase.id, tone: phrase.tone, text: phrase.text }],
-        delete_reference_after_generation: false,
-        merge_clips: true,
-      },
-    });
-    upsertProfile(generated);
-    await refreshVoiceStatus(false);
-    clipsVoiceId = voiceIdForProfile(generated.profile_id);
-    if (!clipGenerate || clipGenerate.phraseId !== phraseId) {
-      return;
+  clipQueue = { voiceId: voice.id, phraseIds, index: 0, phase: "working", error: "", startedAt: performance.now(), stopAfter: false };
+  clipQueueTicker = window.setInterval(paintClipQueue, 1000);
+  render();
+  await runVoiceBusy("generate-clips", async () => {
+    while (clipQueue && clipQueue.phase === "working" && clipQueue.index < clipQueue.phraseIds.length) {
+      const phraseId = clipQueue.phraseIds[clipQueue.index];
+      const phrase = effectivePhrases().find((item) => item.id === phraseId);
+      if (!phrase) {
+        clipQueue = { ...clipQueue, index: clipQueue.index + 1 };
+        continue;
+      }
+      clipQueue = { ...clipQueue, startedAt: performance.now() };
+      render();
+      try {
+        const generated = await invoke<VoiceProfileSummary>("generate_voice_clips", {
+          input: {
+            profile_id: profile.profile_id,
+            display_name: profile.display_name,
+            reference_audio_path: reference,
+            phrases: [{ id: phrase.id, tone: phrase.tone, text: phrase.text }],
+            delete_reference_after_generation: false,
+            merge_clips: true,
+          },
+        });
+        upsertProfile(generated);
+        const ready = clipForPhraseId(generated.clips, phrase.id);
+        if (ready) {
+          bumpClipAsset(ready.path);
+        }
+      } catch (error) {
+        if (clipQueue) {
+          clipQueue = { ...clipQueue, phase: "error", error: errorText(error) };
+        }
+        render();
+        break;
+      }
+      if (!clipQueue) {
+        break;
+      }
+      clipQueue = { ...clipQueue, index: clipQueue.index + 1 };
+      if (clipQueue.stopAfter) {
+        break;
+      }
     }
-    const ready = clipForPhrase(clipsVoice(), phrase);
-    if (ready) {
-      bumpClipAsset(ready.path);
-    }
-    clipGenerate = { ...clipGenerate, phase: "ready", error: "" };
   });
-  if (!clipGenerate || clipGenerate.phraseId !== phraseId) {
-    return true;
+  if (clipQueueTicker !== null) {
+    window.clearInterval(clipQueueTicker);
+    clipQueueTicker = null;
   }
-  if (!ok && clipGenerate.phase !== "ready") {
-    clipGenerate = {
-      ...clipGenerate,
-      phase: "error",
-      error: voiceError || "The local worker could not generate this clip.",
-    };
-    render();
+  const finished = clipQueue;
+  if (finished?.phase !== "error") {
+    clipQueue = null;
   }
+  await refreshVoiceStatus(false);
+  if (finished && finished.phase === "working" && finished.index >= finished.phraseIds.length) {
+    const now = clipsVoice();
+    showFeedback(
+      now.source === "custom" && now.selectable
+        ? `${now.name} is ready to select`
+        : finished.phraseIds.length === 1
+          ? "Clip ready"
+          : "Clips ready",
+    );
+  }
+  render();
   return true;
+}
+
+async function setVoiceTone(voice: VoiceOption, tone: VoiceTone): Promise<void> {
+  const profile = voice.profile;
+  if (!profile) {
+    return;
+  }
+  try {
+    upsertProfile(await invoke<VoiceProfileSummary>("set_voice_tone", { profileId: profile.profile_id, tone }));
+    clipsTone = tone;
+    voiceError = "";
+    showFeedback(`${voice.name} speaks ${toneLabel(tone)}`);
+  } catch (error) {
+    voiceError = errorText(error);
+  }
+  render();
+}
+
+/** Renames a custom tone everywhere it is written: its lines, its set, and the voices that speak it. */
+async function renameTone(): Promise<void> {
+  const edit = toneRename;
+  if (!edit || !canEditPhrases()) {
+    return;
+  }
+  const next = edit.value.trim().slice(0, 80);
+  if (!next) {
+    showFeedback("Name the tone");
+    return;
+  }
+  if (sameTone(next, edit.from)) {
+    toneRename = null;
+    render();
+    return;
+  }
+  if (phraseToneOrder().some((tone) => sameTone(tone, next))) {
+    showFeedback(`There is already a ${toneLabel(next)} tone`);
+    return;
+  }
+  const backup = libraryBackup();
+  customPhraseSets = customPhraseSets.map((tone) => (sameTone(tone, edit.from) ? next : tone));
+  customPhrases = customPhrases.map((phrase) => (sameTone(phrase.tone, edit.from) ? { ...phrase, tone: next } : phrase));
+  for (const [id, phrase] of Object.entries(phraseOverrides)) {
+    if (sameTone(phrase.tone, edit.from)) {
+      phraseOverrides[id] = { ...phrase, tone: next };
+    }
+  }
+  if (!(await persistPhraseLibrary())) {
+    restoreLibrary(backup);
+    render();
+    return;
+  }
+  for (const profile of voiceBackend?.profiles ?? []) {
+    if (profile.tone && sameTone(profile.tone, edit.from)) {
+      try {
+        upsertProfile(await invoke<VoiceProfileSummary>("set_voice_tone", { profileId: profile.profile_id, tone: next }));
+      } catch (error) {
+        voiceError = errorText(error);
+      }
+    }
+  }
+  clipsTone = next;
+  toneRename = null;
+  render();
+  showFeedback(`Renamed to ${toneLabel(next)}`);
+}
+
+/** Removes a custom tone and its lines. Voices that spoke it fall back to the first tone. */
+async function deleteTone(tone: VoiceTone): Promise<void> {
+  toneDeleteArmed = false;
+  if (!isCustomTone(tone) || !canEditPhrases()) {
+    render();
+    return;
+  }
+  const backup = libraryBackup();
+  customPhraseSets = customPhraseSets.filter((item) => !sameTone(item, tone));
+  customPhrases = customPhrases.filter((phrase) => !sameTone(phrase.tone, tone));
+  for (const [id, phrase] of Object.entries(phraseOverrides)) {
+    if (sameTone(phrase.tone, tone)) {
+      delete phraseOverrides[id];
+      hiddenPhrases.add(id);
+    }
+  }
+  if (!(await persistPhraseLibrary())) {
+    restoreLibrary(backup);
+    render();
+    return;
+  }
+  clipsTone = null;
+  render();
+  showFeedback(`${toneLabel(tone)} deleted`);
 }
 
 async function deleteVoiceProfile(): Promise<void> {
@@ -5713,9 +5934,10 @@ async function playNudge(current: CurrentSession | null): Promise<void> {
   }
 }
 
+/** Lines from the voice's own tone; any clip at all only when that tone has none ready. */
 function selectedNudgeClip(nudgeCount: number): VoiceClipSummary | null {
   const voice = selectedVoice();
-  const phrases = effectivePhrases();
+  const phrases = tonePhrases(voiceTone(voice));
   const ready = phrases
     .map((phrase) => clipForPhrase(voice, phrase))
     .filter((clip): clip is VoiceClipSummary => Boolean(clip));
@@ -5834,11 +6056,6 @@ function ensureVoicePreviewAudio(path: string): HTMLAudioElement {
 }
 
 function transportPreviewClip(): VoiceClipSummary | null {
-  const job = clipGenerate;
-  if (job?.phase === "ready") {
-    const phrase = effectivePhrases().find((item) => item.id === job.phraseId);
-    return phrase ? clipForPhrase(clipsVoice(), phrase) : null;
-  }
   const voice = availableVoices().find((item) => item.id === voiceInfoId);
   return voice ? previewClipForVoice(voice) : null;
 }
@@ -5846,7 +6063,7 @@ function transportPreviewClip(): VoiceClipSummary | null {
 function bindVoicePreview(): void {
   const bar = document.getElementById("voice-preview-bar") as HTMLInputElement | null;
   if (!bar) {
-    if (!voiceInfoId && clipGenerate?.phase !== "ready") {
+    if (!voiceInfoId) {
       stopVoicePreview();
     } else {
       voicePreviewAudio?.pause();
@@ -6113,12 +6330,49 @@ function strictnessOptions(selected: Strictness): string {
 function voiceOptions(selected: string, forClips = false): string {
   return availableVoices()
     .map((voice) => {
-      const enabled = forClips
-        ? voice.id === "none" || Boolean(voice.profile?.reference_path)
-        : voice.selectable;
+      if (forClips && voice.id === "none") {
+        return "";
+      }
+      const enabled = forClips ? Boolean(voice.profile?.reference_path) : voice.selectable;
       return `<option value="${voice.id}" ${voice.id === selected ? "selected" : ""} ${enabled ? "" : "disabled"}>${escapeHtml(voice.name)}</option>`;
     })
     .join("");
+}
+
+function sameTone(a: VoiceTone, b: VoiceTone): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+function tonePhrases(tone: VoiceTone): PhraseDefinition[] {
+  return effectivePhrases().filter((phrase) => sameTone(phrase.tone, tone));
+}
+
+/** Bundled tones keep their names; only the user's own sets can be renamed or deleted. */
+function isCustomTone(tone: VoiceTone): boolean {
+  return !toneOrder.some((item) => sameTone(item, tone));
+}
+
+/** The tone a voice speaks in sessions: its saved one while that tone exists, else the first. */
+function profileTone(profile: VoiceProfileSummary | null): VoiceTone {
+  const tones = phraseToneOrder();
+  const saved = profile?.tone;
+  return (saved && tones.find((tone) => sameTone(tone, saved))) || tones[0] || toneOrder[0];
+}
+
+function voiceTone(voice: VoiceOption): VoiceTone {
+  return profileTone(voice.profile);
+}
+
+/** The tone the Clips panel shows: the picked one while it exists, else the voice's own. */
+function viewedTone(voice: VoiceOption): VoiceTone {
+  const picked = clipsTone ? phraseToneOrder().find((tone) => sameTone(tone, clipsTone as string)) : null;
+  return picked || voiceTone(voice);
+}
+
+/** Every line of the voice's tone has a clip, and the tone has lines at all. */
+function profileToneReady(profile: VoiceProfileSummary | null): boolean {
+  const phrases = tonePhrases(profileTone(profile));
+  return phrases.length > 0 && phrases.every((phrase) => clipForPhraseId(profile?.clips ?? [], phrase.id));
 }
 
 function availableVoices(): VoiceOption[] {
@@ -6140,7 +6394,7 @@ function availableVoices(): VoiceOption[] {
             : "Reference clip is missing. Delete this profile or record again.",
         coverage: `${ready}/${phrases.length} clips`,
         source: "custom" as VoiceSource,
-        selectable: ready > 0,
+        selectable: profileToneReady(profile),
         profile,
       };
     }) ?? [];
