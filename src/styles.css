@@ -3754,8 +3754,9 @@ button.trend-door-go {
 
 .history-seg button {
   min-width: 170px;
-  min-height: 38px;
+  min-height: 40px;
   background: var(--panel);
+  font-size: var(--sv-type-1);
 }
 
 .history-seg button.is-on {
@@ -3782,13 +3783,16 @@ button.trend-door-go {
   font-size: var(--sv-type-3);
 }
 
-.week-app-group {
-  margin: 0 0 4px;
+.week-app-col .eyebrow {
+  margin: 0;
+}
+
+.week-app-total {
+  margin: 2px 0 6px;
   color: var(--sv-muted);
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .week-app-rows {

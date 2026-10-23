@@ -2991,7 +2991,8 @@ function renderWeekAppsPane(recap: WeekRecap | null): string {
     const total = items.reduce((sum, app) => sum + app.seconds, 0);
     return `
       <div class="week-app-col">
-        <p class="week-app-group">${escapeHtml(title)}${items.length ? ` · ${escapeHtml(formatHours(total))}` : ""}</p>
+        <p class="eyebrow">${escapeHtml(title)}</p>
+        ${items.length ? `<p class="week-app-total">${escapeHtml(formatHours(total))}</p>` : ""}
         ${items.length ? `<div class="week-app-rows">${renderAppRows(items, maxApp)}</div>` : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}
       </div>
     `;
