@@ -28,12 +28,11 @@ needs a real Mac run.
 15 seconds during normal polling. Time since the last successful checkpoint can
 still be lost. Recovery marks sessions abandoned and recomputes saved metrics.
 
-**Browsers are always Neutral.** No rule can name a browser (typed rules are refused, stored ones are dropped), so a browser's own pages and unidentified sites stay Neutral; only websites are classified. Schema v10 rescored history for this.
+**A browser is never a distraction on its own.** No rule can name a browser (typed rules are refused, stored ones are dropped); only websites are. A browser's own pages and unidentified sites count as work.
 
 **Away is 3 minutes without input, dated back to the last input.** Shorter pauses (reading,
 thinking) stay with the window in front; strictness no longer changes this. Supervisor's own
-window follows the same rule, and its time is Neutral, never focus (older sessions are
-re-read that way).
+window follows the same rule, and its time counts as work (V2: it is never a distraction).
 
 **Media keeps an idle user present, with gaps.** No input counts as Away unless the app in
 front is playing media, for up to 45 minutes. Windows reads the system media controls; a
@@ -44,8 +43,8 @@ so there it stays Away. Calls on Windows (Zoom, Teams, Meet) are not
 media sessions and still go Away. macOS uses "keep the display awake" assertions, so music
 alone stays Away there; it is untested on a Mac (see `plans/mac-handoff.md`).
 
-**Capture failures count with Away time.** The score counts Relevant time only;
-unclassified time is shown apart and counts once classified. See `plans/window-history-audit.md`.
+**Capture failures count with Away time.** The score is time not on a distraction;
+rules apply from the next sample and never change a recorded session. See `plans/window-history-audit.md`.
 
 **Old history from before this rewrite:** browser time becomes "Other websites" on migration. Title rules convert or get deleted. Do not expect old YouTube title-rows to become `youtube.com`.
 

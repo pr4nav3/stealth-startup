@@ -24,8 +24,8 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
 
 - [x] Browser time is one row per website, read from the address bar (Windows,
       UI Automation). Browser pages, local pages and Other websites are their
-      own rows. Titles are a narrow fallback and are never stored. Browsers
-      themselves are always Neutral; only websites are classified
+      own rows. Titles are a narrow fallback and are never stored. A browser
+      is never a distraction on its own; only websites are
 - [x] Durable app identity (schema v11): packaged-app id, exe + publisher, or
       bundle id, mapped to one key per app; display names kept separate
 - [x] Every second of a session is recorded. Spans tile the session from Start
@@ -33,9 +33,13 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
       sleep or a frozen poll loop as `unknown` ("Device asleep / unknown").
       A property test fuzzes random event sequences and fails on any hole
 - [x] Mute keeps recording and only silences nudges; Pause is the untracked break
-- [x] Focused-only score: Relevant time only. Neutral and unclassified time are
-      shown apart. Classifying an app from a report (classify popup, one app at
-      a time, keyboard 1/2/3) saves a rule and rescores past unclassified time
+- [x] V2 rules (`app-v2-simplified-rules`): a rule is a distraction and
+      everything else is work. One list, edited in Settings, preflight and the
+      live dialog. Preflight and the nudge popup allow a distraction for the
+      session ("Not today"); the popup can also drop the rule. Rules apply from
+      the next sample and never rewrite history (schema v12). A report row's
+      toggle flags an app for the sessions to come. See
+      `plans/v2-distractions-only.md`
 - [x] Session report: timeline, Apps & sites grouped by recorded decision,
       "now X" when today's rule differs. Weekly recap with daily bars,
       attention span and Recovery (time back on task after a drift). Trends
@@ -106,8 +110,8 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
 
 ## Open product decisions
 
-- Browser-wide rules with per-site exceptions, versus today's "browsers are
-  always Neutral, only sites are classified".
+- Browser-wide rules with per-site exceptions, versus today's "a browser is
+  never a distraction on its own, only sites are".
 - Observation coverage on the report (capture failures still count as Away).
 - Stored provenance per span (which rule decided it), so old reports can
   explain themselves after rules change.
