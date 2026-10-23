@@ -2705,13 +2705,15 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
     <section class="panel week-hero" aria-label="${current ? "This week" : "That week"}">
       <p class="eyebrow">${current ? "This week" : "Focused time"}</p>
       <div class="week-hero-top">
-        <strong class="week-hero-value">${escapeHtml(formatHours(recap?.focus_seconds ?? 0))}</strong>
+        <div class="week-hero-figure">
+          <strong class="week-hero-value">${escapeHtml(formatHours(recap?.focus_seconds ?? 0))}</strong>
+          ${note ? `<p class="week-hero-note">${escapeHtml(note)}</p>` : ""}
+        </div>
         <div class="week-hero-stats">
           <div class="week-hero-stat" title="${empty ? "Longest unbroken run of work, once there is one" : "Longest unbroken run of work"}"><span class="eyebrow">Longest stretch</span><strong>${escapeHtml(longest)}</strong></div>
           <div class="week-hero-stat" title="${recovery === "No drifts" ? "Nothing pulled you off task, so there was nothing to recover from" : "Typical time back on task after a drift"}"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
         </div>
       </div>
-      ${note ? `<p class="week-hero-note">${escapeHtml(note)}</p>` : ""}
       <div class="recap-bars week-hero-bars ${animate ? "is-animated" : ""}" style="grid-template-columns: repeat(${buckets.length}, minmax(0, 1fr))">
         ${buckets
           .map((bucket, index) => {
