@@ -1,6 +1,8 @@
 # V2: distractions only
 
 Branch `app-v2-simplified-rules`, cut from `main` at c7eb971. Last updated: 2026-10-22.
+Status: implemented on the branch (backend, frontend, mock, docs); 192 backend tests pass;
+every screen rendered through the mock harness. Not yet run in the built app.
 
 One sentence for the user: **tell Supervisor what distracts you; everything else
 counts as work.** Rules are a single list of distractions. Relevant, Neutral and
