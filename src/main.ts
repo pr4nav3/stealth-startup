@@ -886,6 +886,7 @@ function closeTopLayer(): void {
   if (preflightOpen) {
     preflightOpen = false;
     ruleEditor = null;
+    animateCalendarSoon();
     render();
     return;
   }
@@ -3444,6 +3445,9 @@ function bindEvents(): void {
       if (next === activeTab) {
         return;
       }
+      if (next === "session") {
+        animateCalendarSoon();
+      }
       const leavingWebcam = settingsView === "webcam";
       if (voiceInfoId) {
         dismissVoiceInfo();
@@ -3840,6 +3844,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "close-preflight") {
     preflightOpen = false;
     ruleEditor = null;
+    animateCalendarSoon();
     render();
     return;
   }
@@ -6209,6 +6214,9 @@ async function refreshTrends(shouldRender = true): Promise<void> {
     lastError = errorText(error);
   }
   if (shouldRender) {
+    if (activeTab === "session" && !preflightOpen) {
+      animateCalendarSoon();
+    }
     render();
   }
 }
@@ -6513,6 +6521,21 @@ function streakInfo(asOf = dayKey(new Date())): { days: number; chain: Set<strin
   };
 }
 
+/**
+ * The calendar pops in when Home comes into view (arriving on the tab, data landing, the
+ * preflight closing), not on every rebuild behind an open preflight.
+ */
+let calendarAnimateUntil = performance.now() + 1500;
+
+/** Opens a short window in which rebuilds of Home pop the calendar in. */
+function animateCalendarSoon(): void {
+  calendarAnimateUntil = performance.now() + 1500;
+}
+
+function takeCalendarAnimation(): boolean {
+  return performance.now() < calendarAnimateUntil;
+}
+
 function monthLabel(date: Date): string {
   return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
@@ -6550,7 +6573,7 @@ function renderCalendar(streak: { chain: Set<string> }): string {
     );
   }
   return `
-    <div class="cal-grid" role="img" aria-label="${attr(monthLabel(today))}, days with focus shaded">
+    <div class="cal-grid ${takeCalendarAnimation() ? "is-animated" : ""}" role="img" aria-label="${attr(monthLabel(today))}, days with focus shaded">
       ${letters.map((letter) => `<span class="cal-dow">${letter}</span>`).join("")}
       ${days.join("")}
     </div>

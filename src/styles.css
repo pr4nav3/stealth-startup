@@ -585,7 +585,6 @@ h1 {
   background: var(--sv-soft-white);
   font-family: var(--font-mono);
   font-size: 0.7rem;
-  animation: cal-pop 320ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
 }
 
 .cal-day.is-out {
@@ -645,6 +644,10 @@ h1 {
   border-style: dashed;
   background: transparent;
   opacity: 0.55;
+}
+
+.cal-grid.is-animated .cal-day {
+  animation: cal-pop 320ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
 }
 
 @keyframes cal-pop {
