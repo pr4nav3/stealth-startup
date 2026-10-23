@@ -3324,7 +3324,7 @@ audio {
 /* The week's hero beside the door into Trends. */
 .history-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 250px;
+  grid-template-columns: minmax(0, 1fr) 290px;
   gap: 14px;
   align-items: stretch;
 }
@@ -3343,10 +3343,11 @@ audio {
   color: var(--sv-colored-ink);
 }
 
+/* Top-aligned: the figure hugs its eyebrow instead of sinking to the cards' baseline. */
 .week-hero-top {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px 24px;
 }
@@ -3420,11 +3421,11 @@ audio {
 
 .week-hero .recap-bar.is-on {
   border-color: #141410;
-  background: #141410;
+  background: var(--sv-green);
 }
 
 .week-hero .recap-bar.is-on.is-today {
-  background: #fff7df;
+  background: color-mix(in srgb, var(--sv-green) 45%, #fff7df);
 }
 
 /* Bars rise from the baseline once, left to right; `backwards` keeps them flat through the delay
@@ -3482,8 +3483,8 @@ audio {
   display: flex;
   flex: 1 1 auto;
   align-items: stretch;
-  gap: 8px;
-  min-height: 90px;
+  gap: 6px;
+  min-height: 96px;
   margin-top: 4px;
 }
 
@@ -3501,6 +3502,11 @@ audio {
   border: 2px solid color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
   border-radius: 4px;
   background: color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
+  transition: transform 120ms ease-out;
+}
+
+.trend-spark-track:hover .trend-spark-bar:not(.is-empty) {
+  transform: translateY(-4px);
 }
 
 .trend-spark-bar.is-empty {

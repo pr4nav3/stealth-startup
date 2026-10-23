@@ -2757,20 +2757,16 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: b
     caption = current ? "No sessions this week or last." : "No sessions this week or the one before.";
   } else if (recap && previous && (previous.session_count > 0 || recap.session_count > 0)) {
     const before = current && todayIndex < 6 ? focusThrough(previousStart, todayIndex) : previous.focus_seconds;
-    const against = !current
-      ? "the week before"
-      : todayIndex === 6
-        ? "last week"
-        : todayIndex === 0
-          ? "last Monday"
-          : `last week, Mon–${WEEKDAY_LABELS[todayIndex]}`;
+    // A running week is measured against last week up to the same weekday; "so far" says so.
+    const against = current ? "last week" : "the week before";
+    const soFar = current && todayIndex < 6 ? " so far" : "";
     const change = recap.focus_seconds - before;
     if (Math.abs(change) < 60) {
       value = "Steady";
-      caption = `Same focused time as ${against}.`;
+      caption = `Same focused time${soFar} as ${against}.`;
     } else {
       value = `${change > 0 ? "↑" : "↓"} ${formatHours(Math.abs(change))}`;
-      caption = `${change > 0 ? "More" : "Less"} focused time than ${against}.`;
+      caption = `${change > 0 ? "More" : "Less"} focused time${soFar} than ${against}.`;
     }
   }
   const shown = weeks.slice(-DOOR_WEEKS);
