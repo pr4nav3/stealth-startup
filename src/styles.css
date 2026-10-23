@@ -3226,6 +3226,7 @@ audio {
 }
 
 .history-toolbar {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3240,7 +3241,7 @@ audio {
   gap: 10px;
 }
 
-.history-week-nav button {
+.history-week-arrow {
   min-width: 40px;
   min-height: 40px;
   padding: 0;
@@ -3248,11 +3249,161 @@ audio {
   font-size: 1rem;
 }
 
+/* The week label is the way into the picker: a quiet button that turns yellow while it is open. */
+button.history-week-label {
+  min-height: 40px;
+  padding: 0 10px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+button.history-week-label:hover,
+button.history-week-label:focus-visible {
+  border-color: var(--sv-border);
+  background: var(--white-soft);
+}
+
+button.history-week-label.is-open {
+  border-color: var(--sv-border);
+  background: var(--sv-yellow);
+  color: var(--sv-colored-ink);
+  box-shadow: var(--shadow-control);
+}
+
+button.history-week-label:active {
+  transform: none;
+}
+
 .history-week-nav h2 {
   margin: 0;
   font-size: clamp(1.1rem, 2.6cqi, 1.4rem);
   font-weight: 700;
   letter-spacing: -0.02em;
+}
+
+button.history-week-label.is-open h2 span {
+  color: inherit;
+  opacity: 0.7;
+}
+
+.history-week-today {
+  min-height: 32px;
+  margin-left: 4px;
+  padding: 0 10px;
+  background: var(--sv-green);
+  color: var(--sv-colored-ink);
+}
+
+.panel.week-picker {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 10px;
+  z-index: 5;
+  width: 340px;
+  max-width: calc(100% - 20px);
+  padding: 14px;
+}
+
+.week-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.week-picker-head strong {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.week-picker-head button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  background: var(--white-soft);
+}
+
+.week-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.wp-dow {
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+button.wp-day {
+  aspect-ratio: 1 / 1;
+  min-height: 0;
+  padding: 0;
+  border: 1.5px solid var(--sv-border);
+  border-radius: 4px;
+  background: var(--white-soft);
+  box-shadow: none;
+  font-size: 0.7rem;
+  letter-spacing: 0;
+}
+
+button.wp-day:active {
+  transform: none;
+}
+
+button.wp-day.is-out {
+  border-color: color-mix(in srgb, var(--sv-ink) 20%, transparent);
+  background: transparent;
+  color: color-mix(in srgb, var(--sv-ink) 40%, transparent);
+}
+
+button.wp-day.l1 {
+  background: color-mix(in srgb, var(--sv-green) 35%, var(--white-soft));
+}
+
+button.wp-day.l2 {
+  background: color-mix(in srgb, var(--sv-green) 65%, var(--white-soft));
+}
+
+button.wp-day.l3 {
+  background: var(--sv-green);
+}
+
+button.wp-day.l1,
+button.wp-day.l2,
+button.wp-day.l3 {
+  color: var(--sv-colored-ink);
+}
+
+button.wp-day.is-today {
+  font-weight: 700;
+}
+
+button.wp-day.is-selected {
+  outline: 3px solid var(--sv-yellow);
+  outline-offset: -1px;
+}
+
+button.wp-day.is-future,
+button.wp-day.is-future:disabled {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--sv-ink) 30%, transparent);
+  background: transparent;
+  color: color-mix(in srgb, var(--sv-ink) 45%, transparent);
+  opacity: 1;
+}
+
+.week-picker-note {
+  margin: 10px 0 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
 }
 
 .history-week-nav h2 span {

@@ -5,7 +5,7 @@ use crate::focus::{
     RuleTarget,
 };
 use crate::storage::{
-    focus_state_from_key, focus_state_key, open_or_reset, HistoryWeek, WeekRecap, SessionReport,
+    focus_state_from_key, focus_state_key, open_or_reset, DailyFocus, HistoryWeek, WeekRecap, SessionReport,
     SessionStorage, StorageNotice, TrendsData,
 };
 use crate::website;
@@ -82,6 +82,10 @@ impl SessionManager {
 
     pub fn trends(&self) -> Result<TrendsData, String> {
         self.storage()?.get_trends()
+    }
+
+    pub fn focus_days(&self, start: String, end: String) -> Result<Vec<DailyFocus>, String> {
+        self.storage()?.get_focus_days(&start, &end)
     }
 
     pub fn history_week(&self, week_start: String) -> Result<HistoryWeek, String> {

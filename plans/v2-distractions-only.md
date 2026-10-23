@@ -145,7 +145,11 @@ Changed:
   `search_sessions`), a yellow week hero (focused hours, longest stretch,
   recovery, daily bars with today drawn light), a Trends door (change against
   last week through the same weekday, sparkline of recent weeks), then a
-  centered Sessions / Apps & sites toggle over one panel. Apps & sites is three
+  centered Sessions / Apps & sites toggle over one panel. The week label opens
+  a month picker (`get_focus_days(start, end)`: focused time per local day),
+  days shaded by focused time, the viewed week outlined; any past day picks
+  its week. Bars in the hero and the Trends card scale so the biggest reaches
+  the top of its track whatever the week held. Apps & sites is three
   columns (Work, Distractions, Away) with totals; rows still toggle the rule.
   Day card: `SessionSummary` fields; `stripOnTask` is `state === "focused"`.
 

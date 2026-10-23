@@ -1483,6 +1483,37 @@ impl SessionStorage {
         })
     }
 
+    /// Focused time per local day for `start` ≤ day < `end_exclusive` (both `YYYY-MM-DD`); days
+    /// without a finished session are left out. Feeds the History week picker.
+    pub fn get_focus_days(&self, start: &str, end_exclusive: &str) -> Result<Vec<DailyFocus>, String> {
+        parse_day(start)?;
+        parse_day(end_exclusive)?;
+        let (from, to) = padded_day_bounds(start, end_exclusive);
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT started_at, focused_seconds, {RUN_SECONDS_SQL}
+                 FROM session
+                 WHERE ended_at IS NOT NULL
+                   AND substr(started_at, 1, 10) >= ?1
+                   AND substr(started_at, 1, 10) < ?2"
+            ))
+            .map_err(|error| error.to_string())?;
+        let found = stmt
+            .query_map(params![from, to], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut rows = Vec::new();
+        for row in found {
+            let (started_at, focus_seconds, run_seconds) = row.map_err(|error| error.to_string())?;
+            if let Some(day) = local_day_in(&started_at, start, end_exclusive) {
+                rows.push((day, focus_seconds, run_seconds));
+            }
+        }
+        Ok(fold_days(rows))
+    }
+
     pub fn get_trends(&self) -> Result<TrendsData, String> {
         let mut daily_stmt = self
             .conn
@@ -1502,36 +1533,16 @@ impl SessionStorage {
             })
             .map_err(|error| error.to_string())?;
 
-        let mut by_day = std::collections::HashMap::<String, (u64, u64, u64)>::new();
+        let mut rows = Vec::new();
         for row in daily_rows {
             let (started_at, focus_seconds, run_seconds) = row.map_err(|error| error.to_string())?;
-            let entry = by_day.entry(local_day(&started_at)).or_insert((0, 0, 0));
-            entry.0 += focus_seconds as u64;
-            entry.1 += run_seconds.max(0) as u64;
-            entry.2 += 1;
+            rows.push((local_day(&started_at), focus_seconds, run_seconds));
         }
-        let mut days: Vec<_> = by_day.into_iter().collect();
-        days.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut daily_focus = fold_days(rows);
         // The home calendar and streak read back a few months.
-        if days.len() > 120 {
-            days = days.split_off(days.len() - 120);
+        if daily_focus.len() > 120 {
+            daily_focus = daily_focus.split_off(daily_focus.len() - 120);
         }
-        let daily_focus = days
-            .into_iter()
-            .map(|(date, (focus_seconds, run_seconds, session_count))| {
-                let focus_percent = if run_seconds == 0 {
-                    0
-                } else {
-                    (focus_seconds * 100) / run_seconds
-                };
-                DailyFocus {
-                    date,
-                    focus_percent,
-                    focus_seconds,
-                    session_count,
-                }
-            })
-            .collect();
 
         let monday = this_monday();
         let weeks = self.trend_weeks(monday)?;
@@ -2126,6 +2137,27 @@ fn local_day(started_at: &str) -> String {
         return prefix;
     };
     calendar_day(instant, local_offset_at(instant))
+}
+
+/// Sums (local day, focused seconds, run seconds) rows into one `DailyFocus` per day, oldest first.
+fn fold_days(rows: Vec<(String, i64, i64)>) -> Vec<DailyFocus> {
+    let mut by_day = std::collections::HashMap::<String, (u64, u64, u64)>::new();
+    for (day, focus_seconds, run_seconds) in rows {
+        let entry = by_day.entry(day).or_insert((0, 0, 0));
+        entry.0 += focus_seconds.max(0) as u64;
+        entry.1 += run_seconds.max(0) as u64;
+        entry.2 += 1;
+    }
+    let mut days: Vec<_> = by_day.into_iter().collect();
+    days.sort_by(|left, right| left.0.cmp(&right.0));
+    days.into_iter()
+        .map(|(date, (focus_seconds, run_seconds, session_count))| DailyFocus {
+            date,
+            focus_percent: if run_seconds == 0 { 0 } else { (focus_seconds * 100) / run_seconds },
+            focus_seconds,
+            session_count,
+        })
+        .collect()
 }
 
 fn local_day_in(started_at: &str, start: &str, end_exclusive: &str) -> Option<String> {
@@ -3023,6 +3055,31 @@ mod tests {
         assert_eq!(found, vec!["100% thesis", "Thesis intro"]);
         assert_eq!(storage.search_sessions("%").expect("search").len(), 1);
         assert!(storage.search_sessions("   ").expect("search").is_empty());
+    }
+
+    #[test]
+    fn focus_days_cover_the_asked_range_only_and_sum_a_day() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        for (goal, at, focus) in [
+            ("Before", "2026-09-30T12:00:00Z", 100),
+            ("First", "2026-10-01T09:00:00Z", 600),
+            ("First again", "2026-10-01T15:00:00Z", 300),
+            ("Last", "2026-10-31T12:00:00Z", 60),
+            ("After", "2026-11-01T12:00:00Z", 100),
+        ] {
+            let id = storage.insert_session(goal, Strictness::Normal, at, 1800).expect("insert");
+            storage.insert_span(id, &app("Code"), "focused", 0, focus).expect("span");
+            storage.close_session(id, at, "stopped", focus).expect("close");
+        }
+        let running = storage
+            .insert_session("Running", Strictness::Normal, "2026-10-15T12:00:00Z", 1800)
+            .expect("insert open");
+        let _ = running;
+
+        let days = storage.get_focus_days("2026-10-01", "2026-11-01").expect("days");
+        let seen: Vec<(&str, u64, u64)> = days.iter().map(|d| (d.date.as_str(), d.focus_seconds, d.session_count)).collect();
+        assert_eq!(seen, vec![("2026-10-01", 900, 2), ("2026-10-31", 60, 1)]);
+        assert!(storage.get_focus_days("2026-10-01", "10/11/2026").is_err());
     }
 
     #[test]

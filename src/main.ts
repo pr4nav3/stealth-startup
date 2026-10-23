@@ -581,6 +581,13 @@ let historySearchTimer: number | null = null;
 let historySearchRequest = 0;
 /** The week (and data state) whose charts already played their entrance. */
 let historyChartsFor = "";
+/** The week picker under the toolbar: open, the month it shows (its first day), and that
+ * month's days with sessions. */
+let weekPickerOpen = false;
+let pickerDismissBound = false;
+let pickerMonth = "";
+let pickerDays: Record<string, DailyFocus> = {};
+let pickerRequest = 0;
 let historyConfirm: HistoryConfirm | null = null;
 let historyHydrated = false;
 const knownHistoryIds = new Set<number>();
@@ -905,6 +912,11 @@ function closeTopLayer(): void {
     sessionReport = null;
     historyConfirm = null;
     void refreshHistoryWeek();
+    return;
+  }
+  if (weekPickerOpen) {
+    closeWeekPicker();
+    render();
     return;
   }
   if (activeTab === "history" && historySearch) {
@@ -2664,10 +2676,14 @@ function renderHistoryToolbar(weekStart: string): string {
   return `
     <div class="panel history-toolbar">
       <div class="history-week-nav">
-        <button type="button" data-action="history-week-prev" ${prevDisabled ? "disabled" : ""} aria-label="Previous week">‹</button>
-        <h2>${escapeHtml(formatWeekRange(weekStart))}, ${parseDayKey(weekStart).getFullYear()}${tag ? `<span>${tag}</span>` : ""}</h2>
-        <button type="button" data-action="history-week-next" ${nextDisabled ? "disabled" : ""} aria-label="Next week">›</button>
+        <button type="button" class="history-week-arrow" data-action="history-week-prev" ${prevDisabled ? "disabled" : ""} aria-label="Previous week">‹</button>
+        <button type="button" class="history-week-label ${weekPickerOpen ? "is-open" : ""}" data-action="toggle-week-picker" aria-expanded="${weekPickerOpen}" aria-haspopup="dialog" title="Pick a week">
+          <h2>${escapeHtml(formatWeekRange(weekStart))}, ${parseDayKey(weekStart).getFullYear()}${tag ? `<span>${tag}</span>` : ""}</h2>
+        </button>
+        <button type="button" class="history-week-arrow" data-action="history-week-next" ${nextDisabled ? "disabled" : ""} aria-label="Next week">›</button>
+        ${weekStart === current ? "" : `<button type="button" class="history-week-today" data-action="history-week-today">This week</button>`}
       </div>
+      ${weekPickerOpen ? renderWeekPicker(weekStart, oldestMonday) : ""}
       <label class="history-search">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
         <input id="history-search" type="search" value="${attr(historySearch)}" placeholder="Search all sessions" aria-label="Search sessions by goal" autocomplete="off" spellcheck="false" />
@@ -2677,6 +2693,100 @@ function renderHistoryToolbar(weekStart: string): string {
 }
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/** First day of the month `key` falls in. */
+function monthKey(key: string): string {
+  return `${key.slice(0, 7)}-01`;
+}
+
+function addMonthsKey(monthStart: string, months: number): string {
+  const date = parseDayKey(monthStart);
+  date.setMonth(date.getMonth() + months);
+  return monthKey(dayKey(date));
+}
+
+/** The Monday on or before the 1st; six rows of seven cover any month. */
+function pickerGridStart(monthStart: string): string {
+  return mondayKey(monthStart);
+}
+
+const PICKER_GRID_DAYS = 42;
+
+/** A month of days, shaded by focused time, with the viewed week outlined; a click picks that
+ * day's week. */
+function renderWeekPicker(weekStart: string, oldestMonday: string | null): string {
+  const month = pickerMonth || monthKey(weekStart);
+  const today = dayKey(new Date());
+  const currentMonth = monthKey(today);
+  const weekEnd = addDaysKey(weekStart, 6);
+  const gridStart = pickerGridStart(month);
+  const prevDisabled = !oldestMonday || month <= monthKey(oldestMonday);
+  const nextDisabled = month >= currentMonth;
+  const title = parseDayKey(month).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const cells = Array.from({ length: PICKER_GRID_DAYS }, (_, index) => {
+    const day = addDaysKey(gridStart, index);
+    const inMonth = day.slice(0, 7) === month.slice(0, 7);
+    const future = day > today;
+    const focus = pickerDays[day]?.focus_seconds ?? 0;
+    const level = focus <= 0 ? "" : focus >= 90 * 60 ? "l3" : focus >= 25 * 60 ? "l2" : "l1";
+    const classes = [
+      "wp-day",
+      inMonth ? "" : "is-out",
+      future ? "is-future" : "",
+      level,
+      day >= weekStart && day <= weekEnd ? "is-selected" : "",
+      day === today ? "is-today" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const info = pickerDays[day];
+    const label = info
+      ? `${parseDayKey(day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}, ${formatHours(info.focus_seconds)} focused`
+      : parseDayKey(day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    return `<button type="button" class="${classes}" data-action="pick-week" data-day="${day}" ${future ? "disabled" : ""} aria-label="${attr(label)}" title="${attr(label)}">${Number(day.slice(8))}</button>`;
+  }).join("");
+  return `
+    <div class="panel week-picker" role="dialog" aria-label="Pick a week">
+      <div class="week-picker-head">
+        <button type="button" data-action="picker-month-prev" ${prevDisabled ? "disabled" : ""} aria-label="Previous month">‹</button>
+        <strong>${escapeHtml(title)}</strong>
+        <button type="button" data-action="picker-month-next" ${nextDisabled ? "disabled" : ""} aria-label="Next month">›</button>
+      </div>
+      <div class="week-picker-grid">
+        ${["M", "T", "W", "T", "F", "S", "S"].map((d) => `<span class="wp-dow" aria-hidden="true">${d}</span>`).join("")}
+        ${cells}
+      </div>
+      <p class="week-picker-note">Click any day to see its week. Greener days had more focused time.</p>
+    </div>
+  `;
+}
+
+/** Loads the days with sessions for the month the picker shows. */
+async function loadPickerDays(): Promise<void> {
+  const month = pickerMonth || monthKey(historyWeekStart || thisMondayKey());
+  const start = pickerGridStart(month);
+  const request = ++pickerRequest;
+  try {
+    const days = await invoke<DailyFocus[]>("get_focus_days", { start, end: addDaysKey(start, PICKER_GRID_DAYS) });
+    if (request !== pickerRequest) {
+      return;
+    }
+    pickerDays = Object.fromEntries(days.map((day) => [day.date, day]));
+  } catch (error) {
+    if (request !== pickerRequest) {
+      return;
+    }
+    lastError = errorText(error);
+  }
+  render();
+}
+
+function closeWeekPicker(): void {
+  weekPickerOpen = false;
+  pickerMonth = "";
+  pickerDays = {};
+  pickerRequest += 1;
+}
 
 /** Focused hours, longest stretch and recovery for the week, over its daily bars. */
 function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boolean): string {
@@ -2723,7 +2833,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
             return `
               <button type="button" class="recap-bar-col" aria-label="${attr(bucket.label)}, ${attr(focused)} focused">
                 <span class="recap-bar-track">
-                  <span class="${classes}" style="--i: ${index}; ${on ? `height: ${smartBarHeight(bucket.focus_seconds, max, 3600, 14)}%` : ""}">
+                  <span class="${classes}" style="--i: ${index}; ${on ? `height: ${smartBarHeight(bucket.focus_seconds, max, 14)}%` : ""}">
                     <span class="week-tip">${escapeHtml(focused)}</span>
                   </span>
                 </span>
@@ -2801,7 +2911,7 @@ function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean
           const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)}${week.week_start === running ? " so far" : ""}`;
           return `
             <span class="trend-spark-track" aria-label="${attr(`${tip} · ${sessions}`)}">
-              <span class="${classes}" style="--i: ${index}; ${week.focus_seconds ? `height: ${smartBarHeight(week.focus_seconds, maxWeek, 2 * 3600, 14)}%` : ""}">
+              <span class="${classes}" style="--i: ${index}; ${week.focus_seconds ? `height: ${smartBarHeight(week.focus_seconds, maxWeek, 14)}%` : ""}">
                 <span class="week-tip">${escapeHtml(tip)}</span>
               </span>
             </span>
@@ -3475,6 +3585,7 @@ function bindEvents(): void {
       if (activeTab === "history") {
         historyChartsFor = "";
       }
+      closeWeekPicker();
       render();
       if (activeTab === "history") {
         void refreshTrends();
@@ -3530,6 +3641,20 @@ function bindEvents(): void {
     });
   });
 
+  if (!pickerDismissBound) {
+    pickerDismissBound = true;
+    document.addEventListener("click", (event) => {
+      if (!weekPickerOpen) {
+        return;
+      }
+      const target = event.target as Element | null;
+      if (target?.closest(".week-picker, .history-week-label")) {
+        return;
+      }
+      closeWeekPicker();
+      render();
+    });
+  }
   const searchInput = document.getElementById("history-search") as HTMLInputElement | null;
   searchInput?.addEventListener("input", () => {
     historySearch = searchInput.value;
@@ -3901,6 +4026,44 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "toggle-week-picker") {
+    if (weekPickerOpen) {
+      closeWeekPicker();
+      render();
+      return;
+    }
+    weekPickerOpen = true;
+    pickerMonth = monthKey(historyWeekStart || thisMondayKey());
+    render();
+    await loadPickerDays();
+    return;
+  }
+
+  if (action === "picker-month-prev" || action === "picker-month-next") {
+    pickerMonth = addMonthsKey(pickerMonth || monthKey(historyWeekStart || thisMondayKey()), action === "picker-month-prev" ? -1 : 1);
+    pickerDays = {};
+    render();
+    await loadPickerDays();
+    return;
+  }
+
+  if (action === "pick-week") {
+    const day = source?.dataset.day;
+    closeWeekPicker();
+    if (day && day <= dayKey(new Date())) {
+      historyWeekStart = mondayKey(day);
+    }
+    await refreshHistoryWeek();
+    return;
+  }
+
+  if (action === "history-week-today") {
+    closeWeekPicker();
+    historyWeekStart = thisMondayKey();
+    await refreshHistoryWeek();
+    return;
+  }
+
   if (action === "history-pane") {
     historyPane = source?.dataset.pane === "apps" ? "apps" : "sessions";
     editingRecapNames = false;
@@ -3917,12 +4080,14 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "history-week-prev") {
+    closeWeekPicker();
     historyWeekStart = addDaysKey(historyWeekStart || thisMondayKey(), -7);
     await refreshHistoryWeek();
     return;
   }
 
   if (action === "history-week-next") {
+    closeWeekPicker();
     const current = thisMondayKey();
     const next = addDaysKey(historyWeekStart || current, 7);
     if (next <= current) {
@@ -7059,17 +7224,17 @@ function dayTotalLine(items: SessionSummary[]): string {
   return `${formatHours(focused)} focused · ${sessions}`;
 }
 
-/** A bar's height as a share of its track. Values are read against a rounded ceiling a little
- * above the largest (never under `minScale`, so a ten-minute day stays a sliver), then eased
- * with a mild power so small bars stay visible next to a big one without changing their order.
- * A zero is the caller's business; anything else is at least `floor`. */
-function smartBarHeight(value: number, max: number, minScale: number, floor: number): number {
+/** A bar's height as a share of its track. The biggest value lands near the top of the track
+ * whatever the week held, so a quiet week still draws a full chart; the others keep their order
+ * and, eased by a mild power, stay readable next to it. The figure above the chart carries the
+ * magnitude; the bars carry the shape. A zero is the caller's business; anything else is at
+ * least `floor`. */
+function smartBarHeight(value: number, max: number, floor: number): number {
   if (value <= 0) {
     return 0;
   }
-  const ceiling = Math.max(niceAxis(Math.max(max, minScale) / 3600).max * 3600, minScale);
-  const share = Math.min(1, value / ceiling);
-  return Math.round(floor + (100 - floor) * Math.pow(share, 0.8));
+  const share = Math.min(1, value / Math.max(max, 1));
+  return Math.round(floor + (92 - floor) * Math.pow(share, 0.7));
 }
 
 function formatHours(totalSeconds: number): string {
