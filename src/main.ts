@@ -951,6 +951,7 @@ function closeTopLayer(): void {
 
 function editorIsOpen(): boolean {
   return (
+    draggingRule !== null ||
     preflightOpen ||
     sessionRulesOpen ||
     ruleEditor !== null ||
@@ -1314,7 +1315,8 @@ function renderSessionRulesModal(): string {
           </div>
           <button class="small-button" type="button" data-action="close-session-rules">Done</button>
         </div>
-        ${renderRuleManager(preflightRules, "preflight", "Session rules")}
+        ${/* The dialog's own heading already says "session rules"; no eyebrow under it. */ ""}
+        ${renderRuleManager(preflightRules, "preflight", "")}
       </section>
     </div>
   `;
@@ -1833,12 +1835,13 @@ function renderRuleManager(rules: AppRule[], scope: RuleScope, title: string): s
     <div class="rule-manager permanent-rule-manager">
       <div class="rule-toolbar">
         <div>
-          <p class="eyebrow">${escapeHtml(title)}</p>
+          ${title ? `<p class="eyebrow">${escapeHtml(title)}</p>` : ""}
           ${
             scope === "settings"
               ? `<strong>${escapeHtml(helper)}</strong>`
               : `<p class="explain">${escapeHtml(helper)}</p>`
           }
+          <p class="rule-drag-hint">Drag and drop rules for quick changes.</p>
         </div>
         <div class="rule-toolbar-actions">
           <button class="primary add-rule-button" type="button" data-rule-action="add" data-rule-scope="${scope}">+ Add rule</button>
@@ -1849,7 +1852,7 @@ function renderRuleManager(rules: AppRule[], scope: RuleScope, title: string): s
       <div class="rule-groups">
         ${renderRuleGroup(rules, scope, "distracting", "Distracting")}
         ${renderRuleGroup(rules, scope, "focused", "Relevant")}
-        ${rules.some((rule) => rule.classification === "neutral") ? renderRuleGroup(rules, scope, "neutral", "Neutral") : ""}
+        ${renderRuleGroup(rules, scope, "neutral", "Neutral")}
       </div>
     </div>
   `;
@@ -1866,7 +1869,7 @@ function renderRuleGroup(
     .filter((item) => item.rule.classification === classification)
     .reverse();
   return `
-    <div class="rule-group">
+    <div class="rule-group" data-rule-drop="${scope}" data-rule-classification="${classification}">
       <div class="rule-group-label eyebrow">
         <i class="rule-dot rule-${classification}" aria-hidden="true"></i>
         <span>${escapeHtml(title)}</span>
@@ -1875,7 +1878,7 @@ function renderRuleGroup(
         ${items
           .map(
             ({ rule, index }) => `
-              <button class="rule-chip rule-chip-${classification}" type="button" data-rule-action="edit" data-rule-scope="${scope}" data-rule-index="${index}"${rule.target === "website" ? ` title="${attr(rule.value)}"` : ""}>
+              <button class="rule-chip rule-chip-${classification}" type="button" draggable="true" data-rule-action="edit" data-rule-scope="${scope}" data-rule-index="${index}"${rule.target === "website" ? ` title="${attr(rule.value)}"` : ""}>
                 ${escapeHtml(ruleName(rule))}
               </button>
             `,
@@ -3719,6 +3722,7 @@ function bindEvents(): void {
       void handleRuleAction(button);
     });
   });
+  bindRuleDragAndDrop();
 
   document.querySelectorAll<HTMLFormElement>("[data-rule-form]").forEach((form) => {
     form.addEventListener("submit", (event) => {
@@ -4513,6 +4517,72 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
   if (ok && action === "stop" && history[0]) {
     await openHistoryReport(history[0].id);
+  }
+}
+
+/** The chip being dragged between groups, by scope and position in that scope's rules. */
+let draggingRule: { scope: RuleScope; index: number } | null = null;
+
+function bindRuleDragAndDrop(): void {
+  document.querySelectorAll<HTMLButtonElement>(".rule-chip[draggable]").forEach((chip) => {
+    chip.addEventListener("dragstart", (event) => {
+      const scope = chip.dataset.ruleScope as RuleScope;
+      draggingRule = { scope, index: Number(chip.dataset.ruleIndex) };
+      chip.classList.add("is-dragging");
+      event.dataTransfer?.setData("text/plain", ruleName(rulesForScope(scope)[draggingRule.index]));
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    });
+    chip.addEventListener("dragend", () => {
+      draggingRule = null;
+      chip.classList.remove("is-dragging");
+      document.querySelectorAll(".rule-group.is-drop-target").forEach((group) => group.classList.remove("is-drop-target"));
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-rule-drop]").forEach((group) => {
+    const accepts = () =>
+      draggingRule !== null &&
+      group.dataset.ruleDrop === draggingRule.scope &&
+      rulesForScope(draggingRule.scope)[draggingRule.index]?.classification !== group.dataset.ruleClassification;
+    group.addEventListener("dragover", (event) => {
+      if (!accepts()) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      group.classList.add("is-drop-target");
+    });
+    group.addEventListener("dragleave", (event) => {
+      if (!group.contains(event.relatedTarget as Node | null)) group.classList.remove("is-drop-target");
+    });
+    group.addEventListener("drop", (event) => {
+      if (!accepts()) return;
+      event.preventDefault();
+      const { scope, index } = draggingRule as { scope: RuleScope; index: number };
+      draggingRule = null;
+      void moveRule(scope, index, group.dataset.ruleClassification as RuleClassification);
+    });
+  });
+}
+
+/** Reclassifies one rule by dropping it on another group, then saves like a delete would. */
+async function moveRule(scope: RuleScope, index: number, classification: RuleClassification): Promise<void> {
+  const rules = rulesForScope(scope);
+  const rule = rules[index];
+  if (!rule || rule.classification === classification) {
+    return;
+  }
+  const previous = cloneRules(rules);
+  // Groups list newest first, so the front of the array is the end of the group: the dropped
+  // rule lands last, where the eye expects it. Order carries no meaning for matching.
+  rules.splice(index, 1);
+  rules.unshift({ ...rule, classification });
+  if (ruleEditor?.scope === scope) {
+    ruleEditor = null;
+  }
+  if (scope === "settings") {
+    await persistPermanentRuleChanges(previous);
+  } else if (sessionRulesOpen) {
+    await persistSessionRuleChanges(previous);
+  } else {
+    render();
   }
 }
 

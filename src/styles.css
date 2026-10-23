@@ -1592,12 +1592,24 @@ dt {
   align-items: start;
 }
 
+/* The text block gives way before the buttons wrap under it. */
+.permanent-rule-manager .rule-toolbar > div:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
 .permanent-rule-manager .rule-toolbar .eyebrow {
   margin-bottom: 4px;
 }
 
 .add-rule-button {
   min-width: 116px;
+}
+
+.rule-drag-hint {
+  margin: 4px 0 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
 }
 
 .rule-groups {
@@ -1617,6 +1629,21 @@ dt {
   border-radius: var(--radius-control);
   padding: 10px 12px;
   background: var(--sv-soft-white);
+}
+
+/* Drag a chip onto another group to reclassify it. */
+.rule-chip[draggable] {
+  cursor: grab;
+}
+
+.rule-chip.is-dragging {
+  opacity: 0.45;
+}
+
+.rule-group.is-drop-target {
+  border: 2px dashed var(--sv-border);
+  padding: 9px 11px;
+  background: var(--sv-panel);
 }
 
 .rule-group-label {

@@ -16,7 +16,8 @@
         "width": 920,
         "height": 760,
         "resizable": true,
-        "acceptFirstMouse": true
+        "acceptFirstMouse": true,
+        "dragDropEnabled": false
       }
     ],
     "security": {
