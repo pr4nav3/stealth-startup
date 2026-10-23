@@ -2798,8 +2798,14 @@ function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean
         .map((week, index) => {
           const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", week.week_start === running ? "is-running" : "", week.focus_seconds === 0 ? "is-empty" : ""].filter(Boolean).join(" ");
           const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
-          const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)} · ${sessions}${week.week_start === running ? " · so far" : ""}`;
-          return `<span class="trend-spark-track" title="${attr(tip)}"><span class="${classes}" style="--i: ${index}; height: ${smartBarHeight(week.focus_seconds, maxWeek, 2 * 3600, 8)}%"></span></span>`;
+          const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)}${week.week_start === running ? " so far" : ""}`;
+          return `
+            <span class="trend-spark-track" aria-label="${attr(`${tip} · ${sessions}`)}">
+              <span class="${classes}" style="--i: ${index}; ${week.focus_seconds ? `height: ${smartBarHeight(week.focus_seconds, maxWeek, 2 * 3600, 14)}%` : ""}">
+                <span class="week-tip">${escapeHtml(tip)}</span>
+              </span>
+            </span>
+          `;
         })
         .join("")}
     </div>
@@ -3015,7 +3021,7 @@ function renderTrendsLocked(): string {
     <section class="panel span-card trends-slab trends-locked">
       <p class="eyebrow">Trends</p>
       <p class="span-value">Unlocks after two full weeks</p>
-      <p class="span-caption">Week-over-week lines for focused time, typical stretch, and recovery need a couple of complete weeks before they mean anything.</p>
+      <p class="span-caption">Week-over-week lines for focused time, attention span, and recovery need a couple of complete weeks before they mean anything.</p>
       <div class="trend-pips" role="img" aria-label="${have} of ${TRENDS_UNLOCK_WEEKS} full weeks">
         ${Array.from({ length: TRENDS_UNLOCK_WEEKS }, (_, index) => `<span class="${index < have ? "is-on" : ""}"></span>`).join("")}
         <strong>${have} of ${TRENDS_UNLOCK_WEEKS} full weeks</strong>
@@ -3067,7 +3073,7 @@ function renderTrendRows(): string {
       })}
       ${renderTrendCard({
         tone: "span",
-        title: "Typical stretch",
+        title: "Attention span",
         value: has(last) ? formatMinutes(last.median_stretch_seconds) : "—",
         compare: noLast || span,
         plot: renderWeekPlot(
@@ -3076,7 +3082,7 @@ function renderTrendRows(): string {
             value: week.session_count > 0 ? week.median_stretch_seconds / 60 : null,
             chip: formatStretchChip(week.median_stretch_seconds),
           })),
-          "Typical uninterrupted stretch per week",
+          "Attention span per week: the typical uninterrupted stretch",
           { unit: "MIN", width: 440, height: 250, partialLast: true, emptyNote: "No stretch of work recorded yet" },
         ),
       })}

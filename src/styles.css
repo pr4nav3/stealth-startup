@@ -3484,13 +3484,15 @@ audio {
 }
 
 /* Four weeks of bars, no axis; the viewed week is solid, the running week dashed. */
+/* The same bars as the week's days: ink border, green fill, a short outline for nothing, the
+   running week lighter like today. The viewed week is the full green; the rest sit back. */
 .trend-spark {
   display: flex;
   flex: 1 1 auto;
   align-items: stretch;
-  gap: 6px;
-  min-height: 96px;
-  margin-top: 4px;
+  gap: 10px;
+  min-height: 120px;
+  margin-top: 26px;
 }
 
 .trend-spark-track {
@@ -3501,39 +3503,49 @@ audio {
 }
 
 .trend-spark-bar {
+  position: relative;
   display: block;
   width: 100%;
-  min-height: 4px;
-  border: 2px solid color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
-  transition: transform 120ms ease-out;
+  height: 12px;
+  min-height: 0;
+  border: var(--border);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--sv-green) 45%, var(--panel));
+  transition: transform 100ms ease-out;
 }
 
 .trend-spark-track:hover .trend-spark-bar:not(.is-empty) {
-  transform: translateY(-4px);
+  transform: translate(-2px, -2px);
 }
 
-.trend-spark-bar.is-empty {
-  height: 4px;
-  border-color: transparent;
-  background: color-mix(in srgb, var(--sv-ink) 14%, var(--sv-panel));
+.trend-spark-track:hover .week-tip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.trend-spark-bar .week-tip {
+  transform: translate(-50%, 6px);
+  transition: opacity 100ms ease-out, transform 100ms ease-out;
 }
 
 .trend-spark-bar.is-viewed {
-  border-color: var(--sv-ink);
-  background: var(--sv-ink);
+  background: var(--sv-green);
 }
 
 .trend-spark-bar.is-running {
   border-style: dashed;
-  border-color: var(--sv-muted);
-  background: transparent;
+  background: color-mix(in srgb, var(--sv-green) 30%, var(--panel));
 }
 
 .trend-spark-bar.is-running.is-viewed {
-  border-color: var(--sv-ink);
+  background: color-mix(in srgb, var(--sv-green) 60%, var(--panel));
 }
+
+.trend-spark-bar.is-empty {
+  border-color: color-mix(in srgb, var(--sv-ink) 35%, transparent);
+  background: transparent;
+}
+
 
 .trend-door-value {
   font-size: 1.45rem;
