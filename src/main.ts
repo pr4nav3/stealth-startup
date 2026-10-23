@@ -582,6 +582,8 @@ let historySearch = "";
 let historySearchResults: SessionSummary[] | null = null;
 let historySearchTimer: number | null = null;
 let historySearchRequest = 0;
+/** The week (and data state) whose charts already played their entrance. */
+let historyChartsFor = "";
 let historyConfirm: HistoryConfirm | null = null;
 let historyHydrated = false;
 const knownHistoryIds = new Set<number>();
@@ -802,6 +804,10 @@ async function refreshSnapshotNow(): Promise<void> {
       if (historyHydrated && newest && !snapshot.current && !editorIsOpen()) {
         void openHistoryReport(newest);
         return;
+      }
+      if (historyHydrated && newest && activeTab === "history") {
+        void refreshTrends(false);
+        void refreshHistoryWeek();
       }
     }
     historyHydrated = true;
@@ -2622,6 +2628,9 @@ function renderHistory(): string {
   const sessions = historyWeek?.sessions ?? [];
   const recap = weekRecap && weekRecap.start === weekStart ? weekRecap : null;
   const searching = historySearch.trim().length > 0;
+  const chartsKey = `${weekStart}:${recap ? 1 : 0}:${trends.weeks.length}`;
+  const animate = historyChartsFor !== chartsKey;
+  historyChartsFor = chartsKey;
   const emptyWeek = historyWeek?.oldest_day
     ? "No sessions this week."
     : "Stop a session and the local report lands here. Nothing leaves this machine.";
@@ -2633,8 +2642,8 @@ function renderHistory(): string {
           ? renderSearchResults()
           : `
         <div class="history-hero">
-          ${renderWeekHero(weekStart, recap)}
-          ${renderTrendsDoor(weekStart, recap)}
+          ${renderWeekHero(weekStart, recap, animate)}
+          ${renderTrendsDoor(weekStart, recap, animate)}
         </div>
         <div class="history-seg-row">
           <div class="history-seg" role="group" aria-label="Show">
@@ -2673,8 +2682,18 @@ function renderHistoryToolbar(weekStart: string): string {
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /** Focused hours, longest stretch and recovery for the week, over its daily bars. */
-function renderWeekHero(weekStart: string, recap: WeekRecap | null): string {
+function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boolean): string {
   const current = weekStart === thisMondayKey();
+  const empty = recap !== null && recap.session_count === 0;
+  const note = !recap
+    ? ""
+    : empty
+      ? current
+        ? "No sessions yet this week. Finish one and today's bar fills in."
+        : "No sessions that week."
+      : current && recap.session_count === 1
+        ? "1 session so far"
+        : `${recap.session_count} sessions${current ? " so far" : ""}`;
   const buckets = recap?.buckets ?? WEEKDAY_LABELS.map((label) => ({ label, focus_seconds: 0 }));
   const max = Math.max(...buckets.map((bucket) => bucket.focus_seconds), 1);
   const todayIndex = current ? (new Date().getDay() + 6) % 7 : -1;
@@ -2689,13 +2708,16 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null): string {
     <section class="panel week-hero" aria-label="${current ? "This week" : "That week"}">
       <p class="eyebrow">${current ? "This week" : "Focused time"}</p>
       <div class="week-hero-top">
-        <strong class="week-hero-value">${escapeHtml(formatHours(recap?.focus_seconds ?? 0))}</strong>
+        <div>
+          <strong class="week-hero-value">${escapeHtml(formatHours(recap?.focus_seconds ?? 0))}</strong>
+          ${note ? `<p class="week-hero-note">${escapeHtml(note)}</p>` : ""}
+        </div>
         <div class="week-hero-stats">
-          <div class="week-hero-stat" title="Longest unbroken run of work"><span class="eyebrow">Longest stretch</span><strong>${escapeHtml(longest)}</strong></div>
-          <div class="week-hero-stat" title="Typical time back on task after a drift"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
+          <div class="week-hero-stat" title="${empty ? "Longest unbroken run of work, once there is one" : "Longest unbroken run of work"}"><span class="eyebrow">Longest stretch</span><strong>${escapeHtml(longest)}</strong></div>
+          <div class="week-hero-stat" title="${recovery === "No drifts" ? "Nothing pulled you off task, so there was nothing to recover from" : "Typical time back on task after a drift"}"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
         </div>
       </div>
-      <div class="recap-bars week-hero-bars" style="grid-template-columns: repeat(${buckets.length}, minmax(0, 1fr))">
+      <div class="recap-bars week-hero-bars ${animate ? "is-animated" : ""}" style="grid-template-columns: repeat(${buckets.length}, minmax(0, 1fr))">
         ${buckets
           .map((bucket, index) => {
             const on = bucket.focus_seconds > 0;
@@ -2704,7 +2726,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null): string {
             return `
               <button type="button" class="recap-bar-col" aria-label="${attr(bucket.label)}, ${attr(focused)} focused">
                 <span class="recap-bar-track">
-                  <span class="${classes}" ${on ? `style="height: ${barHeight(bucket.focus_seconds, max, 12)}%"` : ""}>
+                  <span class="${classes}" style="--i: ${index}; ${on ? `height: ${barHeight(bucket.focus_seconds, max, 12)}%` : ""}">
                     <span class="week-tip">${escapeHtml(focused)}</span>
                   </span>
                 </span>
@@ -2719,7 +2741,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null): string {
 }
 
 /** The week against the one before it, a sparkline of recent weeks, and the way into Trends. */
-function renderTrendsDoor(weekStart: string, recap: WeekRecap | null): string {
+function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: boolean): string {
   const weeks = trends.weeks;
   const previousStart = addDaysKey(weekStart, -7);
   const previous = weeks.find((week) => week.week_start === previousStart);
@@ -2727,7 +2749,18 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null): string {
   const todayIndex = (new Date().getDay() + 6) % 7;
   let value = "—";
   let caption = "Nothing to compare";
-  if (recap && previous && (previous.session_count > 0 || recap.session_count > 0)) {
+  if (!recap) {
+    caption = "";
+  } else if (weeks.length === 0) {
+    value = "No weeks yet";
+    caption = "Finish a session and this week starts the chart.";
+  } else if (!previous) {
+    value = weeks[0].week_start === weekStart ? "First week" : "Off the chart";
+    caption = weeks[0].week_start === weekStart ? "Nothing before it to compare with." : "Trends keep the last eight weeks.";
+  } else if (previous.session_count === 0 && recap.session_count === 0) {
+    value = "Quiet";
+    caption = current ? "No sessions this week or last." : "No sessions this week or the one before.";
+  } else if (recap && previous && (previous.session_count > 0 || recap.session_count > 0)) {
     const before = current && todayIndex < 6 ? focusThrough(previousStart, todayIndex) : previous.focus_seconds;
     const against = current && todayIndex < 6 ? `last week through ${WEEKDAY_LABELS[todayIndex]}` : current ? "last week" : "the week before";
     const change = recap.focus_seconds - before;
@@ -2740,16 +2773,21 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null): string {
     }
   }
   const maxWeek = Math.max(...weeks.map((week) => week.focus_seconds), 1);
+  // Fewer than six weeks sit at the right, where they will stay as the chart fills in.
+  const pad = Math.max(0, 6 - weeks.length);
   const spark = weeks.length
-    ? `<div class="trend-spark" role="img" aria-label="Focused hours over the last ${weeks.length} weeks">
+    ? `<div class="trend-spark ${animate ? "is-animated" : ""}" role="img" aria-label="Focused hours over the last ${weeks.length} weeks">
+        ${'<span class="trend-spark-track is-empty"><span class="trend-spark-bar is-empty"></span></span>'.repeat(pad)}
         ${weeks
           .map((week, index) => {
             const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", index === weeks.length - 1 ? "is-running" : ""].filter(Boolean).join(" ");
-            return `<span class="trend-spark-track"><span class="${classes}" style="height: ${Math.max(6, Math.round((week.focus_seconds / maxWeek) * 100))}%"></span></span>`;
+            const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
+            const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)} · ${sessions}`;
+            return `<span class="trend-spark-track" title="${attr(tip)}"><span class="${classes}" style="--i: ${index}; height: ${Math.max(6, Math.round((week.focus_seconds / maxWeek) * 100))}%"></span></span>`;
           })
           .join("")}
       </div>
-      <div class="trend-spark-axis" aria-hidden="true"><span>${escapeHtml(formatWeekStart(weeks[0].week_start))}</span><span>${escapeHtml(formatWeekStart(weeks[weeks.length - 1].week_start))}</span></div>`
+      <div class="trend-spark-axis" aria-hidden="true"><span>${pad ? "" : escapeHtml(formatWeekStart(weeks[0].week_start))}</span><span>${escapeHtml(formatWeekStart(weeks[weeks.length - 1].week_start))}</span></div>`
     : "";
   const locked = trends.full_weeks < TRENDS_UNLOCK_WEEKS;
   const go = locked ? `${trends.full_weeks} of ${TRENDS_UNLOCK_WEEKS} full weeks ›` : `${weeks.length} weeks ›`;
@@ -2823,7 +2861,10 @@ const WEEK_APP_GROUPS = ["Work", "Distractions", "Away"];
 function renderWeekAppsPane(recap: WeekRecap | null): string {
   const apps = recap?.apps ?? [];
   if (apps.length === 0) {
-    const text = recap && recap.session_count > 0 ? "Nothing identifiable was recorded this week." : "No sessions this week.";
+    const text =
+      recap && recap.session_count > 0
+        ? "Sessions ran, but no app or site could be named. Time at the desktop or in an unknown window lands here as nothing."
+        : "No sessions this week, so there is nothing to split up yet.";
     return `<section class="panel history-list-panel"><p class="empty">${text}</p></section>`;
   }
   const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
@@ -3069,7 +3110,7 @@ function renderTrendRows(): string {
             chip: formatStretchChip(week.median_stretch_seconds),
           })),
           "Typical uninterrupted stretch per week",
-          { unit: "MIN", width: 440, height: 250, partialLast: true },
+          { unit: "MIN", width: 440, height: 250, partialLast: true, emptyNote: "No stretch of work recorded yet" },
         ),
       })}
       ${renderTrendCard({
@@ -3085,7 +3126,7 @@ function renderTrendRows(): string {
             chip: week.recovery_median_seconds == null ? "" : formatRecovery(week.recovery_median_seconds),
           })),
           "Typical time back on task after a drift, per week",
-          { unit: "MIN", width: 440, height: 250, partialLast: true },
+          { unit: "MIN", width: 440, height: 250, partialLast: true, emptyNote: "No drifts yet, so nothing to recover from" },
         ),
       })}
     </div>
@@ -3162,10 +3203,12 @@ interface WeekPlotOptions {
   bars?: boolean;
   /** Draw the running week as a hollow, unconnected dot so a partial week never looks like a drop. */
   partialLast?: boolean;
+  /** Shown over the grid when no week has a value. */
+  emptyNote?: string;
 }
 
 function renderWeekPlot(weeks: WeekPoint[], ariaLabel: string, options: WeekPlotOptions = {}): string {
-  const { unit = "", height = 268, width = 680, bars = false, partialLast = false } = options;
+  const { unit = "", height = 268, width = 680, bars = false, partialLast = false, emptyNote = "Nothing to plot yet" } = options;
   const left = 64;
   const right = 22;
   const top = 36;
@@ -3254,6 +3297,7 @@ function renderWeekPlot(weeks: WeekPoint[], ariaLabel: string, options: WeekPlot
       ${line ? `<path class="span-line" d="${line}" />` : ""}
       ${xLabels}
       ${hits}
+      ${points.some((point) => point.hasData) ? "" : `<text class="span-empty" x="${(left + plotW / 2).toFixed(1)}" y="${(top + plotH / 2).toFixed(1)}" text-anchor="middle" dominant-baseline="middle">${escapeHtml(emptyNote)}</text>`}
     </svg>
   `;
 }
@@ -3454,6 +3498,9 @@ function bindEvents(): void {
         }
         settingsView = "home";
         ruleEditor = null;
+      }
+      if (activeTab === "history") {
+        historyChartsFor = "";
       }
       render();
       if (activeTab === "history") {
