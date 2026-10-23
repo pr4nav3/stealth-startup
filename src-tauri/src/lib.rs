@@ -107,24 +107,21 @@ fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSna
 }
 
 #[tauri::command]
-async fn mark_current_relevant(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+async fn flag_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.mark_current(focus::RuleClassification::Focused, now))
+    Ok(lock_sessions(&state)?.flag_current(now))
 }
 
 #[tauri::command]
-async fn mark_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+async fn allow_current_for_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.mark_current(focus::RuleClassification::Distracting, now))
+    Ok(lock_sessions(&state)?.allow_current_for_session(now))
 }
 
 #[tauri::command]
-fn update_session_rules(
-    rules: Vec<focus::AppRule>,
-    state: State<'_, AppState>,
-) -> Result<SessionSnapshot, String> {
+async fn allow_current_always(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.update_current_rules(rules, now))
+    Ok(lock_sessions(&state)?.allow_current_always(now))
 }
 
 #[tauri::command]
@@ -185,15 +182,11 @@ fn get_rules(state: State<'_, AppState>) -> Result<Vec<focus::AppRule>, String> 
 
 /// Turns what the user typed into a website or app rule, or says why it can't be one.
 #[tauri::command]
-fn resolve_rule_input(
-    text: String,
-    classification: focus::RuleClassification,
-    state: State<'_, AppState>,
-) -> Result<focus::AppRule, String> {
+fn resolve_rule_input(text: String, state: State<'_, AppState>) -> Result<focus::AppRule, String> {
     let names = lock_sessions(&state)?.app_names().unwrap_or_default();
-    let rule = focus::AppRule::from_input_with_apps(&text, classification, &names)?;
+    let rule = focus::AppRule::from_input_with_apps(&text, &names)?;
     if rule.names_a_browser() {
-        return Err("Browsers always count as Neutral. Add the website instead (youtube.com).".to_string());
+        return Err("A browser can't be a distraction on its own. Add the website instead (youtube.com).".to_string());
     }
     Ok(rule)
 }
@@ -231,7 +224,8 @@ async fn update_rules(
     rules: Vec<focus::AppRule>,
     state: State<'_, AppState>,
 ) -> Result<session::RulesSaved, String> {
-    Ok(lock_sessions(&state)?.update_rules(rules))
+    let now = state.started_at.elapsed();
+    Ok(lock_sessions(&state)?.update_rules(rules, now))
 }
 
 #[tauri::command]
@@ -537,9 +531,9 @@ pub fn run() {
             resume_session,
             snooze_session,
             stop_session,
-            mark_current_relevant,
-            mark_current_distracting,
-            update_session_rules,
+            flag_current_distracting,
+            allow_current_for_session,
+            allow_current_always,
             get_history,
             get_history_week,
             get_week_recap,

@@ -19,6 +19,8 @@ const MEDIA_PRESENCE_LIMIT_SECONDS: f64 = 45.0 * 60.0;
 pub struct FocusEngine {
     config: FocusConfig,
     rules: Vec<AppRule>,
+    /// Distractions allowed for this session: a rule they name does not match.
+    exceptions: Vec<AppRule>,
     place: Option<(ActivityKind, String)>,
     window_started_at: Duration,
     /// Set while the place's clock is paused (idle, or Supervisor in front).
@@ -37,6 +39,7 @@ impl FocusEngine {
         Self {
             config,
             rules,
+            exceptions: Vec::new(),
             place: None,
             window_started_at: Duration::ZERO,
             held_since: None,
@@ -66,16 +69,7 @@ impl FocusEngine {
 
         if self.is_away(sample) {
             self.hold(now);
-            return self.snapshot(
-                sample,
-                activity,
-                FocusState::Idle,
-                RuleClassification::Neutral,
-                None,
-                false,
-                None,
-                now,
-            );
+            return self.snapshot(sample, activity, FocusState::Idle, None, false, None, now);
         }
 
         // Back on the same place: carry on where it left off, minus the held time.
@@ -83,13 +77,9 @@ impl FocusEngine {
             self.window_started_at += now.saturating_sub(since);
         }
 
-        let matched_rule = matching_rule(&self.rules, activity).cloned();
-        let classification = matched_rule
-            .as_ref()
-            .map(|rule| rule.classification)
-            .unwrap_or(RuleClassification::Neutral);
+        let matched_rule = self.matching_rule(activity).cloned();
         let seconds_on_window = elapsed_seconds(now, self.window_started_at);
-        let state = self.state_for_classification(&classification, seconds_on_window);
+        let state = self.state_for_rule(matched_rule.is_some(), seconds_on_window);
         let next_nudge_in_seconds = if self.muted {
             None
         } else {
@@ -101,20 +91,23 @@ impl FocusEngine {
             self.last_nudge_at = Some(now);
         }
 
-        self.snapshot(
-            sample,
-            activity,
-            state,
-            classification,
-            matched_rule,
-            should_nudge,
-            next_nudge_in_seconds,
-            now,
-        )
+        self.snapshot(sample, activity, state, matched_rule, should_nudge, next_nudge_in_seconds, now)
     }
 
     pub fn replace_rules(&mut self, rules: Vec<AppRule>) {
         self.rules = rules;
+    }
+
+    pub fn set_exceptions(&mut self, exceptions: Vec<AppRule>) {
+        self.exceptions = exceptions;
+    }
+
+    /// The distraction rule for this activity, unless an exception for this session names it.
+    fn matching_rule(&self, activity: &Activity) -> Option<&AppRule> {
+        if matching_rule(&self.exceptions, activity).is_some() {
+            return None;
+        }
+        matching_rule(&self.rules, activity)
     }
 
     /// Pauses the current place's clock from `since` (the earliest hold wins, and never before
@@ -147,20 +140,14 @@ impl FocusEngine {
         self.last_nudge_at = Some(now);
     }
 
-    fn state_for_classification(
-        &self,
-        classification: &RuleClassification,
-        seconds_on_window: u64,
-    ) -> FocusState {
-        match classification {
-            RuleClassification::Focused => FocusState::Focused,
-            RuleClassification::Neutral => FocusState::Neutral,
-            RuleClassification::Distracting
-                if seconds_on_window < self.config.distracted_after_seconds =>
-            {
-                FocusState::Suspicious
-            }
-            RuleClassification::Distracting => FocusState::Distracted,
+    /// No rule is work. A distraction is Suspicious inside the grace, then Distracted.
+    fn state_for_rule(&self, distracting: bool, seconds_on_window: u64) -> FocusState {
+        if !distracting {
+            FocusState::Focused
+        } else if seconds_on_window < self.config.distracted_after_seconds {
+            FocusState::Suspicious
+        } else {
+            FocusState::Distracted
         }
     }
 
@@ -201,13 +188,11 @@ impl FocusEngine {
         Some(first_nudge_wait.max(cooldown_wait))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn snapshot(
         &self,
         sample: &ActivitySample,
         activity: &Activity,
         state: FocusState,
-        classification: RuleClassification,
         matched_rule: Option<AppRule>,
         should_nudge: bool,
         next_nudge_in_seconds: Option<u64>,
@@ -218,7 +203,7 @@ impl FocusEngine {
             activity: activity.clone(),
             markable: is_markable(activity),
             state,
-            classification,
+            distracting: matched_rule.is_some(),
             matched_rule,
             seconds_on_current_window: elapsed_seconds(now, self.window_started_at),
             should_nudge,
@@ -251,7 +236,8 @@ pub struct FocusSnapshot {
     /// Whether "mark current" can name exactly this (see `is_markable`).
     pub markable: bool,
     pub state: FocusState,
-    pub classification: RuleClassification,
+    /// A distraction rule matched (and no exception lifted it).
+    pub distracting: bool,
     pub matched_rule: Option<AppRule>,
     pub seconds_on_current_window: u64,
     pub should_nudge: bool,
@@ -262,18 +248,16 @@ pub struct FocusSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum FocusState {
     Focused,
-    Neutral,
     Suspicious,
     Distracted,
     Idle,
 }
 
-/// `value` is a website key ("youtube.com") or an app name ("Spotify", "Terminal").
+/// A distraction: `value` is a website key ("youtube.com") or an app name ("Spotify").
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AppRule {
     pub target: RuleTarget,
     pub value: String,
-    pub classification: RuleClassification,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -283,74 +267,57 @@ pub enum RuleTarget {
     Website,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuleClassification {
-    Focused,
-    Neutral,
-    Distracting,
-}
-
 impl AppRule {
-    pub fn app(value: &str, classification: RuleClassification) -> Self {
-        Self {
-            target: RuleTarget::App,
-            value: value.trim().to_string(),
-            classification,
-        }
+    pub fn app(value: &str) -> Self {
+        Self { target: RuleTarget::App, value: value.trim().to_string() }
     }
 
-    pub fn website(key: &str, classification: RuleClassification) -> Self {
-        Self {
-            target: RuleTarget::Website,
-            value: key.trim().to_lowercase(),
-            classification,
-        }
+    pub fn website(key: &str) -> Self {
+        Self { target: RuleTarget::Website, value: key.trim().to_lowercase() }
     }
 
     /// A typed rule: an address or verified site name becomes a website rule, a plain name an
     /// app rule. Anything else (a page title, a path) is refused rather than guessed at.
-    pub fn from_input(text: &str, classification: RuleClassification) -> Option<Self> {
+    pub fn from_input(text: &str) -> Option<Self> {
         let text = text.trim();
         if text.is_empty() {
             return None;
         }
         if let Some(key) = website::website_from_input(text) {
-            return Some(Self::website(&key, classification));
+            return Some(Self::website(&key));
         }
-        is_plain_name(text).then(|| Self::app(text, classification))
+        is_plain_name(text).then(|| Self::app(text))
     }
 
     /// Like `from_input`, but a known app's key or name becomes a rule on that app's key. A
     /// name two apps share is refused: a rule on it would rate both.
     pub fn from_input_with_apps(
         text: &str,
-        classification: RuleClassification,
         names: &std::collections::HashMap<String, String>,
     ) -> Result<Self, String> {
         let text = text.trim();
         // Known executable keys may contain dots (WhatsApp.Root); resolve them before URLs.
         if let Some(key) = names.keys().find(|key| key.eq_ignore_ascii_case(text)) {
-            return Ok(Self::app(key, classification));
+            return Ok(Self::app(key));
         }
         let matches: Vec<&String> = names.iter()
             .filter(|(_, name)| name.eq_ignore_ascii_case(text))
             .map(|(key, _)| key)
             .collect();
         match matches.as_slice() {
-            [key] => return Ok(Self::app(key, classification)),
+            [key] => return Ok(Self::app(key)),
             [] => {}
             _ => return Err(format!(
                 "More than one app is called {text}. Rate the one you mean from History, or rename one first."
             )),
         }
-        Self::from_input(text, classification).ok_or_else(|| {
+        Self::from_input(text).ok_or_else(|| {
             "Enter a website (youtube.com) or an app name (Spotify), not a page title or path".to_string()
         })
     }
 
-    /// Browsers are always Neutral, so no rule names one: sites are judged one by one, and a
-    /// browser's own pages and unidentified sites stay Neutral.
+    /// No rule names a browser: sites are judged one by one, and a browser's own pages and
+    /// unidentified sites are never distractions.
     pub fn names_a_browser(&self) -> bool {
         self.target == RuleTarget::App && website::is_browser(&self.value.trim().to_lowercase())
     }
@@ -410,7 +377,7 @@ pub fn is_plain_name(text: &str) -> bool {
 pub fn starter_rules() -> Vec<AppRule> {
     ["youtube.com", "netflix.com", "tiktok.com", "instagram.com", "reddit.com"]
         .into_iter()
-        .map(|key| AppRule::website(key, RuleClassification::Distracting))
+        .map(AppRule::website)
         .collect()
 }
 
@@ -429,11 +396,11 @@ mod tests {
             ("whatsapp.root".to_string(), "WhatsApp".to_string()),
         ]);
         for text in ["WhatsApp.Root", "WhatsApp"] {
-            let rule = AppRule::from_input_with_apps(text, RuleClassification::Focused, &names).unwrap();
+            let rule = AppRule::from_input_with_apps(text, &names).unwrap();
             assert_eq!(rule.target, RuleTarget::App);
             assert_eq!(rule.value, "whatsapp.root");
         }
-        assert_eq!(AppRule::from_input_with_apps("https://whatsapp.com", RuleClassification::Focused, &names)
+        assert_eq!(AppRule::from_input_with_apps("https://whatsapp.com", &names)
             .unwrap().target, RuleTarget::Website);
     }
 
@@ -443,29 +410,29 @@ mod tests {
             ("gl".to_string(), "Game Launcher".to_string()),
             ("gamelauncher".to_string(), "Game Launcher".to_string()),
         ]);
-        assert!(AppRule::from_input_with_apps("Game Launcher", RuleClassification::Focused, &names).is_err());
+        assert!(AppRule::from_input_with_apps("Game Launcher", &names).is_err());
         // Each key still names exactly one.
-        let rule = AppRule::from_input_with_apps("GL", RuleClassification::Focused, &names).unwrap();
+        let rule = AppRule::from_input_with_apps("GL", &names).unwrap();
         assert_eq!(rule.value, "gl");
     }
 
     #[test]
     fn a_rule_on_one_app_never_reaches_another_with_the_same_name() {
-        let first = AppRule::app("app", RuleClassification::Distracting);
+        let first = AppRule::app("app");
         let mut second = Activity::app("App");
         second.app_id = "app#2".into();
         second.key = "app#2".into();
         assert!(first.matches(&Activity::app("App")));
         assert!(!first.matches(&second));
         // Even a name rule written in the app's own case stays off the second app.
-        assert!(!AppRule::app("App", RuleClassification::Focused).matches(&second));
-        assert!(AppRule::app("app#2", RuleClassification::Focused).matches(&second));
+        assert!(!AppRule::app("App").matches(&second));
+        assert!(AppRule::app("app#2").matches(&second));
 
         // A key rule never matches a different program that is merely labeled the same.
         let mut codium = Activity::app("Code");
         codium.app_id = "vscodium".into();
         codium.key = "vscodium".into();
-        assert!(!AppRule::app("code", RuleClassification::Focused).matches(&codium));
+        assert!(!AppRule::app("code").matches(&codium));
     }
 
     #[test]
@@ -474,41 +441,53 @@ mod tests {
         canary.app_id = "chrome#2".into();
         canary.key = "chrome#2".into();
         assert!(!is_markable(&canary));
-        assert!(AppRule::app("chrome#2", RuleClassification::Focused).names_a_browser());
-        assert!(!AppRule::app("chrome#2", RuleClassification::Focused).matches(&canary));
+        assert!(AppRule::app("chrome#2").names_a_browser());
+        assert!(!AppRule::app("chrome#2").matches(&canary));
     }
 
     #[test]
-    fn first_matching_rule_scores_the_activity() {
-        let mut engine = test_engine(vec![
-            AppRule::app("Code", RuleClassification::Focused),
-            AppRule::website("youtube.com", RuleClassification::Distracting),
-        ]);
+    fn no_rule_is_work_and_a_rule_is_a_distraction() {
+        let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
 
-        let snapshot = observe(&mut engine, &Activity::app("Code"), 0.0, 0);
+        let work = observe(&mut engine, &Activity::app("Code"), 0.0, 0);
+        assert_eq!(work.state, FocusState::Focused);
+        assert!(!work.distracting);
+        assert_eq!(work.matched_rule, None);
 
-        assert_eq!(snapshot.state, FocusState::Focused);
-        assert_eq!(snapshot.matched_rule.unwrap().value, "Code");
+        let youtube = observe(&mut engine, &Activity::website("chrome", "youtube.com"), 0.0, 1);
+        assert!(youtube.distracting);
+        assert_eq!(youtube.matched_rule.unwrap().value, "youtube.com");
+    }
+
+    #[test]
+    fn an_exception_lifts_a_rule_for_the_session() {
+        let mut engine = test_engine(vec![AppRule::website("youtube.com"), AppRule::app("Slack")]);
+        engine.set_exceptions(vec![AppRule::website("youtube.com")]);
+
+        let youtube = observe(&mut engine, &Activity::website("chrome", "youtube.com"), 0.0, 0);
+        assert_eq!(youtube.state, FocusState::Focused);
+        assert!(!youtube.distracting);
+        assert_eq!(observe(&mut engine, &Activity::app("Slack"), 0.0, 1).state, FocusState::Suspicious);
+
+        engine.set_exceptions(Vec::new());
+        assert!(observe(&mut engine, &Activity::website("chrome", "youtube.com"), 0.0, 2).distracting);
     }
 
     #[test]
     fn browser_rules_never_apply_only_site_rules_do() {
         let rules = vec![
-            AppRule::app("Google Chrome", RuleClassification::Focused),
-            AppRule::website("youtube.com", RuleClassification::Distracting),
+            AppRule::app("Google Chrome"),
+            AppRule::website("youtube.com"),
         ];
         let mut youtube = Activity::website("chrome", "youtube.com");
         youtube.app_label = "Google Chrome".to_string();
-        assert_eq!(
-            matching_rule(&rules, &youtube).map(|rule| rule.classification),
-            Some(RuleClassification::Distracting)
-        );
+        assert_eq!(matching_rule(&rules, &youtube).map(|rule| rule.value.as_str()), Some("youtube.com"));
 
         let mut github = Activity::website("chrome", "github.com");
         github.app_label = "Google Chrome".to_string();
         assert_eq!(matching_rule(&rules, &github), None);
 
-        // Browsers are always Neutral: the Chrome rule reaches neither its pages nor
+        // No rule reaches a browser: the Chrome rule covers neither its pages nor
         // unidentified sites.
         let mut other = github.clone();
         other.kind = ActivityKind::OtherWebsites;
@@ -523,17 +502,17 @@ mod tests {
 
     #[test]
     fn app_rules_match_the_id_or_the_label() {
-        let rule = AppRule::app("Visual Studio Code", RuleClassification::Focused);
+        let rule = AppRule::app("Visual Studio Code");
         let mut code = Activity::app("Code");
         assert!(!rule.matches(&code));
         code.app_label = "Visual Studio Code".to_string();
         assert!(rule.matches(&code));
-        assert!(AppRule::app("code", RuleClassification::Focused).matches(&code));
+        assert!(AppRule::app("code").matches(&code));
     }
 
     #[test]
     fn typed_rules_become_sites_apps_or_nothing() {
-        let rule = |text| AppRule::from_input(text, RuleClassification::Distracting);
+        let rule = |text| AppRule::from_input(text);
         assert_eq!(rule("YouTube").map(|r| (r.target, r.value)), Some((RuleTarget::Website, "youtube.com".into())));
         assert_eq!(rule("https://m.reddit.com/r/x").map(|r| r.value), Some("reddit.com".into()));
         assert_eq!(rule("Spotify").map(|r| r.target), Some(RuleTarget::App));
@@ -543,7 +522,7 @@ mod tests {
 
     #[test]
     fn distracting_rule_moves_through_suspicious_before_distracted() {
-        let mut engine = test_engine(vec![AppRule::website("youtube.com", RuleClassification::Distracting)]);
+        let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
         let youtube = Activity::website("chrome", "youtube.com");
 
         let first = observe(&mut engine, &youtube, 0.0, 0);
@@ -557,7 +536,7 @@ mod tests {
 
     #[test]
     fn app_switch_does_not_nudge_immediately() {
-        let mut engine = test_engine(vec![AppRule::website("youtube.com", RuleClassification::Distracting)]);
+        let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
         let youtube = Activity::website("chrome", "youtube.com");
 
         assert!(!observe(&mut engine, &youtube, 0.0, 100).should_nudge);
@@ -567,7 +546,7 @@ mod tests {
 
     #[test]
     fn idle_samples_do_not_nudge_or_count_toward_the_site() {
-        let mut engine = test_engine(vec![AppRule::website("youtube.com", RuleClassification::Distracting)]);
+        let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
         let youtube = Activity::website("chrome", "youtube.com");
 
         let idle = observe(&mut engine, &youtube, 200.0, 100);
@@ -581,7 +560,7 @@ mod tests {
 
     #[test]
     fn media_in_front_keeps_an_idle_user_present_until_the_limit() {
-        let mut engine = test_engine(vec![AppRule::website("youtube.com", RuleClassification::Distracting)]);
+        let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
         let youtube = Activity::website("chrome", "youtube.com");
 
         assert_eq!(observe_media(&mut engine, &youtube, 200.0, true, 0).state, FocusState::Suspicious);
@@ -594,7 +573,7 @@ mod tests {
 
     #[test]
     fn nudge_cooldown_blocks_repeated_nudges() {
-        let mut engine = test_engine(vec![AppRule::website("youtube.com", RuleClassification::Distracting)]);
+        let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
         let youtube = Activity::website("chrome", "youtube.com");
 
         assert!(!observe(&mut engine, &youtube, 0.0, 0).should_nudge);

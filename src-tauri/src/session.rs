@@ -2,7 +2,7 @@ use crate::activity::ActivitySample;
 use crate::attribution::{Activity, ActivityKind, Resolver, Source};
 use crate::focus::{
     starter_rules, AppRule, FocusConfig, FocusEngine, FocusSnapshot, FocusState,
-    RuleClassification, RuleTarget,
+    RuleTarget,
 };
 use crate::storage::{
     focus_state_from_key, focus_state_key, open_or_reset, HistoryWeek, WeekRecap, SessionReport,
@@ -35,8 +35,6 @@ pub struct SessionManager {
     /// `None` means history is off for this run; `startup_notice` says why.
     storage: Option<SessionStorage>,
     startup_notice: Option<StorageNotice>,
-    /// The latest mark that rescored past sessions, for the main window to announce.
-    rescore: Option<RescoreNotice>,
 }
 
 impl SessionManager {
@@ -50,7 +48,6 @@ impl SessionManager {
                 history: state.history,
                 storage: Some(storage),
                 startup_notice,
-                rescore: None,
             },
             None => Self::without_storage(startup_notice),
         }
@@ -64,7 +61,6 @@ impl SessionManager {
             history: Vec::new(),
             storage: None,
             startup_notice,
-            rescore: None,
         }
     }
 
@@ -149,32 +145,27 @@ impl SessionManager {
         });
     }
 
-    /// Returns the past sessions whose scores the save changed.
-    fn save_rules(&mut self, rules: Vec<AppRule>) -> Vec<u64> {
-        // Rescoring walks every finished session; unchanged rules (every Start) skip it.
+    /// Writes the rules. History is never rescored: what a session recorded stands.
+    fn save_rules(&mut self, rules: Vec<AppRule>) {
         if rules == self.persisted_rules {
-            return Vec::new();
+            return;
         }
-        let mut rescored = Vec::new();
-        save(self.storage.as_ref(), "save rules", |storage| {
-            rescored = storage.replace_rules(&rules)?;
-            Ok(())
-        });
+        save(self.storage.as_ref(), "save rules", |storage| storage.replace_rules(&rules));
         self.persisted_rules = rules;
-        if !rescored.is_empty() {
-            self.refresh_history();
-        }
-        rescored
     }
 
     pub fn rules(&self) -> Vec<AppRule> {
         keep_current_rules(self.persisted_rules.clone())
     }
 
-    pub fn update_rules(&mut self, rules: Vec<AppRule>) -> RulesSaved {
+    /// Saves the rules and applies them to the running session from its next sample.
+    pub fn update_rules(&mut self, rules: Vec<AppRule>, now: Duration) -> RulesSaved {
         let rules = clean_rules(rules);
-        let rescored_sessions = self.save_rules(rules.clone());
-        RulesSaved { rules, rescored_sessions }
+        self.save_rules(rules.clone());
+        if let Some(session) = self.current.as_mut() {
+            session.set_rules(rules.clone(), now, self.storage.as_ref());
+        }
+        RulesSaved { rules }
     }
 
     pub fn site_names(&self) -> HashMap<String, String> {
@@ -235,11 +226,8 @@ impl SessionManager {
         let strictness = input.strictness.unwrap_or(self.settings.default_strictness);
         let duration_seconds = input.duration_minutes.clamp(5, 180) * 60;
         let goal = clean_goal(input.goal);
-        let rules = clean_rules(
-            input
-                .rules
-                .unwrap_or_else(|| self.persisted_rules.clone()),
-        );
+        let rules = self.rules();
+        let exceptions = clean_rules(input.exceptions.unwrap_or_default());
         let started_at = utc_now();
         // Id 0 marks a session that is not in the database (history off or the insert failed).
         let session_id = match self.storage.as_ref() {
@@ -256,10 +244,10 @@ impl SessionManager {
             goal,
             duration_seconds,
             strictness,
-            rules.clone(),
+            rules,
+            exceptions,
             now,
         ));
-        self.save_rules(rules);
         self.settings.status_window_on_top = true;
         self.save_settings();
     }
@@ -371,29 +359,37 @@ impl SessionManager {
         self.snapshot(now)
     }
 
-    pub fn update_current_rules(&mut self, rules: Vec<AppRule>, now: Duration) -> SessionSnapshot {
-        let rules = clean_rules(rules);
-        if let Some(session) = self.current.as_mut() {
-            session.replace_rules(rules, now, self.storage.as_ref());
-        }
-        self.snapshot(now)
-    }
-
     pub fn stop(&mut self, now: Duration) -> SessionSnapshot {
         self.finish_current(now, "stopped");
         self.snapshot(now)
     }
 
-    pub fn mark_current(&mut self, classification: RuleClassification, now: Duration) -> SessionSnapshot {
+    /// The window in front becomes a distraction, for good.
+    pub fn flag_current(&mut self, now: Duration) -> SessionSnapshot {
         let Some(session) = self.current.as_mut() else {
             return self.snapshot(now);
         };
-        session.mark_current(classification, now, self.storage.as_ref());
-        let rules = session.rules.clone();
-        let rescored = self.save_rules(rules);
-        if !rescored.is_empty() {
-            let seq = self.rescore.as_ref().map_or(0, |notice| notice.seq) + 1;
-            self.rescore = Some(RescoreNotice { seq, sessions: rescored.len() as u64 });
+        if let Some(rules) = session.flag_current(now, self.storage.as_ref()) {
+            self.save_rules(rules);
+        }
+        self.snapshot(now)
+    }
+
+    /// The window in front stops counting as a distraction until the session ends.
+    pub fn allow_current_for_session(&mut self, now: Duration) -> SessionSnapshot {
+        if let Some(session) = self.current.as_mut() {
+            session.allow_current(now, self.storage.as_ref());
+        }
+        self.snapshot(now)
+    }
+
+    /// The rule on the window in front is removed, for good.
+    pub fn allow_current_always(&mut self, now: Duration) -> SessionSnapshot {
+        let Some(session) = self.current.as_mut() else {
+            return self.snapshot(now);
+        };
+        if let Some(rules) = session.unflag_current(now, self.storage.as_ref()) {
+            self.save_rules(rules);
         }
         self.snapshot(now)
     }
@@ -451,7 +447,6 @@ impl SessionManager {
             current: self.current.as_ref().map(|session| session.snapshot(now)),
             history: self.history.clone(),
             storage_notice: self.storage_notice(),
-            rescore: self.rescore.clone(),
         }
     }
 
@@ -519,10 +514,12 @@ struct Session {
     metrics: SessionMetrics,
     evidence: Vec<EvidenceEvent>,
     latest_focus: Option<FocusSnapshot>,
+    /// The distractions, as saved; `exceptions` are the ones allowed for this session.
     rules: Vec<AppRule>,
+    exceptions: Vec<AppRule>,
     engine: FocusEngine,
     last_accounted_at: Duration,
-    /// The state of Supervisor's own window while it is in front (Neutral or Idle).
+    /// The state of Supervisor's own window while it is in front (Focused or Idle).
     supervisor_state: Option<FocusState>,
     timer_held_seconds: u64,
     timer_hold_started_at_seconds: Option<u64>,
@@ -571,8 +568,11 @@ impl Session {
         duration_seconds: u64,
         strictness: Strictness,
         rules: Vec<AppRule>,
+        exceptions: Vec<AppRule>,
         now: Duration,
     ) -> Self {
+        let mut engine = FocusEngine::new(strictness.focus_config(), rules.clone());
+        engine.set_exceptions(exceptions.clone());
         Self {
             id,
             goal,
@@ -584,8 +584,9 @@ impl Session {
             metrics: SessionMetrics::default(),
             evidence: Vec::new(),
             latest_focus: None,
-            rules: rules.clone(),
-            engine: FocusEngine::new(strictness.focus_config(), rules),
+            rules,
+            exceptions,
+            engine,
             last_accounted_at: now,
             supervisor_state: None,
             timer_held_seconds: 0,
@@ -626,6 +627,7 @@ impl Session {
 
     fn fresh_engine(&self) -> FocusEngine {
         let mut engine = FocusEngine::new(self.strictness.focus_config(), self.rules.clone());
+        engine.set_exceptions(self.exceptions.clone());
         engine.set_muted(self.status == SessionStatus::Snoozed);
         engine
     }
@@ -675,10 +677,10 @@ impl Session {
         let camera_away = self.camera_away(&sample, now);
         self.engine.set_camera(self.camera_sees_someone(now), camera_away);
 
-        // Supervisor's own window is never judged by rules and is not focus: Neutral, or Away
-        // after the same stretch without input as any other window.
+        // Supervisor's own window is never a distraction: on task, or Away after the same
+        // stretch without input as any other window.
         if supervisor.matches(&sample) {
-            let state = if self.engine.is_away(&sample) { FocusState::Idle } else { FocusState::Neutral };
+            let state = if self.engine.is_away(&sample) { FocusState::Idle } else { FocusState::Focused };
             let span_at = if state == FocusState::Idle {
                 self.backdate_away(&sample, now)
             } else {
@@ -797,82 +799,98 @@ impl Session {
         self.persist_event(now, "snooze", Some(&seconds.to_string()), storage);
     }
 
-    fn replace_rules(&mut self, rules: Vec<AppRule>, now: Duration, storage: Option<&SessionStorage>) {
+    /// New rules from Settings: the open span closes on the old decision and the next sample
+    /// is judged by the new set.
+    fn set_rules(&mut self, rules: Vec<AppRule>, now: Duration, storage: Option<&SessionStorage>) {
         if self.is_recording() {
             self.account_current(now);
             if self.supervisor_state.is_none() && !self.phone_active() {
                 self.close_open_span(now, storage);
             }
         }
-        self.rules = rules.clone();
-        self.engine.replace_rules(rules);
+        self.rules = rules;
+        self.engine.replace_rules(self.rules.clone());
         self.latest_focus = None;
         self.last_accounted_at = now;
     }
 
-    fn mark_current(
-        &mut self,
-        classification: RuleClassification,
-        now: Duration,
-        storage: Option<&SessionStorage>,
-    ) {
-        let Some(focus) = self.latest_focus.clone() else {
-            return;
-        };
+    /// The rule that would name the window in front, when a rule can (see `is_markable`).
+    fn current_rule(&self) -> Option<(FocusSnapshot, AppRule)> {
+        let focus = self.latest_focus.clone()?;
         if !focus.markable {
-            return;
+            return None;
         }
         let rule = match focus.activity.kind {
-            ActivityKind::Website => AppRule::website(&focus.activity.key, classification),
-            _ => AppRule::app(&focus.activity.app_id, classification),
+            ActivityKind::Website => AppRule::website(&focus.activity.key),
+            _ => AppRule::app(&focus.activity.app_id),
         };
+        Some((focus, rule))
+    }
+
+    /// The window in front joins the distractions. Returns the rules to persist.
+    fn flag_current(&mut self, now: Duration, storage: Option<&SessionStorage>) -> Option<Vec<AppRule>> {
+        let (focus, rule) = self.current_rule()?;
+        self.exceptions.retain(|exception| !exception.matches(&focus.activity));
+        self.rules.insert(0, rule.clone());
+        self.rules = keep_current_rules(std::mem::take(&mut self.rules));
+        self.remark_current(&focus, Some(rule), now, storage, "Marked distraction", "marked_distracting");
+        Some(self.rules.clone())
+    }
+
+    /// The window in front is allowed until the session ends; the rule stays for next time.
+    fn allow_current(&mut self, now: Duration, storage: Option<&SessionStorage>) {
+        let Some((focus, rule)) = self.current_rule() else {
+            return;
+        };
+        if !self.exceptions.contains(&rule) {
+            self.exceptions.push(rule);
+        }
+        self.remark_current(&focus, None, now, storage, "Allowed this session", "allowed_for_session");
+    }
+
+    /// The rule on the window in front goes, for good. Returns the rules to persist.
+    fn unflag_current(&mut self, now: Duration, storage: Option<&SessionStorage>) -> Option<Vec<AppRule>> {
+        let (focus, _) = self.current_rule()?;
+        self.rules.retain(|rule| !rule.matches(&focus.activity));
+        self.exceptions.retain(|exception| !exception.matches(&focus.activity));
+        self.remark_current(&focus, None, now, storage, "Rule removed", "rule_removed");
+        Some(self.rules.clone())
+    }
+
+    /// After a rule change on the window in front: close the span under the old decision,
+    /// judge the window by the new one from now, and record what happened.
+    fn remark_current(
+        &mut self,
+        focus: &FocusSnapshot,
+        matched_rule: Option<AppRule>,
+        now: Duration,
+        storage: Option<&SessionStorage>,
+        evidence: &str,
+        event: &str,
+    ) {
         if self.is_recording() {
             self.account_current(now);
         } else {
             self.last_accounted_at = now;
         }
-
-        let marked_rule = rule.clone();
-        // A phone span stays a phone span; the rule applies once it is put down.
+        // A phone span stays a phone span; the decision applies once it is put down.
         let on_phone = self.phone_active();
         let recorded_activity = self.open_span.as_ref().map(|span| span.activity.clone());
         if !on_phone {
             self.close_open_span(now, storage);
         }
-        self.rules.insert(0, rule);
-        self.rules = keep_current_rules(std::mem::take(&mut self.rules));
         self.engine.replace_rules(self.rules.clone());
+        self.engine.set_exceptions(self.exceptions.clone());
         self.last_accounted_at = now;
-        self.latest_focus = Some(marked_focus(
-            &focus,
-            marked_rule,
-            classification,
-            self.strictness,
-        ));
+        self.latest_focus = Some(marked_focus(focus, matched_rule, self.strictness));
         if self.is_recording() && self.supervisor_state.is_none() && !on_phone {
             if let (Some(activity), Some(marked)) = (recorded_activity, self.latest_focus.as_ref()) {
                 self.sync_span(now, &focus.sample.window_id,
                     focus.sample.window_title.as_deref(), &activity, marked.state, storage);
             }
         }
-        self.push_event(
-            now,
-            match classification {
-                RuleClassification::Focused => "Marked relevant",
-                RuleClassification::Distracting => "Marked distracting",
-                RuleClassification::Neutral => "Marked neutral",
-            },
-            "RULE SAVED",
-        );
-        match classification {
-            RuleClassification::Focused => {
-                self.persist_event(now, "marked_relevant", None, storage);
-            }
-            RuleClassification::Distracting => {
-                self.persist_event(now, "marked_distracting", None, storage);
-            }
-            RuleClassification::Neutral => {}
-        }
+        self.push_event(now, evidence, "RULE");
+        self.persist_event(now, event, None, storage);
     }
 
     fn finish(&mut self, now: Duration, storage: Option<&SessionStorage>) {
@@ -1051,7 +1069,7 @@ impl Session {
             metrics: self.metrics.clone(),
             evidence: self.evidence.clone(),
             focus: self.latest_focus.clone(),
-            rules: self.rules.clone(),
+            exceptions: self.exceptions.clone(),
             camera: self.camera_status(now),
         }
     }
@@ -1171,9 +1189,7 @@ impl Session {
     fn metric_mut(&mut self, state: FocusState) -> &mut u64 {
         match state {
             FocusState::Focused => &mut self.metrics.focused_seconds,
-            FocusState::Neutral => &mut self.metrics.neutral_seconds,
-            FocusState::Suspicious => &mut self.metrics.suspicious_seconds,
-            FocusState::Distracted => &mut self.metrics.distracted_seconds,
+            FocusState::Suspicious | FocusState::Distracted => &mut self.metrics.distracted_seconds,
             FocusState::Idle => &mut self.metrics.idle_seconds,
         }
     }
@@ -1345,7 +1361,8 @@ pub struct StartSessionInput {
     pub goal: String,
     pub duration_minutes: u64,
     pub strictness: Option<Strictness>,
-    pub rules: Option<Vec<AppRule>>,
+    /// Distractions allowed for this session.
+    pub exceptions: Option<Vec<AppRule>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1431,21 +1448,12 @@ pub struct SessionSnapshot {
     pub current: Option<CurrentSession>,
     pub history: Vec<SessionSummary>,
     pub storage_notice: Option<StorageNotice>,
-    pub rescore: Option<RescoreNotice>,
 }
 
-/// A mark during a session rescored past sessions. `seq` lets a window announce it once.
-#[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct RescoreNotice {
-    pub seq: u64,
-    pub sessions: u64,
-}
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct RulesSaved {
     pub rules: Vec<AppRule>,
-    /// Past sessions whose scores changed, for the "re-scored" notice.
-    pub rescored_sessions: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -1461,7 +1469,8 @@ pub struct CurrentSession {
     pub metrics: SessionMetrics,
     pub evidence: Vec<EvidenceEvent>,
     pub focus: Option<FocusSnapshot>,
-    pub rules: Vec<AppRule>,
+    /// Distractions allowed for this session.
+    pub exceptions: Vec<AppRule>,
     pub camera: CameraStatus,
 }
 
@@ -1480,8 +1489,7 @@ pub struct CameraStatus {
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
 pub struct SessionMetrics {
     pub focused_seconds: u64,
-    pub neutral_seconds: u64,
-    pub suspicious_seconds: u64,
+    /// Slipping, distracted and phone time together.
     pub distracted_seconds: u64,
     pub idle_seconds: u64,
     /// Part of `distracted_seconds`.
@@ -1502,10 +1510,8 @@ pub struct SessionSummary {
     pub goal: String,
     pub started_at: String,
     pub duration_seconds: u64,
-    /// Relevant time only.
+    /// Time not on a distraction.
     pub focus_seconds: u64,
-    pub neutral_seconds: u64,
-    pub unrated_seconds: u64,
     pub distracted_seconds: u64,
     pub idle_seconds: u64,
     pub nudges: u64,
@@ -1569,7 +1575,6 @@ fn focus_event_value(focus: &FocusSnapshot) -> String {
 fn state_label(state: FocusState) -> &'static str {
     match state {
         FocusState::Focused => "FOCUSED",
-        FocusState::Neutral => "NEUTRAL",
         FocusState::Suspicious => "SUSPICIOUS",
         FocusState::Distracted => "DISTRACTED",
         FocusState::Idle => "IDLE",
@@ -1608,42 +1613,23 @@ pub fn utc_now() -> String {
         .expect("RFC 3339 formatting only fails for years outside 0000-9999")
 }
 
-fn marked_focus(
-    focus: &FocusSnapshot,
-    matched_rule: AppRule,
-    classification: RuleClassification,
-    strictness: Strictness,
-) -> FocusSnapshot {
-    let state = marked_focus_state(
-        classification,
-        focus.seconds_on_current_window,
-        strictness.focus_config(),
-    );
+fn marked_focus(focus: &FocusSnapshot, matched_rule: Option<AppRule>, strictness: Strictness) -> FocusSnapshot {
+    let config = strictness.focus_config();
+    let state = match matched_rule {
+        None => FocusState::Focused,
+        Some(_) if focus.seconds_on_current_window < config.distracted_after_seconds => FocusState::Suspicious,
+        Some(_) => FocusState::Distracted,
+    };
     FocusSnapshot {
-        matched_rule: Some(matched_rule),
+        distracting: matched_rule.is_some(),
+        matched_rule,
         sample: focus.sample.clone(),
         activity: focus.activity.clone(),
         markable: focus.markable,
         state,
-        classification,
         seconds_on_current_window: focus.seconds_on_current_window,
         should_nudge: false,
         next_nudge_in_seconds: None,
-    }
-}
-
-fn marked_focus_state(
-    classification: RuleClassification,
-    seconds_on_window: u64,
-    config: FocusConfig,
-) -> FocusState {
-    match classification {
-        RuleClassification::Focused => FocusState::Focused,
-        RuleClassification::Neutral => FocusState::Neutral,
-        RuleClassification::Distracting if seconds_on_window < config.distracted_after_seconds => {
-            FocusState::Suspicious
-        }
-        RuleClassification::Distracting => FocusState::Distracted,
     }
 }
 
@@ -1673,25 +1659,25 @@ mod tests {
         assert_eq!(snapshot.status, SessionStatus::Idle);
         assert_eq!(snapshot.history.len(), 1);
         assert_eq!(snapshot.history[0].goal, "Write tests");
-        assert!(snapshot.history[0].unrated_seconds > 0);
+        assert!(snapshot.history[0].focus_seconds > 0);
     }
 
     #[test]
-    fn marking_announces_only_past_sessions_it_rescored() {
+    fn flagging_an_app_never_rewrites_past_sessions() {
         let mut manager = test_manager();
         manager.start(input("Past", Strictness::Normal), seconds(0));
         record(&mut manager, sample("Notion", "Plan", 0.0), seconds(0));
         record(&mut manager, sample("Notion", "Plan", 0.0), seconds(30));
-        manager.stop(seconds(60));
+        let past = manager.stop(seconds(60)).history[0].id;
 
         manager.start(input("Now", Strictness::Normal), seconds(100));
-        record(&mut manager, sample("Figma", "Plan", 0.0), seconds(100));
-        // Figma has no past time, so nothing in history changes.
-        assert_eq!(manager.mark_current(RuleClassification::Focused, seconds(110)).rescore, None);
-        record(&mut manager, sample("Notion", "Plan", 0.0), seconds(120));
-        let marked = manager.mark_current(RuleClassification::Focused, seconds(130));
-        assert_eq!(marked.rescore, Some(RescoreNotice { seq: 1, sessions: 1 }));
-        assert_eq!(marked.history[0].focus_seconds, 60);
+        record(&mut manager, sample("Notion", "Plan", 0.0), seconds(100));
+        let flagged = manager.flag_current(seconds(110));
+        assert!(manager.rules().iter().any(|rule| rule.value == "notion"));
+        // The past session keeps its 60s of work; only this session judges Notion from now.
+        assert_eq!(flagged.history[0].focus_seconds, 60);
+        assert_eq!(manager.session_report(past).unwrap().focused_seconds, 60);
+        assert_eq!(manager.session_report(past).unwrap().distracted_seconds, 0);
     }
 
     #[test]
@@ -1739,7 +1725,7 @@ mod tests {
         manager.tick(seconds(1000));
         let report = manager.session_report(id).unwrap();
         assert_eq!(report.duration_seconds, 300);
-        assert_eq!(report.unrated_seconds, 300);
+        assert_eq!(report.focused_seconds, 300);
     }
 
     #[test]
@@ -1748,22 +1734,19 @@ mod tests {
         manager.start(input("Mark", Strictness::Normal), seconds(0));
         record(&mut manager, sample("Code", "Plan", 0.0), seconds(0));
         record(&mut manager, sample("Code", "Plan", 0.0), seconds(10));
-        manager.mark_current(RuleClassification::Distracting, seconds(12));
+        manager.flag_current(seconds(12));
         let id = manager.snapshot(seconds(12)).current.unwrap().id;
         manager.stop(seconds(20));
         let report = manager.session_report(id).unwrap();
         let bounds: Vec<_> = report.spans.iter().map(|span| (span.started_offset_seconds, span.seconds)).collect();
         assert_eq!(bounds, vec![(0, 12), (12, 8)]);
-        // The rating also reaches the unrated time before the mark.
-        assert_eq!(report.distracted_seconds, 20);
+        // The time before the mark was work and stays work.
+        assert_eq!((report.focused_seconds, report.distracted_seconds), (12, 8));
     }
 
     #[test]
     fn app_and_website_rules_with_the_same_text_are_distinct() {
-        let rules = clean_rules(vec![
-            AppRule::app("example.com", RuleClassification::Focused),
-            AppRule::website("example.com", RuleClassification::Distracting),
-        ]);
+        let rules = clean_rules(vec![AppRule::app("example.com"), AppRule::website("example.com")]);
         assert_eq!(rules.len(), 2);
     }
 
@@ -1779,7 +1762,7 @@ mod tests {
         manager.storage.as_ref().unwrap().recover_orphans().unwrap();
         let recovered = manager.session_report(id).unwrap();
         assert_eq!(recovered.spans.len(), 1);
-        assert_eq!(recovered.unrated_seconds, 30);
+        assert_eq!(recovered.focused_seconds, 30);
         assert_eq!(recovered.ended_reason.as_deref(), Some("abandoned"));
         manager.stop(seconds(45));
         let finished = manager.session_report(id).unwrap();
@@ -1798,11 +1781,11 @@ mod tests {
         manager.record_capture_gap(seconds(30));
         let snapshot = record(&mut manager, sample("Code", "Plan", 0.0), seconds(35));
         let current = snapshot.current.unwrap();
-        assert_eq!(current.metrics.neutral_seconds, 11);
+        assert_eq!(current.metrics.focused_seconds, 11);
         assert_eq!(current.metrics.idle_seconds, 24);
         manager.stop(seconds(35));
         let report = manager.session_report(current.id).unwrap();
-        assert_eq!(report.unrated_seconds, 11);
+        assert_eq!(report.focused_seconds, 11);
         assert_eq!(report.idle_seconds, 24);
     }
 
@@ -1875,27 +1858,27 @@ mod tests {
     }
 
     #[test]
-    fn session_start_uses_provided_rules() {
+    fn session_start_uses_the_exceptions_for_that_session_only() {
         let mut manager = test_manager();
         manager.start(
             StartSessionInput {
-                goal: "Read docs".to_string(),
+                goal: "Research".to_string(),
                 duration_minutes: 25,
                 strictness: Some(Strictness::Strict),
-                rules: Some(vec![AppRule::website("chrome.com", RuleClassification::Focused)]),
+                exceptions: Some(vec![AppRule::website("youtube.com")]),
             },
             seconds(0),
         );
-
-        let snapshot = record(
-            &mut manager,
-            site("https://developer.chrome.com/docs/extensions", 0.0),
-            seconds(10),
-        );
-        let focus = snapshot.current.unwrap().focus.unwrap();
-
+        let focus = record(&mut manager, site("youtube.com", 0.0), seconds(10)).current.unwrap().focus.unwrap();
         assert_eq!(focus.state, FocusState::Focused);
-        assert_eq!(focus.matched_rule.unwrap().value, "chrome.com");
+        assert!(!focus.distracting);
+        // The rule itself is untouched.
+        assert!(manager.rules().iter().any(|rule| rule.value == "youtube.com"));
+        manager.stop(seconds(20));
+
+        manager.start(input("Next", Strictness::Strict), seconds(100));
+        let focus = record(&mut manager, site("youtube.com", 0.0), seconds(110)).current.unwrap().focus.unwrap();
+        assert!(focus.distracting);
     }
 
     #[test]
@@ -1933,7 +1916,7 @@ mod tests {
 
         assert_eq!(session.duration_seconds, 90);
         assert_eq!(session.idle_seconds, 0);
-        assert_eq!(session.unrated_seconds + session.distracted_seconds, 90);
+        assert_eq!(session.focus_seconds + session.distracted_seconds, 90);
         assert!(session.distracted_seconds >= 30);
         assert_eq!(session.nudges, 0);
     }
@@ -1962,7 +1945,6 @@ mod tests {
         let mut manager = test_manager();
         manager.start(input("Think", Strictness::Strict), seconds(0));
         let id = manager.snapshot(seconds(0)).current.unwrap().id;
-        manager.mark_current(RuleClassification::Focused, seconds(0));
         for t in 0..=60 {
             record(&mut manager, sample("Code", "plan.md", 0.0), seconds(t));
         }
@@ -2014,9 +1996,9 @@ mod tests {
 
         // Last seen at 19s; gone for two seconds at 21s.
         assert_eq!(bounds(&manager, id), vec![
-            span(0, 10, "code", "unrated"),
+            span(0, 10, "code", "focused"),
             span(10, 11, "phone", "phone"),
-            span(21, 9, "code", "unrated"),
+            span(21, 9, "code", "focused"),
         ]);
         let report = manager.session_report(id).unwrap();
         assert_eq!(report.phone_seconds, 11);
@@ -2025,7 +2007,7 @@ mod tests {
         assert_eq!(report.nudge_count, 1);
         assert!(report.events.iter().any(|event| event.kind == "nudge"
             && event.detail.as_deref() == Some("phone") && event.at_offset_seconds == 18));
-        assert!(report.apps.iter().any(|app| app.group == "Distracting" && app.key == "phone" && !app.ratable));
+        assert!(report.apps.iter().any(|app| app.group == "Distractions" && app.key == "phone" && !app.ratable));
     }
 
     #[test]
@@ -2133,7 +2115,7 @@ mod tests {
         }
         manager.stop(seconds(500));
         assert_eq!(bounds(&manager, id), vec![
-            span(0, 340, "code", "unrated"),
+            span(0, 340, "code", "focused"),
             span(340, 160, "code", "idle"),
         ]);
     }
@@ -2156,7 +2138,7 @@ mod tests {
         let bounds: Vec<_> = report.spans.iter()
             .map(|span| (span.started_offset_seconds, span.seconds, span.state.as_str()))
             .collect();
-        assert_eq!(bounds, vec![(0, 60, "unrated"), (60, 240, "idle")]);
+        assert_eq!(bounds, vec![(0, 60, "focused"), (60, 240, "idle")]);
         assert_eq!(report.idle_seconds, 240);
     }
 
@@ -2225,14 +2207,14 @@ mod tests {
         );
         let metrics = snapshot.current.unwrap().metrics;
 
-        // YouTube keeps its 20s; the 40s in Supervisor is Neutral, never judged.
+        // YouTube keeps its 20s; the 40s in Supervisor is work, never judged.
         assert_eq!(metric_total(&metrics), 60);
-        assert_eq!(metrics.neutral_seconds, 40);
+        assert_eq!(metrics.focused_seconds, 40);
         assert_eq!(metrics.nudges, 0);
     }
 
     #[test]
-    fn supervisor_time_is_a_neutral_app_row() {
+    fn supervisor_time_is_a_work_row() {
         let mut manager = test_manager();
         manager.start(input("Focus", Strictness::Normal), seconds(0));
         let id = manager.snapshot(seconds(0)).current.unwrap().id;
@@ -2245,11 +2227,11 @@ mod tests {
 
         let supervisor: Vec<_> = report.apps.iter().filter(|app| app.key == "supervisor").collect();
         assert_eq!(supervisor.len(), 1);
-        assert_eq!(supervisor[0].group, "Neutral");
+        assert_eq!(supervisor[0].group, "Work");
         assert_eq!(supervisor[0].seconds, 35);
         assert!(report.spans.iter().filter(|span| span.activity_key == "supervisor")
-            .all(|span| span.state == "neutral"));
-        assert_eq!(report.focused_seconds, 0);
+            .all(|span| span.state == "focused"));
+        assert_eq!(report.focused_seconds, 60);
     }
 
     #[test]
@@ -2272,7 +2254,7 @@ mod tests {
             .filter(|span| span.activity_key == "supervisor")
             .map(|span| (span.started_offset_seconds, span.seconds, span.state.as_str()))
             .collect();
-        assert_eq!(supervisor, vec![(30, 30, "neutral"), (60, 340, "idle")]);
+        assert_eq!(supervisor, vec![(30, 30, "focused"), (60, 340, "idle")]);
         assert_eq!(report.idle_seconds, 340);
     }
 
@@ -2292,7 +2274,7 @@ mod tests {
             .map(|span| span.seconds).sum();
         assert_eq!(paused, 60);
         assert_eq!(report.duration_seconds, 60);
-        assert_eq!(report.unrated_seconds, 60);
+        assert_eq!(report.focused_seconds, 60);
         assert!(report.apps.iter().all(|app| app.key != "paused"));
     }
 
@@ -2361,19 +2343,18 @@ mod tests {
                         manager.snooze(t, 300);
                     }
                     11 => {
-                        let mark = if next(2) == 0 {
-                            RuleClassification::Focused
-                        } else {
-                            RuleClassification::Distracting
+                        match next(3) {
+                            0 => manager.flag_current(t),
+                            1 => manager.allow_current_for_session(t),
+                            _ => manager.allow_current_always(t),
                         };
-                        manager.mark_current(mark, t);
                     }
                     12 => {
                         manager.record_capture_gap(t);
                     }
                     13 => {
                         let rules = manager.rules();
-                        manager.update_current_rules(rules, t);
+                        manager.update_rules(rules, t);
                     }
                     // Webcam readings arrive between ticks, a few a second.
                     14 | 15 => {
@@ -2395,7 +2376,7 @@ mod tests {
                 manager.tick(seconds(now));
             }
             let rules = manager.rules();
-            manager.update_current_rules(rules, seconds(now));
+            manager.update_rules(rules, seconds(now));
             now += 1;
             manager.stop(seconds(now));
 
@@ -2560,7 +2541,7 @@ mod tests {
         assert_eq!(during.sample.app_name, "Code");
         assert_eq!(during.sample.window_title.as_deref(), Some("main.rs"));
         assert_eq!(during.state, before.state);
-        assert_eq!(during.classification, before.classification);
+        assert_eq!(during.distracting, before.distracting);
     }
 
     #[test]
@@ -2576,7 +2557,7 @@ mod tests {
                 .focus
                 .unwrap();
             assert_eq!(focus.activity.key, "youtube.com");
-            assert_ne!(focus.state, FocusState::Neutral);
+            assert!(focus.distracting);
         }
         let nudge = record(&mut manager, shell_sample(), seconds(60))
             .current
@@ -2598,33 +2579,58 @@ mod tests {
     }
 
     #[test]
-    fn mark_current_relevant_wins_over_starter_rules() {
+    fn allowing_for_the_session_beats_starter_rules_and_keeps_them() {
         let mut manager = test_manager();
-        manager.start(
-            input("Focus", Strictness::Strict),
-            seconds(0),
-        );
-        record(
-            &mut manager,
-            site("youtube.com/watch", 0.0),
-            seconds(0),
-        );
-        let marked = manager.mark_current(RuleClassification::Focused, seconds(1));
-        assert_eq!(
-            marked.current.unwrap().focus.unwrap().state,
-            FocusState::Focused
-        );
+        manager.start(input("Focus", Strictness::Strict), seconds(0));
+        record(&mut manager, site("youtube.com/watch", 0.0), seconds(0));
+        let allowed = manager.allow_current_for_session(seconds(1));
+        assert_eq!(allowed.current.as_ref().unwrap().focus.as_ref().unwrap().state, FocusState::Focused);
+        assert_eq!(allowed.current.unwrap().exceptions, vec![AppRule::website("youtube.com")]);
 
-        let snapshot = record(
-            &mut manager,
-            site("youtube.com/watch", 0.0),
-            seconds(40),
-        );
+        let snapshot = record(&mut manager, site("youtube.com/watch", 0.0), seconds(40));
+        assert_eq!(snapshot.current.unwrap().focus.unwrap().state, FocusState::Focused);
+        assert!(manager.rules().iter().any(|rule| rule.value == "youtube.com"));
+        manager.stop(seconds(50));
 
-        assert_eq!(
-            snapshot.current.unwrap().focus.unwrap().state,
-            FocusState::Focused
-        );
+        // The next session starts from the rules again.
+        manager.start(input("Again", Strictness::Strict), seconds(100));
+        let focus = record(&mut manager, site("youtube.com/watch", 0.0), seconds(101)).current.unwrap().focus.unwrap();
+        assert!(focus.distracting);
+    }
+
+    #[test]
+    fn allowing_always_removes_the_rule() {
+        let mut manager = test_manager();
+        manager.start(input("Focus", Strictness::Strict), seconds(0));
+        record(&mut manager, site("youtube.com/watch", 0.0), seconds(0));
+        let allowed = manager.allow_current_always(seconds(1));
+        assert_eq!(allowed.current.unwrap().focus.unwrap().state, FocusState::Focused);
+        assert!(manager.rules().iter().all(|rule| rule.value != "youtube.com"));
+        manager.stop(seconds(50));
+
+        manager.start(input("Again", Strictness::Strict), seconds(100));
+        let focus = record(&mut manager, site("youtube.com/watch", 0.0), seconds(101)).current.unwrap().focus.unwrap();
+        assert!(!focus.distracting);
+    }
+
+    #[test]
+    fn rules_saved_mid_session_apply_from_the_next_sample() {
+        let mut manager = test_manager();
+        manager.start(input("Focus", Strictness::Strict), seconds(0));
+        record(&mut manager, sample("Slack", "General", 0.0), seconds(0));
+        assert!(!record(&mut manager, sample("Slack", "General", 0.0), seconds(5)).current.unwrap().focus.unwrap().distracting);
+
+        let mut rules = manager.rules();
+        rules.push(AppRule::app("slack"));
+        manager.update_rules(rules, seconds(6));
+        let focus = record(&mut manager, sample("Slack", "General", 0.0), seconds(7)).current.unwrap().focus.unwrap();
+        assert!(focus.distracting);
+        let id = manager.snapshot(seconds(7)).current.unwrap().id;
+        manager.stop(seconds(10));
+        let report = manager.session_report(id).unwrap();
+        // The seconds before the save stay work.
+        assert_eq!(report.focused_seconds, 6);
+        assert_eq!(report.distracted_seconds, 4);
     }
 
     #[test]
@@ -2637,11 +2643,11 @@ mod tests {
         record(&mut manager, sample("Notes", "Plan", 0.0), seconds(0));
         record(&mut manager, sample("Notes", "Plan", 0.0), seconds(10));
 
-        let snapshot = manager.mark_current(RuleClassification::Distracting, seconds(11));
+        let snapshot = manager.flag_current(seconds(11));
         let focus = snapshot.current.unwrap().focus.unwrap();
 
         assert_eq!(focus.state, FocusState::Distracted);
-        assert_eq!(focus.classification, RuleClassification::Distracting);
+        assert!(focus.distracting);
         assert_eq!(focus.matched_rule.unwrap().value, "notes");
     }
 
@@ -2663,7 +2669,7 @@ mod tests {
             seconds(1),
             &supervisor,
         );
-        manager.mark_current(RuleClassification::Focused, seconds(2));
+        manager.allow_current_for_session(seconds(2));
         let snapshot = record(
             &mut manager,
             site("youtube.com/watch", 0.0),
@@ -2739,8 +2745,7 @@ mod tests {
             .current
             .unwrap()
             .metrics;
-        assert_eq!(metrics.neutral_seconds, 25);
-        assert_eq!(metrics.suspicious_seconds, 0);
+        assert_eq!(metrics.focused_seconds, 25);
         assert_eq!(metrics.distracted_seconds, 0);
     }
 
@@ -2847,7 +2852,7 @@ mod tests {
             goal: goal.to_string(),
             duration_minutes,
             strictness: Some(strictness),
-            rules: None,
+            exceptions: None,
         }
     }
 
@@ -2884,9 +2889,8 @@ mod tests {
     #[test]
     fn two_programs_with_one_name_are_two_apps_and_keep_their_keys() {
         let mut manager = test_manager();
-        let mut start = input("Focus", Strictness::Normal);
-        start.rules = Some(vec![AppRule::app("app", RuleClassification::Distracting)]);
-        manager.start(start, seconds(0));
+        manager.update_rules(vec![AppRule::app("app")], seconds(0));
+        manager.start(input("Focus", Strictness::Normal), seconds(0));
         let alpha = ActivitySample {
             process_path: "/Vendors/Alpha/App.app".to_string(),
             ..sample("App", "Alpha", 0.0)
@@ -2898,9 +2902,9 @@ mod tests {
         let focus = |snapshot: SessionSnapshot| snapshot.current.unwrap().focus.unwrap();
         let a = focus(record(&mut manager, alpha.clone(), seconds(0)));
         let b = focus(record(&mut manager, beta, seconds(5)));
-        assert_eq!((a.activity.key.as_str(), a.classification), ("app", RuleClassification::Distracting));
+        assert_eq!((a.activity.key.as_str(), a.distracting), ("app", true));
         // The rule on the first app does not reach the second, and the two never look alike.
-        assert_eq!((b.activity.key.as_str(), b.classification), ("app#2", RuleClassification::Neutral));
+        assert_eq!((b.activity.key.as_str(), b.distracting), ("app#2", false));
         assert_eq!(b.activity.label, "App (2)");
         assert_eq!(focus(record(&mut manager, alpha, seconds(10))).activity.key, "app");
     }
@@ -3000,10 +3004,6 @@ mod tests {
     }
 
     fn metric_total(metrics: &SessionMetrics) -> u64 {
-        metrics.focused_seconds
-            + metrics.neutral_seconds
-            + metrics.suspicious_seconds
-            + metrics.distracted_seconds
-            + metrics.idle_seconds
+        metrics.focused_seconds + metrics.distracted_seconds + metrics.idle_seconds
     }
 }
