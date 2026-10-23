@@ -3602,8 +3602,14 @@ button.trend-door-go {
 
 .week-app-cols {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 32px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 28px;
+}
+
+.week-app-empty {
+  margin: 8px 0 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
 }
 
 .week-app-group {
@@ -3620,7 +3626,7 @@ button.trend-door-go {
 }
 
 .week-app-rows .recap-app-row {
-  grid-template-columns: minmax(0, 1.1fr) minmax(2.5rem, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(4rem, 1.2fr) auto;
   gap: 10px;
   margin: 0;
   padding: 6px 4px;
@@ -4106,64 +4112,6 @@ button.recap-bar-col:active .recap-bar {
   grid-template-columns: minmax(0, 1fr) minmax(4rem, 18rem) auto;
   gap: 12px;
   align-items: center;
-}
-
-/* Rows are quietly clickable: no buttons until hover, so the list stays a list. */
-button.recap-app-row {
-  width: 100%;
-  min-height: 0;
-  height: auto;
-  margin: 0 -6px;
-  padding: 4px 6px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  box-shadow: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  text-transform: none;
-  letter-spacing: normal;
-  cursor: pointer;
-  box-sizing: content-box;
-}
-
-button.recap-app-row:hover,
-button.recap-app-row:focus-visible {
-  background: var(--white-soft);
-}
-
-.recap-app-row.is-flagged .recap-app-name::after {
-  content: "";
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-left: 7px;
-  border: 1.5px solid #101010;
-  border-radius: 50%;
-  background: #ff684f;
-  vertical-align: middle;
-}
-
-.recap-app-name-wrap {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-}
-
-.flag-note {
-  flex: none;
-  color: var(--sv-muted);
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-4);
-}
-
-
-.rate-foot p {
-  margin: 0;
-  color: var(--sv-muted);
-  font-size: var(--sv-type-4);
 }
 
 @media (max-width: 680px) {

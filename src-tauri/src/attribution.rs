@@ -66,19 +66,6 @@ impl Activity {
         Self::in_browser(ActivityKind::Website, key, browser, browser, Source::Address)
     }
 
-    /// Rebuilds the parts rules and categories need from a stored span.
-    pub fn from_stored(kind: &str, key: &str, label: &str, app_id: &str) -> Self {
-        let kind = ActivityKind::from_key(kind);
-        Self {
-            kind,
-            key: key.to_string(),
-            label: label.to_string(),
-            app_id: app_id.to_lowercase(),
-            app_label: if kind == ActivityKind::App { label } else { app_id }.to_string(),
-            source: Source::None,
-        }
-    }
-
     /// Supervisor's own windows: recorded as Neutral (or Away), never judged by rules.
     pub fn supervisor() -> Self {
         Self::app("Supervisor")
@@ -145,13 +132,6 @@ impl ActivityKind {
         }
     }
 
-    pub fn from_key(value: &str) -> Self {
-        match value {
-            "website" => Self::Website,
-            "other_websites" => Self::OtherWebsites,
-            _ => Self::App,
-        }
-    }
 }
 
 impl Source {

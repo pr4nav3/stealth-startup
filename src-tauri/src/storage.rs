@@ -1,7 +1,7 @@
 use crate::activity;
 use crate::app_identity::{self, AppKeys};
 use crate::attribution::{Activity, PAUSED_KEY, PHONE_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
-use crate::focus::{matching_rule, starter_rules, AppRule, RuleTarget};
+use crate::focus::{starter_rules, AppRule, RuleTarget};
 use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, HISTORY_CACHE_LIMIT};
 use crate::website;
 use rusqlite::{params, Connection};
@@ -227,10 +227,6 @@ pub struct RecapApp {
     pub key: String,
     pub label: String,
     pub seconds: u64,
-    /// Whether a rule can name exactly this row (not Supervisor, Away, or browser catch-alls).
-    pub ratable: bool,
-    /// A distraction rule names it today (what the next session will do, not what this one did).
-    pub flagged: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1042,11 +1038,6 @@ impl SessionStorage {
         Ok((initialized || !stored.is_empty()).then_some(stored))
     }
 
-    /// The rules history is scored with. Never writes, so it is safe inside a transaction.
-    fn scoring_rules(&self) -> Result<Vec<AppRule>, String> {
-        Ok(self.saved_rules()?.unwrap_or_else(starter_rules))
-    }
-
     fn read_rules(&self) -> Result<Vec<AppRule>, String> {
         let mut stmt = self
             .conn
@@ -1258,20 +1249,6 @@ impl SessionStorage {
         self.repaired_seconds.get()
     }
 
-    fn attach_flags(&self, apps: &mut [RecapApp], rules: &[AppRule]) {
-        for app in apps {
-            app.ratable = ratable(&app.kind, &app.key);
-            if !app.ratable {
-                continue;
-            }
-            // Display overrides must never become rule-matching identities.
-            let rule_label = self.native_app_names.borrow().get(&app.key).cloned()
-                .unwrap_or_else(|| app.key.clone());
-            let activity = Activity::from_stored(&app.kind, &app.key, &rule_label, &app.key);
-            app.flagged = matching_rule(rules, &activity).is_some();
-        }
-    }
-
     /// Returns whether any saved figure changed; unchanged sessions are not rewritten.
     pub fn recompute_session_metrics(&self, session_id: u64) -> Result<bool, String> {
         let spans = self.load_spans_for_session(session_id)?;
@@ -1478,8 +1455,7 @@ impl SessionStorage {
         };
 
         let spans = self.load_spans_for_session(id)?;
-        let mut apps = apps_from_spans(&spans);
-        self.attach_flags(&mut apps, &self.scoring_rules()?);
+        let apps = apps_from_spans(&spans);
         let events = self.load_events_for_session(id)?;
 
         Ok(SessionReport {
@@ -1604,8 +1580,7 @@ impl SessionStorage {
             stats.add(&spans);
             all_spans.extend(spans);
         }
-        let mut apps = apps_from_spans(&all_spans);
-        self.attach_flags(&mut apps, &self.scoring_rules()?);
+        let apps = apps_from_spans(&all_spans);
 
         let previous = self.span_stats(start.saturating_sub(time::Duration::days(7)), start)?;
 
@@ -1956,8 +1931,7 @@ pub fn focus_state_key(state: crate::focus::FocusState) -> &'static str {
     }
 }
 
-/// Whether a rule can name exactly this row: a website, or an app that isn't a browser or one
-/// of Supervisor's own markers.
+/// An app a rule could name: not a browser and not one of Supervisor's own markers.
 fn ratable(kind: &str, key: &str) -> bool {
     match kind {
         "website" => true,
@@ -2211,8 +2185,6 @@ fn apps_from_spans(spans: &[ReportSpan]) -> Vec<RecapApp> {
             key: key.to_string(),
             label: label.to_string(),
             seconds,
-            ratable: false,
-            flagged: false,
         })
         .collect();
     let rank = |group: &str| GROUP_ORDER.iter().position(|g| *g == group).unwrap_or(9);
@@ -2358,8 +2330,7 @@ mod tests {
         let report = storage.get_session_report(notion).unwrap();
         assert_eq!((report.focused_seconds, report.distracted_seconds, report.focus_percent), (60, 0, 100));
         assert_eq!(report.spans[0].state, "focused");
-        // The row says what the next session will do with it.
-        assert!(report.apps[0].flagged);
+        assert_eq!(report.apps[0].group, "Work");
         assert_eq!(storage.list_history(10).unwrap()[0].focus_seconds, 60);
     }
 
@@ -2411,7 +2382,7 @@ mod tests {
     }
 
     #[test]
-    fn browsers_are_never_flagged_and_cannot_be_rated() {
+    fn an_app_rule_naming_a_browser_never_scores_it() {
         let storage = SessionStorage::open_in_memory().unwrap();
         storage.replace_rules(&[AppRule::app("chrome")]).unwrap();
         let id = storage.insert_session("Browse", Strictness::Normal, "2026-09-22T12:00:00Z", 600).unwrap();
@@ -2420,8 +2391,7 @@ mod tests {
 
         let report = storage.get_session_report(id).unwrap();
         assert_eq!(report.spans[0].state, "focused");
-        assert!(!report.apps[0].ratable);
-        assert!(!report.apps[0].flagged);
+        assert_eq!(report.apps[0].group, "Work");
     }
 
     #[test]
@@ -2516,9 +2486,9 @@ mod tests {
         storage.replace_rules(&[AppRule::app("notion")]).unwrap();
         let after = storage.get_session_report(id).unwrap();
         assert_eq!((after.focused_seconds, after.distracted_seconds, after.focus_percent), (240, 60, 80));
-        let groups: Vec<(&str, &str, bool)> = after.apps.iter()
-            .map(|row| (row.group.as_str(), row.key.as_str(), row.flagged)).collect();
-        assert_eq!(groups, vec![("Distractions", "notion", true), ("Work", "code", false), ("Work", "notion", true)]);
+        let groups: Vec<(&str, &str)> = after.apps.iter()
+            .map(|row| (row.group.as_str(), row.key.as_str())).collect();
+        assert_eq!(groups, vec![("Distractions", "notion"), ("Work", "code"), ("Work", "notion")]);
         assert_eq!(storage.list_history(10).unwrap()[0].focus_seconds, 240);
     }
 
@@ -2610,10 +2580,9 @@ mod tests {
 
         // A different program that happens to share the file name does not inherit it.
         assert_eq!(storage.app_key("exe:tool|new co|new tool", "tool", "New Tool"), "tool#2");
-        // The program the history belongs to does, along with its rule.
+        // The program the history belongs to does.
         assert_eq!(storage.app_key("exe:tool|old co|old tool", "tool", "Old Tool"), "tool");
         assert_eq!(storage.get_session_report(id).unwrap().focused_seconds, 60);
-        assert!(storage.get_session_report(id).unwrap().apps[0].flagged);
         // Shared hosts never inherit: their history may be several apps.
         storage.insert_span(id, &app_span("javaw", "Java(TM) Platform SE binary"), "focused", 60, 60).unwrap();
         assert_eq!(storage.app_key("exe:javaw|oracle|java|jar:a", "javaw", "Java(TM) Platform SE binary"), "javaw#2");
@@ -2633,7 +2602,6 @@ mod tests {
         let recap = storage.get_week_recap("2026-09-22").unwrap();
         assert_eq!(recap.apps[0].label, "Games");
         assert_eq!(recap.apps[0].group, "Work");
-        assert!(!recap.apps[0].flagged);
     }
 
     #[test]
@@ -3274,25 +3242,6 @@ mod tests {
 
         assert_eq!(group("Work"), 300);
         assert_eq!(group("Away"), 600);
-    }
-
-    #[test]
-    fn report_rows_say_whether_and_how_they_are_rated() {
-        let storage = SessionStorage::open_in_memory().expect("open db");
-        let id = storage
-            .insert_session("Rate", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
-            .expect("insert session");
-        storage.insert_span(id, &app("Snipping Tool"), "focused", 0, 60).unwrap();
-        storage.insert_span(id, &site("youtube.com"), "distracted", 60, 60).unwrap();
-        storage.insert_span(id, &Activity::supervisor(), "focused", 120, 60).unwrap();
-        let apps = storage.get_session_report(id).expect("report").apps;
-        let row = |key: &str| apps.iter().find(|app| app.key == key).expect(key);
-
-        assert!(row("snipping tool").ratable);
-        assert!(!row("snipping tool").flagged);
-        // The starter list names YouTube.
-        assert!(row("youtube.com").flagged);
-        assert!(!row("supervisor").ratable);
     }
 
     #[test]

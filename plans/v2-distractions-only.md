@@ -24,7 +24,7 @@ layer) is superseded by this.
 | Rule change | rescores all past unclassified time | forward only; history never changes |
 | Per-session | a copy of the whole rule set | an allow-list of exceptions ("not today") |
 | Marks during a session | Relevant / Distracting, both permanent | "This is a distraction" (permanent), "Not today" (session), "Never a distraction" (removes the rule) |
-| After a session | classify queue, 1/2/3 keys | nothing asked; a toggle per app row sets the rule for next time |
+| After a session | classify queue, 1/2/3 keys | nothing asked; the report is read-only |
 
 Stretches, recovery, drifts, phone time, nudges, trends, streak and the day
 card keep their meaning; "on task" simply becomes everything that is not a
@@ -87,8 +87,8 @@ distraction, which the day card already draws that way.
 - `replace_rules` writes rules and nothing else. `rescore_history` stays as a
   private helper for migrations and `recover_orphans`.
 - `RecapApp`: `group` is `"Distractions"`, `"Work"` or `"Away"` from span
-  states; `rating: Option<RuleClassification>` becomes `flagged: bool` (a
-  distraction rule names it today); `ratable` stays (markable rows).
+  states; `rating`, `flagged` and `ratable` are gone. A row reports time and
+  nothing else; the distractions list is edited in Settings or mid-session.
 - `SessionReport.unrated_seconds` removed; `SUMMARY_SELECT` loses the columns.
 - `week_recap` and trends unchanged apart from the fields above.
 - Tests: the v7 and rating-rescore tests become a v12 migration test (neutral
@@ -131,8 +131,8 @@ Changed:
 - **Nudge popup**: "Return to task", "Not today", "Never a distraction".
 - **Overlay More settings**: one mark, "This is a distraction".
 - **Report / recap apps**: `APP_GROUPS = ["Distractions", "Work", "Away"]`;
-  each ratable row carries a toggle ("Distraction" on/off) that adds or removes
-  the rule and says "from the next session". No caption.
+  rows are read-only (name, bar, time). The week's pane shows Work beside
+  Distractions, each column saying so when empty, with Away as a footer line.
 - **Report stats**: Duration, Focused %, Nudges, Phone when present. The
   summary line keeps attention span.
 - **Legend**: Work, Distraction, Away, Paused (phone and suspicious draw red).

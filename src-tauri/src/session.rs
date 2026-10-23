@@ -2011,7 +2011,7 @@ mod tests {
         assert_eq!(report.nudge_count, 1);
         assert!(report.events.iter().any(|event| event.kind == "nudge"
             && event.detail.as_deref() == Some("phone") && event.at_offset_seconds == 18));
-        assert!(report.apps.iter().any(|app| app.group == "Distractions" && app.key == "phone" && !app.ratable));
+        assert!(report.apps.iter().any(|app| app.group == "Distractions" && app.key == "phone"));
     }
 
     #[test]

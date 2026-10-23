@@ -234,9 +234,6 @@ interface RecapApp {
   key: string;
   label: string;
   seconds: number;
-  ratable: boolean;
-  /** A distraction rule names it today: what the next session will do, not what this one did. */
-  flagged: boolean;
 }
 
 interface WeekRecap {
@@ -2724,7 +2721,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
             return `
               <button type="button" class="recap-bar-col" aria-label="${attr(bucket.label)}, ${attr(focused)} focused">
                 <span class="recap-bar-track">
-                  <span class="${classes}" style="--i: ${index}; ${on ? `height: ${barHeight(bucket.focus_seconds, max, 12)}%` : ""}">
+                  <span class="${classes}" style="--i: ${index}; ${on ? `height: ${smartBarHeight(bucket.focus_seconds, max, 3600, 14)}%` : ""}">
                     <span class="week-tip">${escapeHtml(focused)}</span>
                   </span>
                 </span>
@@ -2801,10 +2798,10 @@ function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean
       ${'<span class="trend-spark-track"><span class="trend-spark-bar is-empty"></span></span>'.repeat(pad)}
       ${shown
         .map((week, index) => {
-          const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", week.week_start === running ? "is-running" : ""].filter(Boolean).join(" ");
+          const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", week.week_start === running ? "is-running" : "", week.focus_seconds === 0 ? "is-empty" : ""].filter(Boolean).join(" ");
           const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
           const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)} · ${sessions}${week.week_start === running ? " · so far" : ""}`;
-          return `<span class="trend-spark-track" title="${attr(tip)}"><span class="${classes}" style="--i: ${index}; height: ${Math.max(6, Math.round((week.focus_seconds / maxWeek) * 100))}%"></span></span>`;
+          return `<span class="trend-spark-track" title="${attr(tip)}"><span class="${classes}" style="--i: ${index}; height: ${smartBarHeight(week.focus_seconds, maxWeek, 2 * 3600, 8)}%"></span></span>`;
         })
         .join("")}
     </div>
@@ -2864,39 +2861,36 @@ function renderSearchResults(): string {
 /** `search_sessions` stops here; past it the list says so. */
 const SEARCH_LIMIT = 100;
 
-/** Group order for the week's columns: the big one first, then what to do something about. */
-const WEEK_APP_GROUPS = ["Work", "Distractions", "Away"];
-
 function renderWeekAppsPane(recap: WeekRecap | null): string {
-  const apps = recap?.apps ?? [];
-  if (apps.length === 0) {
-    const text =
-      recap && recap.session_count > 0
-        ? "Sessions ran, but no app or site could be named. Time at the desktop or in an unknown window lands here as nothing."
-        : "No sessions this week, so there are no apps and sites to show yet.";
-    return `<section class="panel history-list-panel"><p class="empty">${text}</p></section>`;
+  if (!recap || recap.session_count === 0) {
+    return `<section class="panel history-list-panel"><p class="empty">No sessions this week, so there are no apps and sites to show yet.</p></section>`;
   }
-  const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
-  const nameable = apps.some((item) => item.kind === "app" || item.kind === "website");
+  const work = recap.apps.filter((app) => app.group === "Work");
+  const distractions = recap.apps.filter((app) => app.group === "Distractions");
+  const away = recap.apps.filter((app) => app.group === "Away");
+  if (work.length + distractions.length === 0) {
+    return `<section class="panel history-list-panel"><p class="empty">Sessions ran, but no app or site could be named. Time at the desktop or in an unknown window lands here as nothing.</p></section>`;
+  }
+  const maxApp = Math.max(...[...work, ...distractions].map((app) => app.seconds), 1);
+  const nameable = recap.apps.some((item) => item.kind === "app" || item.kind === "website");
+  const column = (title: string, items: RecapApp[], emptyText: string) => {
+    const total = items.reduce((sum, app) => sum + app.seconds, 0);
+    return `
+      <div class="week-app-col">
+        <p class="week-app-group">${escapeHtml(title)}${items.length ? ` · ${escapeHtml(formatHours(total))}` : ""}</p>
+        ${items.length ? `<div class="week-app-rows">${renderAppRows(items, maxApp)}</div>` : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}
+      </div>
+    `;
+  };
+  const awayLine = away.map((row) => `${row.label} ${formatHours(row.seconds)}`).join(" · ");
   return `
     <section class="panel week-apps">
       <div class="week-app-cols">
-        ${WEEK_APP_GROUPS.map((group) => {
-          const items = apps.filter((app) => app.group === group);
-          if (items.length === 0) {
-            return "";
-          }
-          const total = items.reduce((sum, app) => sum + app.seconds, 0);
-          return `
-            <div class="week-app-col">
-              <p class="week-app-group">${escapeHtml(group)} · ${escapeHtml(formatHours(total))}</p>
-              <div class="week-app-rows">${renderAppRows(items, maxApp)}</div>
-            </div>
-          `;
-        }).join("")}
+        ${column("Work", work, "Every minute was on something from the distractions list.")}
+        ${column("Distractions", distractions, "Nothing from the distractions list came up this week.")}
       </div>
       <div class="week-app-foot">
-        <span>Click an app or site to put it on your distractions list, or take it off. Past sessions stay as recorded.</span>
+        <span>${awayLine ? escapeHtml(awayLine) : "Never away from the keyboard during a session."}</span>
         ${nameable ? `<button type="button" data-action="toggle-recap-names">${editingRecapNames ? "Done naming" : "Edit names"}</button>` : ""}
       </div>
     </section>
@@ -2930,26 +2924,6 @@ function completedWeeks(): [TrendWeek | undefined, TrendWeek | undefined] {
   return [done[done.length - 2], done[done.length - 1]];
 }
 
-/** Flags or unflags one app for the sessions to come. The report it sits in does not change. */
-async function toggleFlag(app: RecapApp): Promise<void> {
-  const target: RuleTarget = app.kind === "website" ? "website" : "app";
-  const rule: AppRule = { target, value: app.key };
-  const previous = cloneRules(permanentRules);
-  const wasFlagged = app.flagged;
-  permanentRules = wasFlagged
-    ? permanentRules.filter((candidate) => !sameRule(candidate, rule))
-    : [rule, ...permanentRules.filter((candidate) => !sameRule(candidate, rule))];
-  for (const row of [...(sessionReport?.apps ?? []), ...(weekRecap?.apps ?? [])]) {
-    if (row.kind === app.kind && row.key === app.key) {
-      row.flagged = !wasFlagged;
-    }
-  }
-  await persistPermanentRuleChanges(previous);
-  if (permanentRules !== previous) {
-    showFeedback(wasFlagged ? `${app.label} is no longer a distraction` : `${app.label} is a distraction from the next session`);
-  }
-}
-
 function renderAppGroups(apps: RecapApp[], groups: string[]): string {
   const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
   return `<div class="recap-app-list">
@@ -2970,35 +2944,21 @@ function renderAppGroups(apps: RecapApp[], groups: string[]): string {
   </div>`;
 }
 
+/** One line per app or site: name, a bar against the busiest row, the time. Read-only; the
+ * distractions list is edited in Settings or during a session, never from a past week. */
 function renderAppRows(items: RecapApp[], maxApp: number): string {
   return items
-                .map((app) => {
-                  const shownMinutes = Math.round(app.seconds / 60);
-                  const width = shownMinutes > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
-                  // What the session recorded stands; say when the list says otherwise now.
-                  const changed =
-                    app.group === "Work" && app.flagged
-                      ? `<span class="flag-note">now a distraction</span>`
-                      : app.group === "Distractions" && app.ratable && !app.flagged
-                        ? `<span class="flag-note">no longer</span>`
-                        : "";
-                  const cells = `
-                    <span class="recap-app-name-wrap">${renderRecapAppName(app)}${changed}</span>
-                    <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
-                    <strong>${escapeHtml(formatHours(app.seconds))}</strong>
-                  `;
-                  const tone = app.group === "Distractions" ? "is-distraction" : "";
-                  if (!app.ratable || editingRecapNames) {
-                    return `<div class="recap-app-row ${tone}">${cells}</div>`;
-                  }
-                  const hint = app.flagged ? "On the distractions list · click to remove" : "Click to add to the distractions list";
-                  return `
-                    <button type="button" class="recap-app-row is-ratable ${tone} ${app.flagged ? "is-flagged" : ""}" data-action="toggle-flag" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}" title="${attr(hint)}">
-                      ${cells}
-                    </button>
-                  `;
-                })
-                .join("");
+    .map((app) => {
+      const width = Math.round(app.seconds / 60) > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
+      return `
+        <div class="recap-app-row ${app.group === "Distractions" ? "is-distraction" : ""}">
+          ${renderRecapAppName(app)}
+          <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
+          <strong>${escapeHtml(formatHours(app.seconds))}</strong>
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function renderRecapAppName(app: RecapApp): string {
@@ -3964,15 +3924,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     if (next <= current) {
       historyWeekStart = next;
       await refreshHistoryWeek();
-    }
-    return;
-  }
-
-  if (action === "toggle-flag") {
-    const rows = historyView === "report" ? sessionReport?.apps ?? [] : weekRecap?.apps ?? [];
-    const app = rows.find((row) => row.kind === source?.dataset.kind && row.key === source?.dataset.key);
-    if (app) {
-      await toggleFlag(app);
     }
     return;
   }
@@ -7104,17 +7055,17 @@ function dayTotalLine(items: SessionSummary[]): string {
   return `${formatHours(focused)} focused · ${sessions}`;
 }
 
-/** Daily focus bars share one scale: the busiest day, but never less than an hour, so a
- * 20-second day stays a sliver instead of filling the chart. */
-const BAR_MIN_SCALE_SECONDS = 3600;
-
-function barHeight(value: number, max: number, empty = 16): number {
+/** A bar's height as a share of its track. Values are read against a rounded ceiling a little
+ * above the largest (never under `minScale`, so a ten-minute day stays a sliver), then eased
+ * with a mild power so small bars stay visible next to a big one without changing their order.
+ * A zero is the caller's business; anything else is at least `floor`. */
+function smartBarHeight(value: number, max: number, minScale: number, floor: number): number {
   if (value <= 0) {
-    return empty;
+    return 0;
   }
-  const lowest = empty + 4;
-  const scale = Math.max(max, BAR_MIN_SCALE_SECONDS);
-  return Math.round(lowest + Math.min(1, value / scale) * (100 - lowest));
+  const ceiling = Math.max(niceAxis(Math.max(max, minScale) / 3600).max * 3600, minScale);
+  const share = Math.min(1, value / ceiling);
+  return Math.round(floor + (100 - floor) * Math.pow(share, 0.8));
 }
 
 function formatHours(totalSeconds: number): string {
