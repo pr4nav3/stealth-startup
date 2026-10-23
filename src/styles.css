@@ -3361,6 +3361,7 @@ audio {
 .week-hero-note {
   margin: -4px 0 0;
   max-width: 34ch;
+  white-space: pre-line;
   font-size: var(--sv-type-3);
   line-height: 1.3;
 }
@@ -3429,7 +3430,8 @@ audio {
 /* Bars rise from the baseline once, left to right; `backwards` keeps them flat through the delay
    and leaves hover transforms alone once done. */
 .week-hero-bars.is-animated .recap-bar.is-on,
-.trend-spark.is-animated .trend-spark-bar {
+.trend-door-chart.is-animated .door-bar {
+  transform-box: fill-box;
   transform-origin: bottom;
   animation: bar-rise 600ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   animation-delay: calc(var(--i, 0) * 55ms);
@@ -3446,7 +3448,7 @@ audio {
 
 @media (prefers-reduced-motion: reduce) {
   .week-hero-bars.is-animated .recap-bar.is-on,
-  .trend-spark.is-animated .trend-spark-bar {
+  .trend-door-chart.is-animated .door-bar {
     animation: none;
   }
 }
@@ -3475,13 +3477,91 @@ button.panel.trend-door {
   text-transform: none;
 }
 
+/* The whole door is the button: it lifts on hover and carries a control-shaped "View trends". */
+button.panel.trend-door:hover,
+button.panel.trend-door:focus-visible {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 var(--sv-shadow-color);
+}
+
 button.panel.trend-door:active {
   transform: translate(2px, 2px);
   box-shadow: var(--shadow-control);
 }
 
+.trend-door-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .trend-door .eyebrow {
   margin: 0;
+}
+
+.trend-door-chevron {
+  font-size: 1.3rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--sv-muted);
+}
+
+.trend-door-chart-title {
+  margin-top: 10px;
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.trend-door-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 2px;
+  overflow: visible;
+}
+
+.door-grid {
+  stroke: color-mix(in srgb, var(--sv-ink) 16%, transparent);
+  stroke-width: 1;
+}
+
+.door-grid.is-base {
+  stroke: var(--sv-ink);
+  stroke-width: 1.5;
+}
+
+.door-axis {
+  fill: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.door-bar {
+  fill: color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
+}
+
+.door-bar.is-empty {
+  fill: color-mix(in srgb, var(--sv-ink) 14%, var(--sv-panel));
+}
+
+.door-bar.is-viewed {
+  fill: var(--sv-ink);
+}
+
+.door-bar.is-running {
+  fill: none;
+  stroke: var(--sv-muted);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}
+
+.door-bar.is-running.is-viewed {
+  stroke: var(--sv-ink);
 }
 
 .trend-door-value {
@@ -3496,22 +3576,6 @@ button.panel.trend-door:active {
   font-size: var(--sv-type-3);
 }
 
-.trend-spark {
-  display: flex;
-  flex: 1 1 auto;
-  align-items: stretch;
-  gap: 5px;
-  min-height: 96px;
-  margin-top: 10px;
-}
-
-.trend-spark-track {
-  display: flex;
-  flex: 1;
-  align-items: flex-end;
-  min-width: 0;
-}
-
 .span-empty {
   fill: var(--sv-muted);
   font-family: var(--font-mono);
@@ -3520,53 +3584,38 @@ button.panel.trend-door:active {
   text-transform: uppercase;
 }
 
-.trend-spark-bar {
-  display: block;
-  width: 100%;
-  min-height: 4px;
-  border: 2px solid color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--sv-ink) 32%, var(--sv-panel));
-}
-
-.trend-spark-bar.is-empty {
-  height: 4px;
-  border-color: transparent;
-  background: color-mix(in srgb, var(--sv-ink) 14%, var(--sv-panel));
-}
-
-.trend-spark-bar.is-viewed {
-  border-color: var(--sv-ink);
-  background: var(--sv-ink);
-}
-
-.trend-spark-bar.is-running {
-  border-style: dashed;
-  border-color: var(--sv-muted);
-  background: transparent;
-}
-
-.trend-spark-bar.is-running.is-viewed {
-  border-color: var(--sv-ink);
-}
-
-.trend-spark-axis {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 6px;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
 .trend-door-go {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
   margin-top: auto;
-  padding-top: 10px;
+  padding: 0 12px;
+  min-height: 32px;
+  border: var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: var(--shadow-control);
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.trend-door-go::after {
+  content: "›";
+  margin-left: 8px;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.trend-door-chart-title + .trend-door-chart + .trend-door-go,
+.trend-door-caption + .trend-door-go {
+  margin-top: 14px;
+}
+
+button.panel.trend-door .trend-door-go {
+  margin-top: auto;
+  padding-top: 0;
 }
 
 /* Sessions or Apps & sites: one list under the week at a time. */

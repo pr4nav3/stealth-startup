@@ -2689,7 +2689,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
     ? ""
     : empty
       ? current
-        ? "No sessions yet this week. Finish one and today's bar fills in."
+        ? "No sessions yet this week. Finish one\nand today's bar fills in."
         : "No sessions that week."
       : current && recap.session_count === 1
         ? "1 session so far"
@@ -2760,43 +2760,85 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: b
     caption = current ? "No sessions this week or last." : "No sessions this week or the one before.";
   } else if (recap && previous && (previous.session_count > 0 || recap.session_count > 0)) {
     const before = current && todayIndex < 6 ? focusThrough(previousStart, todayIndex) : previous.focus_seconds;
-    const against = current && todayIndex < 6 ? `last week through ${WEEKDAY_LABELS[todayIndex]}` : current ? "last week" : "the week before";
+    const against = !current
+      ? "the week before"
+      : todayIndex === 6
+        ? "last week"
+        : todayIndex === 0
+          ? "last Monday"
+          : `last week, Mon–${WEEKDAY_LABELS[todayIndex]}`;
     const change = recap.focus_seconds - before;
     if (Math.abs(change) < 60) {
       value = "Steady";
-      caption = `same as ${against}`;
+      caption = `Same focused time as ${against}.`;
     } else {
       value = `${change > 0 ? "↑" : "↓"} ${formatHours(Math.abs(change))}`;
-      caption = `vs ${against}`;
+      caption = `${change > 0 ? "More" : "Less"} focused time than ${against}.`;
     }
   }
-  const maxWeek = Math.max(...weeks.map((week) => week.focus_seconds), 1);
-  // Fewer than six weeks sit at the right, where they will stay as the chart fills in.
-  const pad = Math.max(0, 6 - weeks.length);
-  const spark = weeks.length
-    ? `<div class="trend-spark ${animate ? "is-animated" : ""}" role="img" aria-label="Focused hours over the last ${weeks.length} weeks">
-        ${'<span class="trend-spark-track is-empty"><span class="trend-spark-bar is-empty"></span></span>'.repeat(pad)}
-        ${weeks
-          .map((week, index) => {
-            const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", index === weeks.length - 1 ? "is-running" : ""].filter(Boolean).join(" ");
-            const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
-            const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)} · ${sessions}`;
-            return `<span class="trend-spark-track" title="${attr(tip)}"><span class="${classes}" style="--i: ${index}; height: ${Math.max(6, Math.round((week.focus_seconds / maxWeek) * 100))}%"></span></span>`;
-          })
-          .join("")}
-      </div>
-      <div class="trend-spark-axis" aria-hidden="true"><span>${pad ? "" : escapeHtml(formatWeekStart(weeks[0].week_start))}</span><span>${escapeHtml(formatWeekStart(weeks[weeks.length - 1].week_start))}</span></div>`
-    : "";
-  const locked = trends.full_weeks < TRENDS_UNLOCK_WEEKS;
-  const go = locked ? `${trends.full_weeks} of ${TRENDS_UNLOCK_WEEKS} full weeks ›` : `${weeks.length} weeks ›`;
+  const shown = weeks.slice(-DOOR_WEEKS);
   return `
     <button type="button" class="panel trend-door" data-action="open-trends">
-      <p class="eyebrow">Trends</p>
+      <span class="trend-door-head"><span class="eyebrow">Trends</span><span class="trend-door-chevron" aria-hidden="true">›</span></span>
       <strong class="trend-door-value">${escapeHtml(value)}</strong>
       <span class="trend-door-caption">${escapeHtml(caption)}</span>
-      ${spark}
-      <span class="trend-door-go">${escapeHtml(go)}</span>
+      ${shown.length ? `<span class="trend-door-chart-title">Focused hours, last ${shown.length === 1 ? "week" : `${shown.length} weeks`}</span>${renderDoorChart(shown, weekStart, animate)}` : ""}
+      <span class="trend-door-go">View trends</span>
     </button>
+  `;
+}
+
+/** Weeks on the door's chart; Trends itself keeps eight. */
+const DOOR_WEEKS = 4;
+
+/** A small bar chart of focused hours per week with a real axis, newest week at the right. */
+function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean): string {
+  const width = 220;
+  const height = 118;
+  const left = 34;
+  const right = 6;
+  const top = 10;
+  const bottom = 24;
+  const plotW = width - left - right;
+  const plotH = height - top - bottom;
+  const { max: axisMax, step } = niceAxis(Math.max(...shown.map((week) => week.focus_seconds / 3600), 0));
+  const yAt = (hours: number) => top + plotH - (hours / axisMax) * plotH;
+  const pad = DOOR_WEEKS - shown.length;
+  const colW = plotW / DOOR_WEEKS;
+  const barW = Math.min(30, colW * 0.6);
+  const ticks = [0, step, step * 2, step * 3];
+  const grid = ticks
+    .map((tick) => {
+      const y = yAt(tick).toFixed(1);
+      const label = tick === 0 ? "0" : formatStretchChip(Math.round(tick * 3600));
+      return `
+        <line class="door-grid ${tick === 0 ? "is-base" : ""}" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}" />
+        <text class="door-axis" x="${left - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${escapeHtml(label)}</text>
+      `;
+    })
+    .join("");
+  const bars = shown
+    .map((week, index) => {
+      const x = left + (pad + index + 0.5) * colW;
+      const hours = week.focus_seconds / 3600;
+      const running = week.week_start === thisMondayKey();
+      const classes = ["door-bar", week.week_start === weekStart ? "is-viewed" : "", running ? "is-running" : "", hours === 0 ? "is-empty" : ""].filter(Boolean).join(" ");
+      const barH = hours === 0 ? 3 : Math.max(3, yAt(0) - yAt(hours));
+      const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
+      return `
+        <g>
+          <title>${escapeHtml(`${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)} · ${sessions}${running ? " · so far" : ""}`)}</title>
+          <rect class="${classes}" style="--i: ${index}" x="${(x - barW / 2).toFixed(1)}" y="${(yAt(0) - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="3" />
+          <text class="door-axis" x="${x.toFixed(1)}" y="${height - 7}" text-anchor="middle">${escapeHtml(formatWeekStart(week.week_start))}</text>
+        </g>
+      `;
+    })
+    .join("");
+  return `
+    <svg class="trend-door-chart ${animate ? "is-animated" : ""}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Focused hours per week, last ${shown.length} weeks">
+      ${grid}
+      ${bars}
+    </svg>
   `;
 }
 
