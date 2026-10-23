@@ -1606,22 +1606,8 @@ dt {
   min-width: 116px;
 }
 
-.rule-drag-hint {
-  margin: 4px 0 0;
-  color: var(--sv-muted);
-  font-size: var(--sv-type-4);
-}
-
-.rule-groups {
-  display: grid;
-  gap: 10px;
-}
-
 .rule-group {
   display: grid;
-  grid-template-columns: 145px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
   min-width: 0;
   min-height: 68px;
   overflow: hidden;
@@ -1631,19 +1617,26 @@ dt {
   background: var(--sv-soft-white);
 }
 
-/* Drag a chip onto another group to reclassify it. */
-.rule-chip[draggable] {
-  cursor: grab;
+/* A distraction allowed for the session about to start. */
+.rule-chip.is-allowed {
+  background: var(--sv-soft-white);
+  color: var(--ink);
+  text-decoration: line-through;
 }
 
-.rule-chip.is-dragging {
-  opacity: 0.45;
+.preflight-rule-manager .explain {
+  margin: 0 0 10px;
 }
 
-.rule-group.is-drop-target {
-  border: 2px dashed var(--sv-border);
-  padding: 9px 11px;
-  background: var(--sv-panel);
+.session-rule-set span.is-allowed {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.session-allowed {
+  margin: 8px 0 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
 }
 
 .rule-group-label {
@@ -1673,16 +1666,6 @@ dt {
 
 .rule-chip-distracting {
   background: var(--sv-coral);
-  color: #141410;
-}
-
-.rule-chip-focused {
-  background: var(--sv-green);
-  color: #141410;
-}
-
-.rule-chip-neutral {
-  background: var(--sv-yellow);
   color: #141410;
 }
 
@@ -1721,16 +1704,8 @@ dt {
   margin-bottom: 0;
 }
 
-.rule-focused {
-  background: var(--acid);
-}
-
 .rule-distracting {
   background: var(--danger);
-}
-
-.rule-neutral {
-  background: var(--warning);
 }
 
 .rule-editor-actions,
@@ -3869,8 +3844,7 @@ button.recap-app-row:focus-visible {
   background: var(--white-soft);
 }
 
-.recap-app-row.is-unrated .recap-app-name::after,
-.unrated-dot {
+.recap-app-row.is-flagged .recap-app-name::after {
   content: "";
   display: inline-block;
   width: 7px;
@@ -3882,10 +3856,6 @@ button.recap-app-row:focus-visible {
   vertical-align: middle;
 }
 
-.unrated-dot {
-  margin: 0 8px 0 0;
-}
-
 .recap-app-name-wrap {
   display: flex;
   align-items: baseline;
@@ -3893,56 +3863,13 @@ button.recap-app-row:focus-visible {
   min-width: 0;
 }
 
-.rating-changed {
+.flag-note {
   flex: none;
   color: var(--sv-muted);
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
 }
 
-.rate-panel {
-  width: min(440px, 100%);
-}
-
-.rate-meta {
-  margin: 0;
-  color: var(--sv-muted);
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-4);
-}
-
-.rate-choices {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.rate-choice {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  color: #141410;
-}
-
-.rate-focused { background: #a8eb37; }
-.rate-neutral { background: #fff7df; }
-.rate-distracting { background: #ff684f; }
-
-/* The current choice is pressed in, like a held button: no extra ring around it. */
-.rate-choice.is-current {
-  transform: translate(2px, 2px);
-  box-shadow: none;
-}
-
-.rate-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 12px;
-}
 
 .rate-foot p {
   margin: 0;
@@ -4489,7 +4416,7 @@ button.report-stat-action strong {
   pointer-events: none;
 }
 
-.state-neutral {
+.state-waiting {
   background: var(--white-soft);
 }
 
@@ -4502,8 +4429,8 @@ button.report-stat-action strong {
   color: #141410;
 }
 
-.active-session-grid .state-neutral,
-.overlay-shell .state-neutral {
+.active-session-grid .state-waiting,
+.overlay-shell .state-waiting {
   background: #fff7df;
 }
 
@@ -4695,8 +4622,6 @@ button.report-stat-action strong {
 .tabs button.active,
 .recap-switch button.active,
 .rule-chip-distracting,
-.rule-chip-focused,
-.rule-chip-neutral,
 .chips span,
 .overlay-pause,
 .overlay-marks .mark-distraction,
@@ -4709,10 +4634,7 @@ button.report-stat-action strong {
   color: var(--ink);
 }
 
-.mini-timeline,
-.timeline-bar .state-neutral,
-.mini-timeline .state-neutral,
-.legend-key.state-neutral {
+.mini-timeline {
   background: #fff7df;
 }
 
@@ -4725,7 +4647,7 @@ button.report-stat-action strong {
 .timeline-bar .state-suspicious,
 .mini-timeline .state-suspicious,
 .legend-key.state-suspicious {
-  background: #ffcf31;
+  background: #ff684f;
 }
 
 .timeline-bar .state-distracted,
@@ -4741,11 +4663,6 @@ button.report-stat-action strong {
 }
 
 /* Unrated = no rule yet; not focus until rated. Warm grey, apart from Neutral cream and Away blue. */
-.timeline-bar .state-unrated,
-.mini-timeline .state-unrated,
-.legend-key.state-unrated {
-  background: #bdb5a4;
-}
 
 /* Away = idle (no input) or device asleep / unknown. Cool blue so it never reads as Neutral. */
 .timeline-bar .state-idle,

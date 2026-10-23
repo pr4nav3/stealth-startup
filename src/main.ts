@@ -3,14 +3,12 @@ import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type PermissionState = "granted" | "missing" | "not_required";
-type RuleClassification = "focused" | "neutral" | "distracting";
 type RuleTarget = "app" | "website";
 /** A browser's own pages (New Tab, settings, files) are "app": the browser itself. */
 type ActivityKind = "app" | "website" | "other_websites";
-type RuleScope = "settings" | "preflight";
 type Strictness = "gentle" | "normal" | "strict";
 type SessionStatus = "idle" | "active" | "paused" | "snoozed" | "complete";
-type FocusState = "focused" | "neutral" | "suspicious" | "distracted" | "idle";
+type FocusState = "focused" | "suspicious" | "distracted" | "idle";
 type Tab = "session" | "settings" | "history";
 type AppView = "main" | "overlay";
 type SettingsView = "home" | "voice" | "webcam";
@@ -59,10 +57,10 @@ interface Activity {
   label: string;
 }
 
+/** A distraction: a website key ("youtube.com") or an app. */
 interface AppRule {
   target: RuleTarget;
   value: string;
-  classification: RuleClassification;
 }
 
 interface FocusSnapshot {
@@ -71,7 +69,8 @@ interface FocusSnapshot {
   /** A website or a non-browser app: something a rule can name. */
   markable: boolean;
   state: FocusState;
-  classification: RuleClassification;
+  /** A distraction rule matched, and no exception for this session lifted it. */
+  distracting: boolean;
   matched_rule: AppRule | null;
   seconds_on_current_window: number;
   should_nudge: boolean;
@@ -90,8 +89,6 @@ interface SessionSettings {
 
 interface SessionMetrics {
   focused_seconds: number;
-  neutral_seconds: number;
-  suspicious_seconds: number;
   distracted_seconds: number;
   idle_seconds: number;
   /** Part of distracted_seconds. */
@@ -127,7 +124,8 @@ interface CurrentSession {
   metrics: SessionMetrics;
   evidence: EvidenceEvent[];
   focus: FocusSnapshot | null;
-  rules: AppRule[];
+  /** Distractions allowed for this session. */
+  exceptions: AppRule[];
   camera: CameraStatus;
 }
 
@@ -136,10 +134,8 @@ interface SessionSummary {
   goal: string;
   started_at: string;
   duration_seconds: number;
-  /** Relevant time only. */
+  /** Time not on a distraction. */
   focus_seconds: number;
-  neutral_seconds: number;
-  unrated_seconds: number;
   distracted_seconds: number;
   idle_seconds: number;
   nudges: number;
@@ -173,7 +169,6 @@ interface SessionReport {
   duration_seconds: number;
   focus_percent: number;
   focused_seconds: number;
-  unrated_seconds: number;
   distracted_seconds: number;
   idle_seconds: number;
   away_seconds: number;
@@ -240,7 +235,8 @@ interface RecapApp {
   label: string;
   seconds: number;
   ratable: boolean;
-  rating: RuleClassification | null;
+  /** A distraction rule names it today: what the next session will do, not what this one did. */
+  flagged: boolean;
 }
 
 interface WeekRecap {
@@ -274,21 +270,15 @@ interface SessionSnapshot {
   settings: SessionSettings;
   current: CurrentSession | null;
   history: SessionSummary[];
-  /** The latest mark that rescored past sessions; `seq` grows with each one. */
-  rescore: { seq: number; sessions: number } | null;
 }
 
 interface RulesSaved {
   rules: AppRule[];
-  /** Past sessions whose scores the save changed. */
-  rescored_sessions: number[];
 }
 
 interface RuleEditor {
-  scope: RuleScope;
   index: number | null;
   target: RuleTarget;
-  classification: RuleClassification;
   value: string;
   name: string;
   nameTouched: boolean;
@@ -475,16 +465,6 @@ window.addEventListener("keydown", (event) => {
     closeTopLayer();
     return;
   }
-  if (rating && !event.ctrlKey && !event.metaKey && !event.altKey) {
-    const choice = ({ "1": "focused", "2": "neutral", "3": "distracting" } as const)[event.key as "1" | "2" | "3"];
-    if (choice) {
-      event.preventDefault();
-      void chooseRating(choice);
-    } else if (event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      advanceRating();
-    }
-  }
 });
 
 const starterRules: AppRule[] = ["youtube.com", "netflix.com", "tiktok.com", "instagram.com", "reddit.com"].map(
@@ -580,10 +560,8 @@ let settings: SessionSettings = {
 let history: SessionSummary[] = [];
 const EMPTY_RECAP: FocusRecap = { start: "", end: "", focus_seconds: 0, session_count: 0 };
 /** Order of the groups `apps_from_spans` produces; they sum to the scores. */
-const APP_GROUPS = ["Focus", "Neutral", "Distracting", "Unclassified", "Away"];
+const APP_GROUPS = ["Distractions", "Work", "Away"];
 /** How the groups and scores are decided, under every Apps & sites list. */
-const SCORING_CAPTION =
-  "Only Relevant time counts as focus. When you classify an app, its unclassified time in past sessions updates to match; anything already counted as Relevant or Distracting during a session stays as it was.";
 let trends: TrendsData = {
   daily_focus: [],
   weeks: [],
@@ -602,7 +580,8 @@ let historyHydrated = false;
 const knownHistoryIds = new Set<number>();
 let permanentRules = cloneRules(starterRules);
 let preflightOpen = false;
-let preflightRules = cloneRules(starterRules);
+/** Distractions the user allowed for the session about to start. */
+let preflightExceptions: AppRule[] = [];
 let preflightBlocksOpen = false;
 let preflightAdvancedOpen = false;
 let sessionRulesOpen = false;
@@ -621,20 +600,6 @@ let siteNames: Record<string, string> = {};
 let appNames: Record<string, string> = {};
 let editingRecapNames = false;
 let historyRename: { kind: "app" | "website"; key: string; value: string } | null = null;
-/** Rating apps from history: a short queue walked one app at a time. */
-let rating: {
-  queue: RecapApp[];
-  index: number;
-  rated: number;
-  where: string;
-  rescored: Set<number>;
-  last: { label: string; choice: RuleClassification } | null;
-} | null = null;
-/** Rescore notices this window has seen; `null` until the first snapshot. */
-let seenRescoreSeq: number | null = null;
-/** A rescore notice not yet merged into a mark's own toast. */
-let freshRescoreNote = "";
-const RESCORE_TOAST_MS = 3200;
 let customPhrases: PhraseDefinition[] = [];
 let customPhraseSets: string[] = [];
 let phraseOverrides: Record<string, PhraseDefinition> = {};
@@ -819,12 +784,9 @@ async function refreshSnapshotNow(): Promise<void> {
     snapshot = await invoke<SessionSnapshot>("get_session_snapshot");
     settings = snapshot.settings;
     history = snapshot.history;
-    noteRescore(snapshot);
-    if (!snapshot.current) {
+    if (!snapshot.current && sessionRulesOpen) {
       sessionRulesOpen = false;
-      if (ruleEditor?.scope === "preflight") {
-        ruleEditor = null;
-      }
+      ruleEditor = null;
     }
     const newest = noteNewHistory(history);
     if (appView === "main") {
@@ -869,10 +831,6 @@ function closeTopLayer(): void {
     return;
   }
   if (voiceBusy) {
-    return;
-  }
-  if (rating) {
-    finishRating();
     return;
   }
   if (historyRename) {
@@ -951,7 +909,6 @@ function closeTopLayer(): void {
 
 function editorIsOpen(): boolean {
   return (
-    draggingRule !== null ||
     preflightOpen ||
     sessionRulesOpen ||
     ruleEditor !== null ||
@@ -963,7 +920,6 @@ function editorIsOpen(): boolean {
     voiceInfoId !== null ||
     clipGenerate !== null ||
     modelDeleteOpen ||
-    rating !== null ||
     voiceBusy !== null
   );
 }
@@ -986,9 +942,7 @@ function sessionViewKey(current: CurrentSession | null): string {
   }
   const focus = current.focus;
   const sample = focus?.sample;
-  const rules = current.rules
-    .map((rule) => `${rule.target}\t${rule.classification}\t${rule.value}`)
-    .join("\n");
+  const rules = current.exceptions.map((rule) => `${rule.target}\t${rule.value}`).join("\n");
   return [
     current.id,
     current.status,
@@ -997,7 +951,7 @@ function sessionViewKey(current: CurrentSession | null): string {
     current.strictness,
     current.snoozed_until_seconds ?? "",
     focus?.state ?? "",
-    focus?.classification ?? "",
+    focus?.distracting ? 1 : 0,
     focus?.should_nudge ? 1 : 0,
     focus?.matched_rule?.value ?? "",
     sample?.app_name ?? "",
@@ -1166,7 +1120,6 @@ function render(): void {
       ${activeTab === "history" ? renderHistory() : ""}
       ${renderVoiceDialogs()}
       ${renderHistoryConfirm()}
-      ${renderRatingModal()}
     </main>
   `;
 
@@ -1248,10 +1201,9 @@ function renderSession(current: CurrentSession | null): string {
         </section>
 
         <aside class="panel session-rules-card">
-          <p class="eyebrow">This session</p>
-          <p class="eyebrow">What counts</p>
-          ${renderSessionRuleSummary(current.rules)}
-          <button type="button" data-action="open-session-rules">Edit session rules</button>
+          <p class="eyebrow">Distractions</p>
+          ${renderSessionDistractions(current.exceptions)}
+          <button type="button" data-action="open-session-rules">Edit rules</button>
         </aside>
       </div>
 
@@ -1261,37 +1213,32 @@ function renderSession(current: CurrentSession | null): string {
   `;
 }
 
-function renderSessionRuleSummary(rules: AppRule[]): string {
-  const relevant = rules.filter((rule) => rule.classification === "focused");
-  const distracting = rules.filter((rule) => rule.classification === "distracting");
-  return `
-    <div class="session-rule-summary">
-      ${renderSessionRuleSet("Relevant", "focused", relevant)}
-      ${renderSessionRuleSet("Distracting", "distracting", distracting)}
-    </div>
-  `;
-}
-
-function renderSessionRuleSet(
-  title: string,
-  classification: RuleClassification,
-  rules: AppRule[],
-): string {
-  const shown = rules.slice().reverse().slice(0, 4);
-  const chips = shown.map((rule) => `<span>${escapeHtml(ruleName(rule))}</span>`);
+/** The distractions, with the ones allowed for this session struck through. */
+function renderSessionDistractions(exceptions: AppRule[]): string {
+  const rules = permanentRules.slice().reverse();
+  const shown = rules.slice(0, 6);
+  const chips = shown.map((rule) => {
+    const allowed = exceptions.some((exception) => sameRule(exception, rule));
+    return `<span class="${allowed ? "is-allowed" : ""}" title="${attr(allowed ? "Allowed for this session" : "")}">${escapeHtml(ruleName(rule))}</span>`;
+  });
   if (rules.length > shown.length && chips.length) {
     const last = chips.pop();
     chips.push(`<span class="session-rule-tail">${last}<span class="session-rule-more">...</span></span>`);
   }
-  const body = chips.length ? chips.join("") : `<span class="no-session-rules">None yet</span>`;
+  const body = chips.length ? chips.join("") : `<span class="no-session-rules">None yet. Everything counts as work.</span>`;
+  const allowed = exceptions.map((exception) => ruleName(exception));
   return `
     <section class="session-rule-set">
-      <h3><i class="rule-dot rule-${classification}" aria-hidden="true"></i>${escapeHtml(title)}</h3>
       <div>
         ${body}
       </div>
+      ${allowed.length ? `<p class="session-allowed">Not today: ${escapeHtml(allowed.join(", "))}</p>` : ""}
     </section>
   `;
+}
+
+function sameRule(a: AppRule, b: AppRule): boolean {
+  return a.target === b.target && a.value.toLowerCase() === b.value.toLowerCase();
 }
 
 function renderActiveSessionControls(current: CurrentSession): string {
@@ -1311,12 +1258,11 @@ function renderSessionRulesModal(): string {
         <div class="modal-head">
           <div>
             <p class="eyebrow">CURRENT SESSION</p>
-            <h2 id="session-rules-title">Edit session rules</h2>
+            <h2 id="session-rules-title">Edit rules</h2>
           </div>
           <button class="small-button" type="button" data-action="close-session-rules">Done</button>
         </div>
-        ${/* The dialog's own heading already says "session rules"; no eyebrow under it. */ ""}
-        ${renderRuleManager(preflightRules, "preflight", "")}
+        ${renderRuleManager("")}
       </section>
     </div>
   `;
@@ -1356,10 +1302,9 @@ function renderOverlay(current: CurrentSession | null): string {
                     <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
                   </span>
                 </label>
-                <p>Help Supervisor understand this app.</p>
+                <p>Is this window pulling you off task?</p>
                 <div class="overlay-marks">
-                  <button type="button" data-action="mark-relevant">Relevant</button>
-                  <button class="mark-distraction" type="button" data-action="mark-distracting">Distracting</button>
+                  <button class="mark-distraction" type="button" data-action="mark-distracting">This is a distraction</button>
                 </div>
                 <button class="overlay-pin" type="button" data-action="${pinned ? "unpin-window" : "pin-window"}">${pinned ? "Unpin window" : "Pin window"}</button>
               </div>
@@ -1385,7 +1330,7 @@ function renderDistractionOverlay(current: CurrentSession): string {
     : `
         <p class="interrupt-kicker">You opened ${escapeHtml(distractionLatchLabel || distractionLabel(current))}</p>
         <h2>Distraction detected.</h2>
-        <p>${escapeHtml(distractionLatchLabel || distractionLabel(current))} is outside this session's rules.</p>
+        <p>${escapeHtml(distractionLatchLabel || distractionLabel(current))} is on your distractions list.</p>
       `;
   return `
     <main class="overlay-shell overlay-interrupt">
@@ -1405,7 +1350,8 @@ function renderDistractionOverlay(current: CurrentSession): string {
       </div>
       <div class="interrupt-actions">
         <button class="primary" type="button" data-action="dismiss-distraction">Return to task</button>
-        ${phone ? "" : `<button type="button" data-action="dismiss-mark-relevant">Mark as relevant</button>`}
+        ${phone ? "" : `<button type="button" data-action="allow-session">Not today</button>
+        <button type="button" data-action="allow-always">Never a distraction</button>`}
       </div>
     </main>
   `;
@@ -1461,7 +1407,7 @@ function updateDistractionLatch(current: CurrentSession | null): void {
     }
     return;
   }
-  if (focus.state === "focused" || focus.state === "neutral" || focus.state === "idle") {
+  if (focus.state === "focused" || focus.state === "idle") {
     distractionLatchKey = "";
     distractionLatchLabel = "";
     distractionDismissedFor = "";
@@ -1529,13 +1475,6 @@ let onboardingOpen = false;
 function onboardingSteps() {
   return [
     {
-      id: "rules",
-      title: "Mark what counts",
-      copy: "Add the apps and sites you work in as Relevant. Only Relevant time counts as focus.",
-      done: permanentRules.some((rule) => rule.classification === "focused"),
-      label: "Add rules",
-    },
-    {
       id: "voice",
       title: "Clone a voice",
       copy: "Record twenty seconds of anyone, and that's who nudges you back.",
@@ -1591,7 +1530,7 @@ function renderOnboardingModal(): string {
           </div>
           <button class="small-button" type="button" data-action="onboard-hide">Close</button>
         </div>
-        <p class="onboard-intro">Supervisor watches what's in front of you and nudges you back. Nothing leaves this computer.</p>
+        <p class="onboard-intro">Supervisor watches what's in front of you and nudges you back. Five common distractions are already on the list; everything else counts as work. Nothing leaves this computer.</p>
         <ol class="onboard-steps">
           ${onboardingSteps()
             .map(
@@ -1620,7 +1559,7 @@ function renderStartAction(): string {
 }
 
 function renderPreflightModal(): string {
-  const ruleCount = preflightRules.length;
+  const ruleCount = permanentRules.length;
   const progress = ((draft.duration_minutes - 15) / 75) * 100;
   return `
     <div class="modal-backdrop" role="presentation">
@@ -1655,11 +1594,11 @@ function renderPreflightModal(): string {
 
           <details class="preflight-disclosure" data-preflight-section="blocks" ${preflightBlocksOpen ? "open" : ""}>
             <summary>
-              <span>Block distractions</span>
-              <span>${ruleCount} ${ruleCount === 1 ? "rule" : "rules"}</span>
+              <span>Distractions</span>
+              <span>${ruleCount} on the list${preflightExceptions.length ? ` · ${preflightExceptions.length} allowed today` : ""}</span>
             </summary>
             <div class="disclosure-body">
-              ${renderRuleManager(preflightRules, "preflight", "Session rules")}
+              ${renderPreflightDistractions()}
             </div>
           </details>
 
@@ -1736,7 +1675,7 @@ function renderSettings(): string {
       </div>
 
       <section class="panel settings-rules-panel">
-        ${renderRuleManager(permanentRules, "settings", "Permanent rules")}
+        ${renderRuleManager("Distractions")}
       </section>
 
       <section class="panel settings-data-panel">
@@ -1821,70 +1760,66 @@ function renderWebcamMetrics(frame: WebcamFrame | null): string {
   `;
 }
 
-function renderRuleManager(rules: AppRule[], scope: RuleScope, title: string): string {
-  const activeEditor = ruleEditor?.scope === scope ? ruleEditor : null;
-  const helper =
-    scope === "settings"
-      ? "Used as the starting point for every session"
-      : "These rules are temporary. They apply to this session only.";
-  const applyPermanently =
-    scope === "preflight"
-      ? `<button class="apply-permanent-button" type="button" data-action="apply-rules-permanently">Apply permanently</button>`
-      : "";
+/** The one list. Chips open the editor; the same component serves Settings and the live dialog. */
+function renderRuleManager(title: string): string {
   return `
     <div class="rule-manager permanent-rule-manager">
       <div class="rule-toolbar">
         <div>
           ${title ? `<p class="eyebrow">${escapeHtml(title)}</p>` : ""}
-          ${
-            scope === "settings"
-              ? `<strong>${escapeHtml(helper)}</strong>`
-              : `<p class="explain">${escapeHtml(helper)}</p>`
-          }
-          <p class="rule-drag-hint">Drag and drop rules for quick changes.</p>
+          <strong>Everything else counts as work.</strong>
         </div>
         <div class="rule-toolbar-actions">
-          <button class="primary add-rule-button" type="button" data-rule-action="add" data-rule-scope="${scope}">+ Add rule</button>
-          ${applyPermanently}
+          <button class="primary add-rule-button" type="button" data-rule-action="add">+ Add</button>
         </div>
       </div>
-      ${activeEditor ? renderRuleEditor(activeEditor) : ""}
-      <div class="rule-groups">
-        ${renderRuleGroup(rules, scope, "distracting", "Distracting")}
-        ${renderRuleGroup(rules, scope, "focused", "Relevant")}
-        ${renderRuleGroup(rules, scope, "neutral", "Neutral")}
+      ${ruleEditor ? renderRuleEditor(ruleEditor) : ""}
+      <div class="rule-group">
+        <div class="rule-chip-list">
+          ${
+            permanentRules.length === 0
+              ? `<span class="no-session-rules">None yet. Add the sites and apps that pull you off task.</span>`
+              : permanentRules
+                  .map((rule, index) => ({ rule, index }))
+                  .reverse()
+                  .map(
+                    ({ rule, index }) => `
+                      <button class="rule-chip rule-chip-distracting" type="button" data-rule-action="edit" data-rule-index="${index}"${rule.target === "website" ? ` title="${attr(rule.value)}"` : ""}>
+                        ${escapeHtml(ruleName(rule))}
+                      </button>
+                    `,
+                  )
+                  .join("")
+          }
+        </div>
       </div>
     </div>
   `;
 }
 
-function renderRuleGroup(
-  rules: AppRule[],
-  scope: RuleScope,
-  classification: RuleClassification,
-  title: string,
-): string {
-  const items = rules
+/** Before a session: tap a distraction to allow it today; "+ Add" adds one for good. */
+function renderPreflightDistractions(): string {
+  const chips = permanentRules
     .map((rule, index) => ({ rule, index }))
-    .filter((item) => item.rule.classification === classification)
-    .reverse();
+    .reverse()
+    .map(({ rule, index }) => {
+      const allowed = preflightExceptions.some((exception) => sameRule(exception, rule));
+      return `
+        <button class="rule-chip rule-chip-distracting ${allowed ? "is-allowed" : ""}" type="button" aria-pressed="${allowed}" data-action="toggle-exception" data-rule-index="${index}" title="${attr(allowed ? "Allowed for this session. Tap to flag it again." : "Tap to allow it for this session.")}">
+          ${escapeHtml(ruleName(rule))}
+        </button>
+      `;
+    })
+    .join("");
   return `
-    <div class="rule-group" data-rule-drop="${scope}" data-rule-classification="${classification}">
-      <div class="rule-group-label eyebrow">
-        <i class="rule-dot rule-${classification}" aria-hidden="true"></i>
-        <span>${escapeHtml(title)}</span>
-      </div>
-      <div class="rule-chip-list">
-        ${items
-          .map(
-            ({ rule, index }) => `
-              <button class="rule-chip rule-chip-${classification}" type="button" draggable="true" data-rule-action="edit" data-rule-scope="${scope}" data-rule-index="${index}"${rule.target === "website" ? ` title="${attr(rule.value)}"` : ""}>
-                ${escapeHtml(ruleName(rule))}
-              </button>
-            `,
-          )
-          .join("")}
-        <button class="add-target-button" type="button" data-rule-action="add" data-rule-scope="${scope}" data-rule-classification="${classification}">+ Add</button>
+    <div class="rule-manager preflight-rule-manager">
+      <p class="explain">Tap one to allow it for this session. Everything else counts as work.</p>
+      ${ruleEditor ? renderRuleEditor(ruleEditor) : ""}
+      <div class="rule-group">
+        <div class="rule-chip-list">
+          ${chips || `<span class="no-session-rules">None yet.</span>`}
+          <button class="add-target-button" type="button" data-rule-action="add">+ Add</button>
+        </div>
       </div>
     </div>
   `;
@@ -1923,11 +1858,7 @@ function renderRulePreview(editor: RuleEditor): string {
 function renderRuleEditor(editor: RuleEditor): string {
   const site = previewSite(editor);
   return `
-    <form class="rule-editor" data-rule-form="${editor.scope}" autocomplete="off">
-      <label>
-        <span>Mode</span>
-        <select id="rule-classification" name="classification">${ruleClassificationOptions(editor.classification)}</select>
-      </label>
+    <form class="rule-editor" data-rule-form="rules" autocomplete="off">
       <label>
         <span>Website or app</span>
         <input id="rule-value" name="value" maxlength="300" spellcheck="false" value="${attr(editor.value)}" placeholder="youtube.com or Spotify" />
@@ -1943,9 +1874,9 @@ function renderRuleEditor(editor: RuleEditor): string {
         ${
           editor.index === null
             ? ""
-            : `<button class="danger" type="button" data-rule-action="delete" data-rule-scope="${editor.scope}" data-rule-index="${editor.index}">Delete</button>`
+            : `<button class="danger" type="button" data-rule-action="delete" data-rule-index="${editor.index}">Delete</button>`
         }
-        <button type="button" data-rule-action="cancel" data-rule-scope="${editor.scope}">Cancel</button>
+        <button type="button" data-rule-action="cancel">Cancel</button>
       </div>
     </form>
   `;
@@ -2735,11 +2666,7 @@ function renderHistoryItem(item: SessionSummary): string {
       </div>
       <div class="history-item-stats">
         <dl>
-          <div><dt>Focus</dt><dd>${
-            scoreAwaitsClassifying(item.unrated_seconds, item.idle_seconds, item.duration_seconds)
-              ? `<span title="Mostly unclassified. Open it to classify apps.">—</span>`
-              : `${focusPercent(item)}%`
-          }</dd></div>
+          <div><dt>Focus</dt><dd>${focusPercent(item)}%</dd></div>
           <div><dt>Duration</dt><dd>${formatDuration(item.duration_seconds)}</dd></div>
           <div><dt>Nudges</dt><dd>${item.nudges}</dd></div>
         </dl>
@@ -2893,8 +2820,6 @@ function renderWeekRecap(recap: WeekRecap): string {
       <section class="panel recap-apps">
         <p class="eyebrow">Apps & sites</p>
         <h2>Where session time went</h2>
-        <p class="recap-caption">${escapeHtml(SCORING_CAPTION)}</p>
-        ${renderRatePrompt(recap.apps, "this week")}
         ${
           recap.apps.some((item) => item.kind === "app" || item.kind === "website")
             ? `<div class="recap-name-tools">
@@ -2915,164 +2840,23 @@ function renderWeekRecap(recap: WeekRecap): string {
   `;
 }
 
-function ratingLabel(classification: RuleClassification): string {
-  return { focused: "Relevant", neutral: "Neutral", distracting: "Distracting" }[classification];
-}
-
-function unratedApps(apps: RecapApp[]): RecapApp[] {
-  return apps.filter((app) => app.ratable && !app.rating).sort((a, b) => b.seconds - a.seconds);
-}
-
-function ratingSourceApps(): RecapApp[] {
-  if (historyView === "report" && sessionReport) {
-    return sessionReport.apps;
-  }
-  return historyView === "recap" && weekRecap ? weekRecap.apps : [];
-}
-
-/** One quiet line, only when something is unrated. The rows themselves stay clean. */
-function renderRatePrompt(apps: RecapApp[], where: string): string {
-  const unrated = unratedApps(apps);
-  if (unrated.length === 0 || editingRecapNames) {
-    return "";
-  }
-  const count = unrated.length === 1 ? "1 app isn't classified" : `${unrated.length} apps aren't classified`;
-  return `
-    <div class="recap-name-tools rate-prompt">
-      <p><i class="unrated-dot" aria-hidden="true"></i>${escapeHtml(count)} yet. Unclassified time doesn't count as focus.</p>
-      <button type="button" data-action="rate-apps" data-where="${attr(where)}">Classify ${unrated.length === 1 ? "it" : "them"}</button>
-    </div>
-  `;
-}
-
-function renderRatingModal(): string {
-  const app = rating?.queue[rating.index];
-  if (!rating || !app) {
-    return "";
-  }
-  const step = rating.queue.length > 1 ? `CLASSIFY · ${rating.index + 1} OF ${rating.queue.length}` : "CLASSIFY";
-  const time = `${app.seconds >= 3600 ? formatHours(app.seconds) : formatMinutes(app.seconds)}${rating.where ? ` ${rating.where}` : ""}`;
-  const current = app.rating ? `Currently ${ratingLabel(app.rating)}` : "Not classified yet";
-  const choices: RuleClassification[] = ["focused", "neutral", "distracting"];
-  return `
-    <div class="modal-backdrop" role="presentation">
-      <section class="modal-panel rate-panel" role="dialog" aria-modal="true" aria-labelledby="rate-title">
-        <div class="modal-head">
-          <div>
-            <p class="eyebrow">${escapeHtml(step)}</p>
-            <h2 id="rate-title">${escapeHtml(app.label)}</h2>
-          </div>
-          <button class="small-button" type="button" data-action="close-rating">Done</button>
-        </div>
-        <p class="rate-meta">${escapeHtml(time)} · ${escapeHtml(current)}</p>
-        <div class="rate-choices">
-          ${choices
-            .map(
-              (choice) => `
-                <button type="button" class="rate-choice rate-${choice} ${app.rating === choice ? "is-current" : ""}" aria-pressed="${app.rating === choice}" data-action="rate-choice" data-choice="${choice}">
-                  ${escapeHtml(ratingLabel(choice))}
-                </button>
-              `,
-            )
-            .join("")}
-        </div>
-        <div class="rate-foot">
-          <p>Applies to future sessions and to past time that wasn't classified.</p>
-          ${rating.queue.length > 1 ? `<button class="small-button" type="button" data-action="rate-skip">Skip</button>` : ""}
-        </div>
-      </section>
-    </div>
-  `;
-}
-
-function startRating(queue: RecapApp[], where: string): void {
-  if (queue.length === 0) {
-    return;
-  }
-  rating = { queue, index: 0, rated: 0, where, rescored: new Set(), last: null };
-  render();
-}
-
-function advanceRating(): void {
-  if (!rating) {
-    return;
-  }
-  rating.index += 1;
-  if (rating.index >= rating.queue.length) {
-    finishRating();
-    return;
-  }
-  render();
-}
-
-function finishRating(): void {
-  const rated = rating?.rated ?? 0;
-  const rescored = rating?.rescored.size ?? 0;
-  const last = rating?.last;
-  rating = null;
-  render();
-  if (rated > 0) {
-    if (rescored === 0) {
-      showFeedback(rated === 1 ? "Rule saved" : `${rated} rules saved`);
-    } else {
-      const saved = rated === 1 && last ? `${last.label} is now ${ratingLabel(last.choice)}` : `${rated} apps classified`;
-      showFeedback(`${saved} · ${rescoredText(rescored)}`, RESCORE_TOAST_MS);
-    }
-    // A rating rescores past unrated time: rows move groups and every score can change.
-    if (historyView === "recap" && weekRecap) {
-      void openWeekRecap(weekRecap.start);
-    } else if (historyView === "report" && sessionReport) {
-      void openHistoryReport(sessionReport.id);
-    }
-    void refreshTrends(false);
-    void refreshHistoryWeek(false);
-  }
-}
-
-let ratingBusy = false;
-
-async function chooseRating(classification: RuleClassification): Promise<void> {
-  const app = rating?.queue[rating.index];
-  if (!rating || !app || ratingBusy) {
-    return;
-  }
-  ratingBusy = true;
-  try {
-    await saveRating(app, classification);
-  } finally {
-    ratingBusy = false;
-  }
-}
-
-async function saveRating(app: RecapApp, classification: RuleClassification): Promise<void> {
+/** Flags or unflags one app for the sessions to come. The report it sits in does not change. */
+async function toggleFlag(app: RecapApp): Promise<void> {
   const target: RuleTarget = app.kind === "website" ? "website" : "app";
+  const rule: AppRule = { target, value: app.key };
   const previous = cloneRules(permanentRules);
-  const others = permanentRules.filter(
-    (rule) => !(rule.target === target && rule.value.toLowerCase() === app.key.toLowerCase()),
-  );
-  try {
-    const saved = await invoke<RulesSaved>("update_rules", {
-      rules: [{ target, value: app.key, classification }, ...others],
-    });
-    permanentRules = saved.rules;
-    if (!rating) {
-      return; // closed while the save was in flight
-    }
-    saved.rescored_sessions.forEach((id) => rating?.rescored.add(id));
-    rating.last = { label: app.label, choice: classification };
-  } catch (error) {
-    permanentRules = previous;
-    showFeedback(errorText(error));
-    return;
-  }
+  const wasFlagged = app.flagged;
+  permanentRules = wasFlagged
+    ? permanentRules.filter((candidate) => !sameRule(candidate, rule))
+    : [rule, ...permanentRules.filter((candidate) => !sameRule(candidate, rule))];
   for (const row of [...(sessionReport?.apps ?? []), ...(weekRecap?.apps ?? [])]) {
     if (row.kind === app.kind && row.key === app.key) {
-      row.rating = classification;
+      row.flagged = !wasFlagged;
     }
   }
-  if (rating) {
-    rating.rated += 1;
-    advanceRating();
+  await persistPermanentRuleChanges(previous);
+  if (permanentRules !== previous) {
+    showFeedback(wasFlagged ? `${app.label} is no longer a distraction` : `${app.label} is a distraction from the next session`);
   }
 }
 
@@ -3093,11 +2877,13 @@ function renderAppGroups(apps: RecapApp[], groups: string[]): string {
                 .map((app) => {
                   const shownMinutes = Math.round(app.seconds / 60);
                   const width = shownMinutes > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
-                  // Decisions made during a session keep; say when today's rule differs.
-                  const ruledGroup = app.rating ? { focused: "Focus", neutral: "Neutral", distracting: "Distracting" }[app.rating] : null;
-                  const changed = ruledGroup && ruledGroup !== app.group && app.group !== "Away"
-                    ? `<span class="rating-changed">now ${escapeHtml(ratingLabel(app.rating as RuleClassification))}</span>`
-                    : "";
+                  // What the session recorded stands; say when the list says otherwise now.
+                  const changed =
+                    app.group === "Work" && app.flagged
+                      ? `<span class="flag-note">now a distraction</span>`
+                      : app.group === "Distractions" && app.ratable && !app.flagged
+                        ? `<span class="flag-note">no longer</span>`
+                        : "";
                   const cells = `
                     <span class="recap-app-name-wrap">${renderRecapAppName(app)}${changed}</span>
                     <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
@@ -3106,9 +2892,9 @@ function renderAppGroups(apps: RecapApp[], groups: string[]): string {
                   if (!app.ratable || editingRecapNames) {
                     return `<div class="recap-app-row">${cells}</div>`;
                   }
-                  const state = app.rating ? `Classified ${ratingLabel(app.rating)}` : "Not classified";
+                  const hint = app.flagged ? "On the distractions list · click to remove" : "Click to add to the distractions list";
                   return `
-                    <button type="button" class="recap-app-row is-ratable ${app.rating ? "" : "is-unrated"}" data-action="rate-app" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}" title="${attr(`${state} · click to change`)}">
+                    <button type="button" class="recap-app-row is-ratable ${app.flagged ? "is-flagged" : ""}" data-action="toggle-flag" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}" title="${attr(hint)}">
                       ${cells}
                     </button>
                   `;
@@ -3513,8 +3299,6 @@ function niceAxis(max: number): { max: number; step: number } {
 function renderMiniTimeline(item: SessionSummary): string {
   const parts = [
     { cls: "state-focused", seconds: item.focus_seconds },
-    { cls: "state-neutral", seconds: item.neutral_seconds },
-    { cls: "state-unrated", seconds: item.unrated_seconds },
     { cls: "state-distracted", seconds: item.distracted_seconds },
     { cls: "state-idle", seconds: item.idle_seconds },
   ].filter((part) => part.seconds > 0);
@@ -3548,7 +3332,7 @@ function renderSessionReport(report: SessionReport): string {
         </section>
         <aside class="report-stats" aria-label="Session stats">
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds))}
-          ${renderFocusStat(report)}
+          ${reportStat("Focused", `${report.focus_percent}%`)}
           ${reportStat("Nudges", String(report.nudge_count))}
           ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds)) : ""}
         </aside>
@@ -3556,8 +3340,6 @@ function renderSessionReport(report: SessionReport): string {
       <section class="panel recap-apps">
         <p class="eyebrow">WHERE IT WENT</p>
         <h2>Apps & sites</h2>
-        <p class="recap-caption">${escapeHtml(SCORING_CAPTION)}</p>
-        ${renderRatePrompt(report.apps, "this session")}
         ${
           report.apps.length === 0
             ? `<p class="empty">No app time recorded.</p>`
@@ -3566,29 +3348,6 @@ function renderSessionReport(report: SessionReport): string {
       </section>
     </section>
   `;
-}
-
-/**
- * While most of a session is unclassified, a percentage would mostly measure what hasn't been
- * classified yet (a first session reads 0%). The slot asks for the classifying instead.
- */
-function renderFocusStat(report: SessionReport): string {
-  const unclassified = unratedApps(report.apps).length;
-  if (unclassified === 0 || !scoreAwaitsClassifying(report.unrated_seconds, report.idle_seconds, report.duration_seconds)) {
-    return reportStat("Focused", `${report.focus_percent}%`);
-  }
-  return `
-    <button class="report-stat report-stat-action" type="button" data-action="rate-apps" data-where="this session">
-      <span>Focused</span>
-      <strong>Classify ${unclassified === 1 ? "1 app" : `${unclassified} apps`} to see it</strong>
-    </button>
-  `;
-}
-
-/** Unclassified time is most of the time the user was there. */
-function scoreAwaitsClassifying(unratedSeconds: number, idleSeconds: number, durationSeconds: number): boolean {
-  const present = Math.max(durationSeconds - idleSeconds, 0);
-  return unratedSeconds > 0 && unratedSeconds * 2 > present;
 }
 
 function reportStat(labelText: string, value: string): string {
@@ -3646,11 +3405,8 @@ function renderReportTimeline(report: SessionReport): string {
 function renderTimelineLegend(report: SessionReport, unrecorded: boolean): string {
   const present = new Set(report.spans.map((span) => span.state));
   const items = [
-    [["focused"], "state-focused", "Focused"],
-    [["neutral"], "state-neutral", "Neutral"],
-    [["unrated"], "state-unrated", "Unclassified"],
-    [["suspicious"], "state-suspicious", "Slipping"],
-    [["distracted"], "state-distracted", "Distracted"],
+    [["focused"], "state-focused", "Work"],
+    [["suspicious", "distracted"], "state-distracted", "Distraction"],
     [["phone"], "state-phone", "Phone"],
     // Idle (no input) and device asleep / unknown are one "Away"; hovering a segment says which.
     [["idle", "unknown"], "state-idle", "Away"],
@@ -3722,7 +3478,6 @@ function bindEvents(): void {
       void handleRuleAction(button);
     });
   });
-  bindRuleDragAndDrop();
 
   document.querySelectorAll<HTMLFormElement>("[data-rule-form]").forEach((form) => {
     form.addEventListener("submit", (event) => {
@@ -3743,13 +3498,6 @@ function bindEvents(): void {
     if (ruleEditor) {
       ruleEditor.name = (event.currentTarget as HTMLInputElement).value;
       ruleEditor.nameTouched = true;
-    }
-  });
-
-  document.getElementById("rule-classification")?.addEventListener("change", (event) => {
-    if (ruleEditor) {
-      ruleEditor.classification = (event.currentTarget as HTMLSelectElement).value as RuleClassification;
-      paintRuleEditorLive();
     }
   });
 
@@ -3979,7 +3727,7 @@ async function startSession(): Promise<boolean> {
       goal: draft.goal,
       duration_minutes: draft.duration_minutes,
       strictness: draft.strictness,
-      rules: cloneRules(preflightRules),
+      exceptions: cloneRules(preflightExceptions),
     },
   });
 }
@@ -4008,7 +3756,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "dismiss-mark-relevant") {
+  if (action === "allow-session" || action === "allow-always") {
     const live = snapshot?.current;
     if (live) {
       distractionDismissedFor = distractionIdentity(live);
@@ -4016,14 +3764,26 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     distractionLatchKey = "";
     distractionLatchLabel = "";
     overlayMoreOpen = false;
-    await invokeSnapshot("mark_current_relevant");
+    const name = live?.focus?.activity.label || "This window";
+    if (await invokeSnapshot(action === "allow-session" ? "allow_current_for_session" : "allow_current_always")) {
+      showFeedback(action === "allow-session" ? `${name} is allowed for this session` : `${name} is no longer a distraction`);
+    }
+    return;
+  }
+
+  if (action === "toggle-exception") {
+    const rule = permanentRules[Number(source?.dataset.ruleIndex)];
+    if (rule) {
+      preflightExceptions = preflightExceptions.some((exception) => sameRule(exception, rule))
+        ? preflightExceptions.filter((exception) => !sameRule(exception, rule))
+        : [...preflightExceptions, { ...rule }];
+      render();
+    }
     return;
   }
 
   if (action === "open-session-rules") {
-    const current = snapshot?.current;
-    if (current) {
-      preflightRules = cloneRules(current.rules);
+    if (snapshot?.current) {
       sessionRulesOpen = true;
       ruleEditor = null;
       render();
@@ -4049,15 +3809,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "onboard-rules") {
-    onboardingOpen = false;
-    activeTab = "settings";
-    settingsView = "home";
-    render();
-    document.querySelector(".settings-rules-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    return;
-  }
-
   if (action === "onboard-voice" || action === "onboard-webcam") {
     onboardingOpen = false;
     activeTab = "settings";
@@ -4076,7 +3827,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "open-preflight") {
-    preflightRules = cloneRules(permanentRules);
+    preflightExceptions = [];
     draft.duration_minutes = Math.min(90, Math.max(15, draft.duration_minutes));
     preflightBlocksOpen = false;
     preflightAdvancedOpen = false;
@@ -4090,11 +3841,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     preflightOpen = false;
     ruleEditor = null;
     render();
-    return;
-  }
-
-  if (action === "apply-rules-permanently") {
-    await applyRulesPermanently();
     return;
   }
 
@@ -4162,34 +3908,12 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "rate-apps") {
-    startRating(unratedApps(ratingSourceApps()), source?.dataset.where || "");
-    return;
-  }
-
-  if (action === "rate-app") {
-    const app = ratingSourceApps().find((row) => row.kind === source?.dataset.kind && row.key === source?.dataset.key);
+  if (action === "toggle-flag") {
+    const rows = historyView === "report" ? sessionReport?.apps ?? [] : weekRecap?.apps ?? [];
+    const app = rows.find((row) => row.kind === source?.dataset.kind && row.key === source?.dataset.key);
     if (app) {
-      startRating([app], historyView === "report" ? "this session" : "");
+      await toggleFlag(app);
     }
-    return;
-  }
-
-  if (action === "rate-choice") {
-    const choice = source?.dataset.choice as RuleClassification | undefined;
-    if (choice) {
-      await chooseRating(choice);
-    }
-    return;
-  }
-
-  if (action === "rate-skip") {
-    advanceRating();
-    return;
-  }
-
-  if (action === "close-rating") {
-    finishRating();
     return;
   }
 
@@ -4487,8 +4211,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     resume: "resume_session",
     snooze: "snooze_session",
     stop: "stop_session",
-    "mark-relevant": "mark_current_relevant",
-    "mark-distracting": "mark_current_distracting",
+    "mark-distracting": "flag_current_distracting",
   };
   const command = commands[action];
   if (!command) {
@@ -4499,113 +4222,29 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action.startsWith("mark-") && focus && !focus.markable) {
     showFeedback(
       focus.activity.kind === "app"
-        ? "Browsers always count as Neutral. Mark the website instead."
+        ? "A browser can't be a distraction on its own. Mark the website instead."
         : `${focus.activity.label} can't be marked. Mark a website or an app.`,
     );
     return;
   }
-  freshRescoreNote = "";
   const ok = await invokeSnapshot(command, undefined, !action.startsWith("mark-"));
   if (ok && action.startsWith("mark-")) {
     const name = snapshot?.current?.focus?.activity.label || "last window";
-    const note = freshRescoreNote;
-    freshRescoreNote = "";
-    showFeedback(
-      `${action === "mark-relevant" ? "Relevant" : "Distracting"}: ${name}${note ? ` · ${note}` : ""}`,
-      note ? RESCORE_TOAST_MS : undefined,
-    );
+    showFeedback(`Distraction: ${name}`);
   }
   if (ok && action === "stop" && history[0]) {
     await openHistoryReport(history[0].id);
   }
 }
 
-/** The chip being dragged between groups, by scope and position in that scope's rules. */
-let draggingRule: { scope: RuleScope; index: number } | null = null;
-
-function bindRuleDragAndDrop(): void {
-  document.querySelectorAll<HTMLButtonElement>(".rule-chip[draggable]").forEach((chip) => {
-    chip.addEventListener("dragstart", (event) => {
-      const scope = chip.dataset.ruleScope as RuleScope;
-      draggingRule = { scope, index: Number(chip.dataset.ruleIndex) };
-      chip.classList.add("is-dragging");
-      event.dataTransfer?.setData("text/plain", ruleName(rulesForScope(scope)[draggingRule.index]));
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-    });
-    chip.addEventListener("dragend", () => {
-      draggingRule = null;
-      chip.classList.remove("is-dragging");
-      document.querySelectorAll(".rule-group.is-drop-target").forEach((group) => group.classList.remove("is-drop-target"));
-    });
-  });
-  document.querySelectorAll<HTMLElement>("[data-rule-drop]").forEach((group) => {
-    const accepts = () =>
-      draggingRule !== null &&
-      group.dataset.ruleDrop === draggingRule.scope &&
-      rulesForScope(draggingRule.scope)[draggingRule.index]?.classification !== group.dataset.ruleClassification;
-    group.addEventListener("dragover", (event) => {
-      if (!accepts()) return;
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-      group.classList.add("is-drop-target");
-    });
-    group.addEventListener("dragleave", (event) => {
-      if (!group.contains(event.relatedTarget as Node | null)) group.classList.remove("is-drop-target");
-    });
-    group.addEventListener("drop", (event) => {
-      if (!accepts()) return;
-      event.preventDefault();
-      const { scope, index } = draggingRule as { scope: RuleScope; index: number };
-      draggingRule = null;
-      void moveRule(scope, index, group.dataset.ruleClassification as RuleClassification);
-    });
-  });
-}
-
-/** Reclassifies one rule by dropping it on another group, then saves like a delete would. */
-async function moveRule(scope: RuleScope, index: number, classification: RuleClassification): Promise<void> {
-  const rules = rulesForScope(scope);
-  const rule = rules[index];
-  if (!rule || rule.classification === classification) {
-    return;
-  }
-  const previous = cloneRules(rules);
-  // Groups list newest first, so the front of the array is the end of the group: the dropped
-  // rule lands last, where the eye expects it. Order carries no meaning for matching.
-  rules.splice(index, 1);
-  rules.unshift({ ...rule, classification });
-  if (ruleEditor?.scope === scope) {
-    ruleEditor = null;
-  }
-  if (scope === "settings") {
-    await persistPermanentRuleChanges(previous);
-  } else if (sessionRulesOpen) {
-    await persistSessionRuleChanges(previous);
-  } else {
-    render();
-  }
-}
-
 async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
-  const scope = button.dataset.ruleScope as RuleScope | undefined;
   const action = button.dataset.ruleAction;
-  if (!scope || !action) {
+  if (!action) {
     return;
   }
 
   if (action === "add") {
-    ruleEditor = {
-      scope,
-      index: null,
-      target: "website",
-      classification:
-        (button.dataset.ruleClassification as RuleClassification | undefined) ??
-        (scope === "preflight" ? "focused" : "distracting"),
-      value: "",
-      name: "",
-      nameTouched: false,
-      preview: null,
-    };
+    ruleEditor = { index: null, target: "website", value: "", name: "", nameTouched: false, preview: null };
     render();
     document.getElementById("rule-value")?.focus();
     return;
@@ -4618,7 +4257,7 @@ async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
   }
 
   const index = Number(button.dataset.ruleIndex);
-  const rules = rulesForScope(scope);
+  const rules = permanentRules;
   if (!Number.isInteger(index) || !rules[index]) {
     return;
   }
@@ -4626,7 +4265,6 @@ async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
   if (action === "edit") {
     const rule = rules[index];
     ruleEditor = {
-      scope,
       index,
       ...rule,
       name: rule.target === "website" ? siteNames[rule.value] ?? "" : "",
@@ -4640,22 +4278,14 @@ async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
   if (action === "delete") {
     const previous = cloneRules(rules);
     rules.splice(index, 1);
-    if (ruleEditor?.scope === scope) {
-      ruleEditor = null;
-    }
-    if (scope === "settings") {
-      await persistPermanentRuleChanges(previous);
-    } else if (sessionRulesOpen) {
-      await persistSessionRuleChanges(previous);
-    } else {
-      render();
-    }
+    ruleEditor = null;
+    await persistPermanentRuleChanges(previous);
   }
 }
 
 async function saveRuleForm(form: HTMLFormElement): Promise<void> {
-  const scope = form.dataset.ruleForm as RuleScope | undefined;
-  if (!scope || ruleEditor?.scope !== scope) {
+  const editor = ruleEditor;
+  if (!editor) {
     return;
   }
 
@@ -4666,18 +4296,15 @@ async function saveRuleForm(form: HTMLFormElement): Promise<void> {
   }
   let rule: AppRule;
   try {
-    rule = await invoke<AppRule>("resolve_rule_input", {
-      text,
-      classification: formValue(form, "classification") as RuleClassification,
-    });
+    rule = await invoke<AppRule>("resolve_rule_input", { text });
   } catch (error) {
     showFeedback(errorText(error));
     return;
   }
-  if (ruleEditor?.scope !== scope) {
+  if (ruleEditor !== editor) {
     return;
   }
-  if (rule.target === "website" && previewSite(ruleEditor) === rule.value) {
+  if (rule.target === "website" && previewSite(editor) === rule.value) {
     const name = formValue(form, "name").trim();
     if (name !== (siteNames[rule.value] ?? "")) {
       try {
@@ -4688,25 +4315,18 @@ async function saveRuleForm(form: HTMLFormElement): Promise<void> {
       }
     }
   }
-  if (ruleEditor?.scope !== scope) {
+  if (ruleEditor !== editor) {
     return;
   }
 
-  const rules = rulesForScope(scope);
-  const previous = cloneRules(rules);
-  if (ruleEditor.index === null) {
-    rules.unshift(rule);
+  const previous = cloneRules(permanentRules);
+  if (editor.index === null) {
+    permanentRules.unshift(rule);
   } else {
-    rules[ruleEditor.index] = rule;
+    permanentRules[editor.index] = rule;
   }
   ruleEditor = null;
-  if (scope === "settings") {
-    await persistPermanentRuleChanges(previous);
-  } else if (sessionRulesOpen) {
-    await persistSessionRuleChanges(previous);
-  } else {
-    render();
-  }
+  await persistPermanentRuleChanges(previous);
 }
 
 function scheduleRulePreview(delay = 140): void {
@@ -4728,7 +4348,7 @@ async function resolveRulePreview(): Promise<void> {
   let preview: RulePreview = null;
   if (text) {
     try {
-      const rule = await invoke<AppRule>("resolve_rule_input", { text, classification: editor.classification });
+      const rule = await invoke<AppRule>("resolve_rule_input", { text });
       preview = { target: rule.target, value: rule.value };
     } catch (error) {
       preview = { error: errorText(error) };
@@ -4801,46 +4421,9 @@ async function persistPermanentRuleChanges(previous: AppRule[]): Promise<void> {
     permanentRules = saved.rules;
     lastError = "";
     render();
-    if (saved.rescored_sessions.length > 0) {
-      showFeedback(`Rules saved · ${rescoredText(saved.rescored_sessions.length)}`, RESCORE_TOAST_MS);
-    }
     return;
   } catch (error) {
     permanentRules = previous;
-    lastError = errorText(error);
-  }
-  render();
-}
-
-async function applyRulesPermanently(): Promise<void> {
-  const previous = cloneRules(permanentRules);
-  try {
-    const saved = await invoke<RulesSaved>("update_rules", { rules: cloneRules(preflightRules) });
-    permanentRules = saved.rules;
-    lastError = "";
-    render();
-    const rescored = saved.rescored_sessions.length;
-    showFeedback(
-      `Saved for every session${rescored ? ` · ${rescoredText(rescored)}` : ""}`,
-      rescored ? RESCORE_TOAST_MS : undefined,
-    );
-    return;
-  } catch (error) {
-    permanentRules = previous;
-    lastError = errorText(error);
-  }
-  render();
-}
-
-async function persistSessionRuleChanges(previous: AppRule[]): Promise<void> {
-  try {
-    snapshot = await invoke<SessionSnapshot>("update_session_rules", { rules: preflightRules });
-    settings = snapshot.settings;
-    history = snapshot.history;
-    preflightRules = cloneRules(snapshot.current?.rules ?? preflightRules);
-    lastError = "";
-  } catch (error) {
-    preflightRules = previous;
     lastError = errorText(error);
   }
   render();
@@ -4966,7 +4549,6 @@ async function invokeSnapshot(command: string, args?: Record<string, unknown>, p
     snapshot = await invoke<SessionSnapshot>(command, args);
     settings = snapshot.settings;
     history = snapshot.history;
-    noteRescore(snapshot);
     history.forEach((item) => knownHistoryIds.add(item.id));
     lastError = "";
   } catch (error) {
@@ -5494,23 +5076,6 @@ function showFeedback(message: string, durationMs = 1400): void {
   }, durationMs);
 }
 
-function rescoredText(sessions: number): string {
-  return sessions === 1 ? "1 past session re-scored" : `${sessions} past sessions re-scored`;
-}
-
-/**
- * A mark during a session (from either window) rescored history; the main window says so once.
- * The first snapshot only sets the baseline, so reopening the window repeats nothing.
- */
-function noteRescore(next: SessionSnapshot): void {
-  const seq = next.rescore?.seq ?? 0;
-  if (appView === "main" && next.rescore && seenRescoreSeq !== null && seq > seenRescoreSeq) {
-    freshRescoreNote = rescoredText(next.rescore.sessions);
-    showFeedback(freshRescoreNote, RESCORE_TOAST_MS);
-  }
-  seenRescoreSeq = seq;
-}
-
 function paintRecordingClock(): void {
   const el = document.getElementById("recording-elapsed");
   if (el && recordingState === "recording") {
@@ -5840,8 +5405,6 @@ function stateTitle(current: CurrentSession | null): string {
   switch (current.focus?.state) {
     case "focused":
       return "Locked in";
-    case "neutral":
-      return "Watching";
     case "suspicious":
       return "Drift watch";
     case "distracted":
@@ -5886,7 +5449,7 @@ function stateClass(current: CurrentSession | null): string {
     return current.camera.phone_distracted ? "state-distracted" : "state-suspicious";
   }
 
-  return `state-${current.focus?.state ?? "neutral"}`;
+  return `state-${current.focus?.state ?? "waiting"}`;
 }
 
 async function playNudge(current: CurrentSession | null): Promise<void> {
@@ -6296,17 +5859,6 @@ async function toggleVoicePreview(): Promise<void> {
   }
 }
 
-function ruleClassificationLabel(classification: RuleClassification): string {
-  switch (classification) {
-    case "focused":
-      return "Focus";
-    case "distracting":
-      return "Distraction";
-    case "neutral":
-      return "Neutral";
-  }
-}
-
 function strictnessOptions(selected: Strictness): string {
   return (["gentle", "normal", "strict"] as Strictness[])
     .map((value) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label(value)}</option>`)
@@ -6322,19 +5874,6 @@ function voiceOptions(selected: string, forClips = false): string {
       return `<option value="${voice.id}" ${voice.id === selected ? "selected" : ""} ${enabled ? "" : "disabled"}>${escapeHtml(voice.name)}</option>`;
     })
     .join("");
-}
-
-function ruleClassificationOptions(selected: RuleClassification): string {
-  return (["focused", "neutral", "distracting"] as RuleClassification[])
-    .map(
-      (classification) =>
-        `<option value="${classification}" ${classification === selected ? "selected" : ""}>${ruleClassificationLabel(classification)}</option>`,
-    )
-    .join("");
-}
-
-function rulesForScope(scope: RuleScope): AppRule[] {
-  return scope === "settings" ? permanentRules : preflightRules;
 }
 
 function availableVoices(): VoiceOption[] {
@@ -7086,9 +6625,9 @@ function medianOf(values: number[]): number {
   return sorted.length % 2 === 0 ? Math.floor((sorted[mid - 1] + sorted[mid]) / 2) : sorted[mid];
 }
 
-/** The strip has two colours: on task (focused and neutral) and off task. Time away is left blank. */
+/** The strip has two colours: work and distraction. Time away is left blank. */
 function stripOnTask(state: string): boolean {
-  return state === "focused" || state === "neutral" || state === "unrated";
+  return state === "focused";
 }
 
 function stripOffTask(state: string): boolean {
@@ -7466,14 +7005,7 @@ function groupSessionsByDay(items: SessionSummary[]): { label: string; items: Se
 
 function dayTotalLine(items: SessionSummary[]): string {
   const sessions = items.length === 1 ? "1 session" : `${items.length} sessions`;
-  // Like the sessions' own scores: a mostly unclassified day has no focus total yet.
-  const scored = items.filter(
-    (item) => !scoreAwaitsClassifying(item.unrated_seconds, item.idle_seconds, item.duration_seconds),
-  );
-  if (scored.length === 0) {
-    return sessions;
-  }
-  const focused = scored.reduce((sum, item) => sum + item.focus_seconds, 0);
+  const focused = items.reduce((sum, item) => sum + item.focus_seconds, 0);
   return `${formatHours(focused)} focused · ${sessions}`;
 }
 
