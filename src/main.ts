@@ -2192,21 +2192,51 @@ function renderVoiceClipsPanel(): string {
             ${clipsEditing ? `<button type="button" class="tone-row is-add" data-action="new-tone" ${canEditPhrases() ? "" : "disabled"}><span class="tone-name">+ New tone</span></button>` : ""}
           </div>
         </div>
-        <div class="clips-card clips-lines">
-          <div class="clips-card-head">
-            ${toneRename ? renderToneRenameForm() : `<p class="eyebrow">${escapeHtml(toneLabel(viewed))} lines</p>`}
-            <span>${readyClipCount(voice, viewedPhrases)} of ${viewedPhrases.length} ready</span>
-          </div>
-          ${phraseEditor ? renderPhraseEditor() : ""}
-          <div class="line-list">
-            ${viewedPhrases.length ? viewedPhrases.map((phrase) => renderLineRow(voice, phrase)).join("") : `<p class="empty">No lines in this tone yet.</p>`}
-            ${clipsEditing ? `<button type="button" class="line-row is-add" data-action="add-line" data-tone="${attr(viewed)}" ${canEditPhrases() ? "" : "disabled"}><span class="line-dot" aria-hidden="true"></span><p>Add a line to ${escapeHtml(toneLabel(viewed))}</p></button>` : ""}
-          </div>
-          ${renderClipsFooter(voice, viewed, viewedPhrases)}
-        </div>
+        <div class="clips-card clips-lines">${renderLinesCard(voice, viewed)}</div>
       </div>
     </section>
   `;
+}
+
+function renderLinesCard(voice: VoiceOption, viewed: VoiceTone): string {
+  const viewedPhrases = tonePhrases(viewed);
+  return `
+    <div class="clips-card-head">
+      ${toneRename ? renderToneRenameForm() : `<p class="eyebrow">${escapeHtml(toneLabel(viewed))} lines</p>`}
+      <span>${readyClipCount(voice, viewedPhrases)} of ${viewedPhrases.length} ready</span>
+    </div>
+    ${phraseEditor ? renderPhraseEditor() : ""}
+    <div class="line-list">
+      ${viewedPhrases.length ? viewedPhrases.map((phrase) => renderLineRow(voice, phrase)).join("") : `<p class="empty">No lines in this tone yet.</p>`}
+      ${clipsEditing ? `<button type="button" class="line-row is-add" data-action="add-line" data-tone="${attr(viewed)}" ${canEditPhrases() ? "" : "disabled"}><span class="line-dot" aria-hidden="true"></span><p>Add a line to ${escapeHtml(toneLabel(viewed))}</p></button>` : ""}
+    </div>
+    ${renderClipsFooter(voice, viewed, viewedPhrases)}
+  `;
+}
+
+/** A tone pick: the chosen row lights up and the lines card is refilled. Nothing else moves. */
+function paintTonePick(): void {
+  const panel = document.querySelector(".phrase-panel");
+  const card = panel?.querySelector(".clips-lines");
+  if (!panel || !card) {
+    paintClipsPanel();
+    return;
+  }
+  const voice = clipsVoice();
+  const viewed = viewedTone(voice);
+  panel.querySelectorAll<HTMLButtonElement>(".tone-row[data-tone]").forEach((row) => {
+    const on = sameTone(row.dataset.tone ?? "", viewed);
+    row.classList.toggle("is-on", on);
+    row.setAttribute("aria-pressed", String(on));
+  });
+  card.innerHTML = renderLinesCard(voice, viewed);
+  card.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runAction(button.dataset.action || "", button);
+    });
+  });
+  bindClipsControls(card);
+  bindPhraseEditor(card);
 }
 
 function renderToneRow(voice: VoiceOption, tone: VoiceTone, viewed: boolean, speaks: boolean): string {
@@ -4328,7 +4358,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     toneRename = null;
     toneDeleteArmed = false;
     phraseEditor = null;
-    paintClipsPanel();
+    paintTonePick();
     return;
   }
 
@@ -6136,11 +6166,13 @@ function endPreviewBarDrag(): void {
   paintVoicePreview();
 }
 
+const waveformFailed = new Set<string>();
+
 function bindVoiceWaveforms(): void {
   document.querySelectorAll<HTMLCanvasElement>("canvas[data-wave-path]").forEach((canvas) => {
     const path = canvas.dataset.wavePath ?? "";
     const bars = Number(canvas.dataset.waveBars) || 11;
-    if (!path) {
+    if (!path || waveformFailed.has(path)) {
       return;
     }
     void fillWaveform(canvas, path, bars, canvas.id === "voice-preview-wave");
@@ -6205,6 +6237,7 @@ async function fillWaveform(
   try {
     peaks = await loadWaveformPeaks(path, bars);
   } catch {
+    waveformFailed.add(path);
     return;
   }
   if (!canvas.isConnected) {
@@ -6294,6 +6327,12 @@ function drawWaveform(canvas: HTMLCanvasElement, peaks: number[], progress: numb
   if (width < 2 || height < 2) {
     return;
   }
+  // Static card waves are drawn once per size and theme; only the preview redraws while playing.
+  const drawnKey = `${width}x${height}:${theme}:${peaks.length}:${timed ? progress.toFixed(3) : "static"}`;
+  if (canvas.dataset.drawnKey === drawnKey) {
+    return;
+  }
+  canvas.dataset.drawnKey = drawnKey;
   ctx.clearRect(0, 0, width, height);
   const gap = Math.max(1, Math.round((window.devicePixelRatio || 1) * 2));
   const barWidth = Math.max(1, (width - gap * (peaks.length - 1)) / peaks.length);
@@ -6644,6 +6683,7 @@ function recordingDurationSeconds(): number {
 
 function bumpClipAsset(path: string): void {
   clipAssetRevision.set(path, Date.now());
+  waveformFailed.delete(path);
   for (const key of [...waveformPeaks.keys()]) {
     if (key.startsWith(`${path}:`)) {
       waveformPeaks.delete(key);
