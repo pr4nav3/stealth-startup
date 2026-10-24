@@ -1424,23 +1424,12 @@ dt {
   padding: 18px;
 }
 
+/* Two inner cards, no shadow: the same surface as the voice popups' key-value cards. */
 .defaults-grid {
-  position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  column-gap: calc(14px + 2 * (18px + 2px));
-  align-items: center;
-  margin-top: 22px;
-}
-
-.defaults-grid::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: rgba(16, 16, 16, 0.28);
+  gap: 14px;
+  margin-top: 14px;
 }
 
 .field-help {
@@ -1456,6 +1445,11 @@ dt {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
+  min-height: 64px;
+  padding: 10px 14px;
+  border: var(--border);
+  border-radius: 6px;
+  background: var(--white-soft);
 }
 
 .defaults-help {
