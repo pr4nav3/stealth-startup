@@ -144,6 +144,14 @@ interface SessionSummary {
   idle_seconds: number;
   nudges: number;
   top_hints: string[];
+  /** The session in order: runs of one state, with gaps where nothing was recorded. */
+  segments: SummarySegment[];
+}
+
+interface SummarySegment {
+  started_offset_seconds: number;
+  seconds: number;
+  state: string;
 }
 
 interface ReportSpan {
@@ -3790,18 +3798,19 @@ function niceAxis(max: number): { max: number; step: number } {
   return { max: step * 3, step };
 }
 
+/** The report's bar in miniature: each run of a state at its real place and length, gaps left bare. */
 function renderMiniTimeline(item: SessionSummary): string {
-  const parts = [
-    { cls: "state-focused", seconds: item.focus_seconds },
-    { cls: "state-distracted", seconds: item.distracted_seconds },
-    { cls: "state-idle", seconds: item.idle_seconds },
-  ].filter((part) => part.seconds > 0);
-  if (parts.length === 0) {
-    return `<div class="mini-timeline" aria-hidden="true"></div>`;
-  }
+  const segments = item.segments ?? [];
+  const end = segments.reduce((max, segment) => Math.max(max, segment.started_offset_seconds + segment.seconds), 0);
+  const total = Math.max(item.duration_seconds, end, 1);
   return `
     <div class="mini-timeline" aria-hidden="true">
-      ${parts.map((part) => `<span class="${part.cls}" style="flex: ${part.seconds} 1 0"></span>`).join("")}
+      ${segments
+        .map(
+          (segment) =>
+            `<span class="state-${escapeHtml(segment.state)}" style="left: ${((segment.started_offset_seconds / total) * 100).toFixed(2)}%; width: ${((segment.seconds / total) * 100).toFixed(2)}%"></span>`,
+        )
+        .join("")}
     </div>
   `;
 }

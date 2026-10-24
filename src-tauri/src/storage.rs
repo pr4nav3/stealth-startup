@@ -2,7 +2,7 @@ use crate::activity;
 use crate::app_identity::{self, AppKeys};
 use crate::attribution::{Activity, PAUSED_KEY, PHONE_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
 use crate::focus::{starter_rules, AppRule, RuleTarget};
-use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, HISTORY_CACHE_LIMIT};
+use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, SummarySegment, HISTORY_CACHE_LIMIT};
 use crate::website;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -1712,6 +1712,7 @@ impl SessionStorage {
     fn complete_summary(&self, mut summary: SessionSummary) -> Result<SessionSummary, String> {
         summary.top_hints = self.top_hints_for_session(summary.id)?;
         summary.duration_seconds = self.session_duration_seconds(summary.id)?;
+        summary.segments = summary_segments(&self.load_spans_for_session(summary.id)?);
         Ok(summary)
     }
 
@@ -2232,7 +2233,33 @@ fn apps_from_spans(spans: &[ReportSpan]) -> Vec<RecapApp> {
 const SUMMARY_SELECT: &str = "SELECT id, goal, started_at, focused_seconds, distracted_seconds,
     idle_seconds, nudge_count FROM session";
 
-/// Reads a `SUMMARY_SELECT` row; `complete_summary` adds hints and run time.
+/// The session's spans as runs of one state, in order. Touching spans of the same state merge;
+/// time with no span stays a gap, so the list draws as the report's bar does, only smaller.
+fn summary_segments(spans: &[ReportSpan]) -> Vec<SummarySegment> {
+    let mut segments: Vec<SummarySegment> = Vec::new();
+    for span in spans {
+        if span.seconds == 0 {
+            continue;
+        }
+        let state = if span.state == "neutral" { "focused" } else { span.state.as_str() };
+        if let Some(last) = segments.last_mut() {
+            let touching = last.started_offset_seconds + last.seconds >= span.started_offset_seconds;
+            if last.state == state && touching {
+                let end = span.started_offset_seconds + span.seconds;
+                last.seconds = end.saturating_sub(last.started_offset_seconds).max(last.seconds);
+                continue;
+            }
+        }
+        segments.push(SummarySegment {
+            started_offset_seconds: span.started_offset_seconds,
+            seconds: span.seconds,
+            state: state.to_string(),
+        });
+    }
+    segments
+}
+
+/// Reads a `SUMMARY_SELECT` row; `complete_summary` adds hints, run time and segments.
 fn summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionSummary> {
     Ok(SessionSummary {
         id: row.get::<_, i64>(0)? as u64,
@@ -2244,6 +2271,7 @@ fn summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionSummary> {
         idle_seconds: row.get::<_, i64>(5)? as u64,
         nudges: row.get::<_, i64>(6)? as u64,
         top_hints: Vec::new(),
+        segments: Vec::new(),
     })
 }
 
@@ -2345,6 +2373,37 @@ fn clean_stored_phrases(phrases: Vec<StoredPhrase>) -> Vec<StoredPhrase> {
 mod tests {
     use super::*;
     use crate::focus::FocusState;
+
+    fn span_at(start: u64, seconds: u64, state: &str) -> ReportSpan {
+        ReportSpan {
+            started_offset_seconds: start,
+            seconds,
+            app: "code".to_string(),
+            kind: "app".to_string(),
+            activity_key: "code".to_string(),
+            label: "VS Code".to_string(),
+            source: "window".to_string(),
+            state: state.to_string(),
+        }
+    }
+
+    #[test]
+    fn summary_segments_merge_touching_runs_and_keep_gaps() {
+        let spans = [
+            span_at(0, 60, "focused"),
+            span_at(60, 30, "neutral"),
+            span_at(90, 20, "distracted"),
+            // A 10 s gap with nothing recorded, then work again.
+            span_at(120, 40, "focused"),
+            span_at(160, 0, "idle"),
+        ];
+        let segments = summary_segments(&spans);
+        let flat: Vec<(u64, u64, &str)> = segments
+            .iter()
+            .map(|segment| (segment.started_offset_seconds, segment.seconds, segment.state.as_str()))
+            .collect();
+        assert_eq!(flat, vec![(0, 90, "focused"), (90, 20, "distracted"), (120, 40, "focused")]);
+    }
 
     fn app(name: &str) -> Activity {
         Activity::app(name)

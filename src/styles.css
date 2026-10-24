@@ -3428,7 +3428,6 @@ audio {
   min-width: 40px;
   min-height: 40px;
   padding: 0;
-  background: var(--panel);
   font-size: 1rem;
 }
 
@@ -3914,7 +3913,6 @@ button.trend-door-go {
   width: 100%;
   min-height: 40px;
   margin-top: 14px;
-  background: var(--panel);
 }
 
 .trend-door-caption + button.trend-door-go {
@@ -3936,7 +3934,6 @@ button.trend-door-go {
 .history-seg button {
   min-width: 170px;
   min-height: 40px;
-  background: var(--panel);
   font-size: var(--sv-type-1);
 }
 
@@ -4596,15 +4593,17 @@ button.history-item {
 }
 
 .mini-timeline {
-  display: flex;
+  position: relative;
   overflow: hidden;
   height: 10px;
   border: 1px solid var(--line);
   border-radius: 2px;
-  background: var(--white-soft);
 }
 
 .mini-timeline span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
   min-width: 2px;
 }
 
@@ -5213,10 +5212,6 @@ button.report-stat-action strong {
   color: var(--ink);
 }
 
-.mini-timeline {
-  background: #fff7df;
-}
-
 .timeline-bar .state-focused,
 .mini-timeline .state-focused,
 .legend-key.state-focused {
@@ -5237,6 +5232,7 @@ button.report-stat-action strong {
 
 /* Phone = the webcam saw a phone in hand. Distracted coral, striped so it reads apart. */
 .timeline-bar .state-phone,
+.mini-timeline .state-phone,
 .legend-key.state-phone {
   background: repeating-linear-gradient(-45deg, #ff684f 0 4px, #b8321f 4px 7px);
 }
@@ -5247,17 +5243,20 @@ button.report-stat-action strong {
 .timeline-bar .state-idle,
 .timeline-bar .state-unknown,
 .mini-timeline .state-idle,
+.mini-timeline .state-unknown,
 .legend-key.state-idle {
   background: #7f93b5;
 }
 
 .timeline-bar .state-paused,
+.mini-timeline .state-paused,
 .legend-key.state-paused {
   background: #45423b;
 }
 
 /* Empty bar = time with no recorded span (Supervisor in front, capture gap). Must not read as Neutral. */
 .timeline-bar,
+.mini-timeline,
 .legend-key.state-unrecorded {
   background: repeating-linear-gradient(-45deg, #fff7df 0 4px, #d8ccb0 4px 5px);
 }

@@ -36,7 +36,9 @@
       for (const d of daily) {
         const started = new Date(d.date+"T10:30:00");
         const dur = Math.max(900, Math.round(d.focus_seconds/0.72));
-        sessions.push({id: id++, goal: ["Finish lab 3 writeup","Read chapter 7","Supervisor UI pass","Grind leetcode","Thesis intro"][id%5], started_at: started.toISOString(), duration_seconds: dur, focus_seconds: d.focus_seconds, distracted_seconds: Math.round(dur*0.12), idle_seconds: Math.round(dur*0.06), nudges: 2, top_hints:["VS Code","youtube.com"]});
+        const seg = (at, secs, state) => ({started_offset_seconds: Math.round(dur*at), seconds: Math.round(dur*secs), state});
+        sessions.push({id: id++, goal: ["Finish lab 3 writeup","Read chapter 7","Supervisor UI pass","Grind leetcode","Thesis intro"][id%5], started_at: started.toISOString(), duration_seconds: dur, focus_seconds: d.focus_seconds, distracted_seconds: Math.round(dur*0.12), idle_seconds: Math.round(dur*0.06), nudges: 2, top_hints:["VS Code","youtube.com"],
+          segments: [seg(0,0.22,"focused"), seg(0.22,0.07,"distracted"), seg(0.29,0.25,"focused"), seg(0.54,0.06,"idle"), seg(0.60,0.05,"distracted"), seg(0.65,0.31,"focused")]});
       }
       sessions.sort((a,b)=> b.started_at.localeCompare(a.started_at));
       if (q.get("first") === "1") { const mk = key(monday); for (let i = sessions.length - 1; i >= 0; i--) if (sessions[i].started_at.slice(0,10) < mk) sessions.splice(i, 1); for (let i = daily.length - 1; i >= 0; i--) if (daily[i].date < mk) daily.splice(i, 1); weeks.splice(0, weeks.length - 1); }

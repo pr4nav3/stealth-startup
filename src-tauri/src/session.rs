@@ -1524,6 +1524,15 @@ pub struct SessionSummary {
     pub idle_seconds: u64,
     pub nudges: u64,
     pub top_hints: Vec<String>,
+    /// The session in order: runs of one state, with gaps where nothing was recorded.
+    pub segments: Vec<SummarySegment>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct SummarySegment {
+    pub started_offset_seconds: u64,
+    pub seconds: u64,
+    pub state: String,
 }
 
 fn clean_goal(goal: String) -> String {
