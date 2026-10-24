@@ -2263,6 +2263,7 @@ dt {
   border: var(--border);
   border-radius: 6px;
   background: var(--white-soft);
+  box-shadow: var(--shadow-control);
 }
 
 .clips-card-head {
@@ -2286,15 +2287,12 @@ dt {
   text-transform: uppercase;
 }
 
-/* Eight tones show at once; past that the list scrolls inside its card. */
+/* Every tone shows; the page grows rather than scrolling inside the card. */
 .tone-list {
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: 8px;
-  max-height: 392px;
-  overflow: auto;
-  padding-right: 2px;
 }
 
 button.tone-row {
@@ -2306,7 +2304,7 @@ button.tone-row {
   padding: 0 12px;
   border-radius: 6px;
   background: var(--panel);
-  box-shadow: none;
+  box-shadow: var(--shadow-control);
   color: var(--ink);
   font-family: var(--font-sans);
   font-size: var(--sv-type-3);
@@ -2314,22 +2312,26 @@ button.tone-row {
   letter-spacing: -0.01em;
   text-align: left;
   text-transform: none;
+  transition: none;
 }
 
-button.tone-row:active {
-  transform: none;
+button.tone-row:hover {
+  background: var(--white-soft);
 }
 
-button.tone-row.is-on {
+button.tone-row.is-on,
+button.tone-row.is-on:hover {
   background: var(--sv-yellow);
   color: var(--sv-colored-ink);
 }
 
-button.tone-row.is-add {
+button.tone-row.is-add,
+button.tone-row.is-add:hover {
   grid-template-columns: minmax(0, 1fr);
   border-style: dashed;
   border-color: color-mix(in srgb, var(--sv-ink) 45%, transparent);
   background: transparent;
+  box-shadow: none;
   color: var(--sv-muted);
   font-weight: 500;
 }
@@ -2383,27 +2385,28 @@ button.tone-row.is-on .tone-count {
 .line-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 12px;
+  gap: 14px;
   align-items: center;
-  min-height: 42px;
-  padding: 0 12px;
+  min-height: 56px;
+  padding: 10px 14px;
   border: var(--border);
   border-radius: 6px;
   background: var(--panel);
+  box-shadow: var(--shadow-control);
 }
 
 .line-row p {
   margin: 0;
-  overflow: hidden;
-  font-size: var(--sv-type-3);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--sv-type-2);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .line-row.is-missing {
   border-style: dashed;
   border-color: color-mix(in srgb, var(--sv-ink) 40%, transparent);
   background: transparent;
+  box-shadow: none;
 }
 
 .line-row.is-missing p {
@@ -2451,6 +2454,7 @@ button.line-row.is-add .line-dot {
 }
 
 .line-dot {
+  flex: none;
   width: 11px;
   height: 11px;
   border: 1.5px solid var(--sv-border);
@@ -2485,20 +2489,21 @@ button.line-row.is-add .line-dot {
 
 .line-actions {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .line-actions .small-button {
-  min-height: 34px;
+  min-height: 36px;
   padding: 0 12px;
 }
 
 .line-actions .voice-play {
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
-  min-height: 34px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
   padding: 0;
 }
 
@@ -2636,8 +2641,14 @@ button.line-row.is-add .line-dot {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .tone-list {
-    max-height: 240px;
+  .line-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .line-row .line-actions,
+  .line-row .line-state {
+    grid-column: 2;
+    justify-self: start;
   }
 }
 

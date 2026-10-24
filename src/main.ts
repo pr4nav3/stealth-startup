@@ -2054,6 +2054,82 @@ function voiceCardMark(voice: VoiceOption): string {
 /** About 90 seconds per clip on a typical laptop; the estimates and the hint quote it. */
 const CLIP_SECONDS = 90;
 
+/** Redraws the Clips panel alone. Picking a tone or toggling editing changes nothing outside it,
+ * so the voices, the tiles and the page scroll stay put and the swap takes a few milliseconds. */
+function paintClipsPanel(): void {
+  const panel = document.querySelector(".phrase-panel");
+  if (!panel) {
+    render();
+    return;
+  }
+  const holder = document.createElement("div");
+  holder.innerHTML = renderVoiceClipsPanel();
+  const next = holder.firstElementChild;
+  if (!next) {
+    render();
+    return;
+  }
+  panel.replaceWith(next);
+  next.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runAction(button.dataset.action || "", button);
+    });
+  });
+  bindClipsControls(next);
+  bindPhraseEditor(next);
+}
+
+/** The voice select and the tone-rename form, inside `root`. */
+function bindClipsControls(root: ParentNode): void {
+  root.querySelector<HTMLSelectElement>("#voice-clips-voice")?.addEventListener("change", (event) => {
+    const voiceId = (event.target as HTMLSelectElement).value;
+    if (!availableVoices().some((item) => item.id === voiceId)) {
+      return;
+    }
+    clearFailedQueue();
+    clipsVoiceId = voiceId;
+    clipsVoiceTouched = true;
+    clipsTone = null;
+    toneRename = null;
+    toneDeleteArmed = false;
+    phraseEditor = null;
+    paintClipsPanel();
+  });
+  root.querySelector<HTMLFormElement>("#tone-rename")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void renameTone();
+  });
+  root.querySelector<HTMLInputElement>("#tone-rename-input")?.addEventListener("input", (event) => {
+    if (toneRename) {
+      toneRename.value = (event.target as HTMLInputElement).value;
+    }
+  });
+}
+
+function bindPhraseEditor(root: ParentNode): void {
+  const phraseForm = root.querySelector<HTMLFormElement>("#phrase-editor");
+  phraseForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void savePhraseForm(event.currentTarget as HTMLFormElement);
+  });
+  phraseForm?.querySelector<HTMLInputElement>('input[name="text"]')?.addEventListener("input", (event) => {
+    if (phraseEditor) {
+      phraseEditor.text = (event.target as HTMLInputElement).value;
+    }
+  });
+  phraseForm?.querySelector<HTMLSelectElement>('select[name="tone"]')?.addEventListener("change", (event) => {
+    const field = phraseForm.querySelector<HTMLElement>(".phrase-new-set");
+    const isNew = (event.target as HTMLSelectElement).value === NEW_SET;
+    if (phraseEditor) {
+      phraseEditor.tone = (event.target as HTMLSelectElement).value;
+    }
+    field?.toggleAttribute("hidden", !isNew);
+    if (isNew) {
+      field?.querySelector("input")?.focus();
+    }
+  });
+}
+
 /** Model and memory, the two things that can stop a clip being made. Each tile opens its numbers. */
 function renderVoiceTiles(): string {
   const busyDownload = ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
@@ -3789,27 +3865,7 @@ function bindEvents(): void {
     void saveHistoryRename();
   });
 
-  const phraseForm = document.getElementById("phrase-editor") as HTMLFormElement | null;
-  phraseForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void savePhraseForm(event.currentTarget as HTMLFormElement);
-  });
-  phraseForm?.querySelector<HTMLInputElement>('input[name="text"]')?.addEventListener("input", (event) => {
-    if (phraseEditor) {
-      phraseEditor.text = (event.target as HTMLInputElement).value;
-    }
-  });
-  phraseForm?.querySelector<HTMLSelectElement>('select[name="tone"]')?.addEventListener("change", (event) => {
-    const field = phraseForm.querySelector<HTMLElement>(".phrase-new-set");
-    const isNew = (event.target as HTMLSelectElement).value === NEW_SET;
-    if (phraseEditor) {
-      phraseEditor.tone = (event.target as HTMLSelectElement).value;
-    }
-    field?.toggleAttribute("hidden", !isNew);
-    if (isNew) {
-      field?.querySelector("input")?.focus();
-    }
-  });
+  bindPhraseEditor(document);
 
   document.querySelector("details.overlay-more")?.addEventListener("toggle", (event) => {
     const open = (event.currentTarget as HTMLDetailsElement).open;
@@ -3838,31 +3894,7 @@ function bindEvents(): void {
     });
   });
 
-  document.getElementById("voice-clips-voice")?.addEventListener("change", (event) => {
-    const voiceId = (event.target as HTMLSelectElement).value;
-    if (!availableVoices().some((item) => item.id === voiceId)) {
-      return;
-    }
-    clearFailedQueue();
-    clipsVoiceId = voiceId;
-    clipsVoiceTouched = true;
-    clipsTone = null;
-    toneRename = null;
-    toneDeleteArmed = false;
-    phraseEditor = null;
-    render();
-  });
-
-  const toneForm = document.getElementById("tone-rename") as HTMLFormElement | null;
-  toneForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void renameTone();
-  });
-  document.getElementById("tone-rename-input")?.addEventListener("input", (event) => {
-    if (toneRename) {
-      toneRename.value = (event.target as HTMLInputElement).value;
-    }
-  });
+  bindClipsControls(document);
 
   document.getElementById("preflight-duration")?.addEventListener("input", (event) => {
     const slider = event.target as HTMLInputElement;
@@ -4296,7 +4328,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     toneRename = null;
     toneDeleteArmed = false;
     phraseEditor = null;
-    render();
+    paintClipsPanel();
     return;
   }
 
@@ -4318,7 +4350,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "stop-clip-queue") {
     if (clipQueue?.phase === "working") {
       clipQueue.stopAfter = true;
-      render();
+      paintClipsPanel();
     }
     return;
   }
@@ -4329,7 +4361,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     phraseEditor = null;
     toneRename = null;
     toneDeleteArmed = false;
-    render();
+    paintClipsPanel();
     return;
   }
 
@@ -4348,22 +4380,22 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     if (isCustomTone(tone)) {
       toneRename = { from: tone, value: tone };
       toneDeleteArmed = false;
-      render();
-      requestAnimationFrame(() => (document.getElementById("tone-rename-input") as HTMLInputElement | null)?.select());
+      paintClipsPanel();
+      (document.getElementById("tone-rename-input") as HTMLInputElement | null)?.select();
     }
     return;
   }
 
   if (action === "cancel-rename-tone") {
     toneRename = null;
-    render();
+    paintClipsPanel();
     return;
   }
 
   if (action === "arm-delete-tone" || action === "cancel-delete-tone") {
     toneDeleteArmed = action === "arm-delete-tone" && isCustomTone(viewedTone(clipsVoice()));
     toneRename = null;
-    render();
+    paintClipsPanel();
     return;
   }
 
@@ -5242,7 +5274,7 @@ async function runClipQueue(phraseIds: string[]): Promise<boolean> {
   dismissVoiceInfo();
   clipQueue = { voiceId: voice.id, phraseIds, index: 0, phase: "working", error: "", startedAt: performance.now(), stopAfter: false };
   clipQueueTicker = window.setInterval(paintClipQueue, 1000);
-  render();
+  paintClipsPanel();
   await runVoiceBusy("generate-clips", async () => {
     while (clipQueue && clipQueue.phase === "working" && clipQueue.index < clipQueue.phraseIds.length) {
       const phraseId = clipQueue.phraseIds[clipQueue.index];
@@ -5252,7 +5284,7 @@ async function runClipQueue(phraseIds: string[]): Promise<boolean> {
         continue;
       }
       clipQueue = { ...clipQueue, startedAt: performance.now() };
-      render();
+      paintClipsPanel();
       try {
         const generated = await invoke<VoiceProfileSummary>("generate_voice_clips", {
           input: {
@@ -5273,7 +5305,7 @@ async function runClipQueue(phraseIds: string[]): Promise<boolean> {
         if (clipQueue) {
           clipQueue = { ...clipQueue, phase: "error", error: errorText(error) };
         }
-        render();
+        paintClipsPanel();
         break;
       }
       if (!clipQueue) {
