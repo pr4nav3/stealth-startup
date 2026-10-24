@@ -1725,8 +1725,7 @@ dt {
   gap: 8px;
 }
 
-.rule-editor,
-.phrase-editor {
+.rule-editor {
   display: grid;
   grid-template-columns: minmax(140px, 0.45fr) minmax(0, 1.4fr) auto;
   gap: 10px;
@@ -1738,19 +1737,26 @@ dt {
 }
 
 .phrase-editor {
-  grid-template-columns: minmax(140px, 0.5fr) minmax(0, 1.4fr);
+  display: grid;
+  gap: 12px;
 }
 
-.phrase-editor .rule-editor-actions {
-  grid-column: 1 / -1;
+.phrase-editor label {
+  display: grid;
+  gap: 6px;
 }
 
-.phrase-editor .phrase-new-set {
-  grid-column: 1 / -1;
+.phrase-editor label span {
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
-.phrase-editor .phrase-new-set[hidden] {
-  display: none;
+.phrase-editor input,
+.phrase-editor select {
+  width: 100%;
+  min-height: 40px;
 }
 
 /* Two fields on one row: the site or app, and its name once a site is recognised. */
@@ -2238,11 +2244,6 @@ dt {
   font-weight: 650;
 }
 
-.small-button.is-on {
-  background: var(--sv-yellow);
-  color: var(--sv-colored-ink);
-}
-
 .small-button.is-danger {
   border-color: var(--sv-coral);
 }
@@ -2279,12 +2280,24 @@ dt {
   margin: 0;
 }
 
-.clips-card-head > span {
+.clips-card-head > span,
+.clips-card-tools > span {
   color: var(--sv-muted);
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.clips-card-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.clips-card-tools .small-button {
+  min-height: 30px;
+  padding: 0 10px;
 }
 
 /* Every tone shows; the page grows rather than scrolling inside the card. */
@@ -2323,17 +2336,6 @@ button.tone-row.is-on,
 button.tone-row.is-on:hover {
   background: var(--sv-yellow);
   color: var(--sv-colored-ink);
-}
-
-button.tone-row.is-add,
-button.tone-row.is-add:hover {
-  grid-template-columns: minmax(0, 1fr);
-  border-style: dashed;
-  border-color: color-mix(in srgb, var(--sv-ink) 45%, transparent);
-  background: transparent;
-  box-shadow: none;
-  color: var(--sv-muted);
-  font-weight: 500;
 }
 
 .tone-dot {
@@ -2395,11 +2397,57 @@ button.tone-row.is-on .tone-count {
   box-shadow: var(--shadow-control);
 }
 
-.line-row p {
+.line-row p,
+button.line-open {
   margin: 0;
   font-size: var(--sv-type-2);
   line-height: 1.3;
   overflow-wrap: anywhere;
+}
+
+/* The words themselves open the line: a text button with the row's type and no chrome. */
+button.line-open {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-align: left;
+  text-transform: none;
+  text-decoration: underline transparent;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+button.line-open:hover,
+button.line-open:focus-visible {
+  text-decoration-color: currentColor;
+  text-decoration-style: dotted;
+}
+
+button.line-open:active {
+  transform: none;
+}
+
+button.line-open:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.line-row.is-missing button.line-open {
+  color: var(--sv-muted);
+}
+
+.line-row.is-busy button.line-open {
+  color: inherit;
 }
 
 .line-row.is-missing {
@@ -2409,45 +2457,14 @@ button.tone-row.is-on .tone-count {
   box-shadow: none;
 }
 
-.line-row.is-missing p {
-  color: var(--sv-muted);
-}
 
 .line-row.is-busy {
   background: var(--sv-yellow);
   color: var(--sv-colored-ink);
 }
 
-.line-row.is-busy p {
-  color: inherit;
-}
 
-button.line-row.is-add {
-  width: 100%;
-  height: auto;
-  box-shadow: none;
-  color: var(--sv-muted);
-  font-family: var(--font-sans);
-  font-weight: 500;
-  letter-spacing: 0;
-  text-align: left;
-  text-transform: none;
-  cursor: pointer;
-}
-
-button.line-row.is-add:active {
-  transform: none;
-}
-
-button.line-row.is-add .line-dot::before {
-  content: "+";
-  display: block;
-  margin: -3px 0 0 1px;
-  font-size: 0.8rem;
-  line-height: 1;
-}
-
-button.line-row.is-add .line-dot {
+.line-dot {
   border: 0;
   background: transparent;
   color: var(--sv-muted);
@@ -2554,6 +2571,91 @@ button.line-row.is-add .line-dot {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.line-popup,
+.tones-popup {
+  width: min(520px, 100%);
+}
+
+.line-clip-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.line-clip-status {
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.line-clip-status.is-ready {
+  color: var(--ink);
+}
+
+.line-clip-row .voice-play {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+}
+
+.line-popup-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.tone-manage-list {
+  display: grid;
+  gap: 8px;
+}
+
+.tone-manage-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  min-height: 46px;
+  padding: 6px 12px;
+  border: var(--border);
+  border-radius: 6px;
+  background: var(--white-soft);
+}
+
+.tone-manage-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tone-manage-name strong {
+  font-size: var(--sv-type-3);
+  font-weight: 650;
+}
+
+.tone-manage-tools {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tone-manage-tools .small-button {
+  min-height: 32px;
+}
+
+.tone-manage-note {
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
 }
 
 .tone-rename input {
@@ -4987,7 +5089,6 @@ button.report-stat-action strong {
 .setting-row,
 .delete-choice-grid,
 .rule-editor,
-.phrase-editor,
 .defaults-grid,
 .settings-feature-grid,
 .rule-group,

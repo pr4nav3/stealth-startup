@@ -480,7 +480,6 @@ const starterRules: AppRule[] = ["youtube.com", "netflix.com", "tiktok.com", "in
 
 const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern"];
 /** The editor's "New set…" choice. */
-const NEW_SET = "__new__";
 
 const phraseBank: PhraseDefinition[] = [
   { id: "gentle_back_to_it", tone: "gentle", text: "Hey. Back to it." },
@@ -628,9 +627,11 @@ let clipsVoiceId = "starter-female";
 let clipsVoiceTouched = false;
 /** The tone whose lines the Clips panel shows; null means the voice's own tone. */
 let clipsTone: VoiceTone | null = null;
-let clipsEditing = false;
+/** The Tones popup: open, a rename in progress, a delete awaiting its confirm, a new name being typed. */
+let tonesOpen = false;
 let toneRename: { from: VoiceTone; value: string } | null = null;
-let toneDeleteArmed = false;
+let toneDeleteArmed: VoiceTone | null = null;
+let newToneDraft: string | null = null;
 let clipQueue: ClipQueue | null = null;
 let clipQueueTicker: number | null = null;
 let ignoreVoiceWorkerError = false;
@@ -858,9 +859,8 @@ function closeTopLayer(): void {
     render();
     return;
   }
-  if (toneRename || toneDeleteArmed) {
-    toneRename = null;
-    toneDeleteArmed = false;
+  if (tonesOpen) {
+    closeTonesPopup();
     render();
     return;
   }
@@ -958,6 +958,7 @@ function editorIsOpen(): boolean {
     ruleEditor !== null ||
     historyRename !== null ||
     phraseEditor !== null ||
+    tonesOpen ||
     recordingOpen ||
     historyConfirm !== null ||
     voiceDeleteTargetId !== null ||
@@ -2076,7 +2077,6 @@ function paintClipsPanel(): void {
     });
   });
   bindClipsControls(next);
-  bindPhraseEditor(next);
 }
 
 /** The voice select and the tone-rename form, inside `root`. */
@@ -2090,8 +2090,6 @@ function bindClipsControls(root: ParentNode): void {
     clipsVoiceId = voiceId;
     clipsVoiceTouched = true;
     clipsTone = null;
-    toneRename = null;
-    toneDeleteArmed = false;
     phraseEditor = null;
     paintClipsPanel();
   });
@@ -2104,29 +2102,51 @@ function bindClipsControls(root: ParentNode): void {
       toneRename.value = (event.target as HTMLInputElement).value;
     }
   });
+  root.querySelector<HTMLFormElement>("#new-tone")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void createTone();
+  });
+  root.querySelector<HTMLInputElement>("#new-tone-input")?.addEventListener("input", (event) => {
+    newToneDraft = (event.target as HTMLInputElement).value;
+  });
 }
 
 function bindPhraseEditor(root: ParentNode): void {
   const phraseForm = root.querySelector<HTMLFormElement>("#phrase-editor");
   phraseForm?.addEventListener("submit", (event) => {
     event.preventDefault();
-    void savePhraseForm(event.currentTarget as HTMLFormElement);
+    void saveLine(true);
   });
   phraseForm?.querySelector<HTMLInputElement>('input[name="text"]')?.addEventListener("input", (event) => {
     if (phraseEditor) {
       phraseEditor.text = (event.target as HTMLInputElement).value;
+      paintLinePopupButtons();
     }
   });
   phraseForm?.querySelector<HTMLSelectElement>('select[name="tone"]')?.addEventListener("change", (event) => {
-    const field = phraseForm.querySelector<HTMLElement>(".phrase-new-set");
-    const isNew = (event.target as HTMLSelectElement).value === NEW_SET;
     if (phraseEditor) {
       phraseEditor.tone = (event.target as HTMLSelectElement).value;
     }
-    field?.toggleAttribute("hidden", !isNew);
-    if (isNew) {
-      field?.querySelector("input")?.focus();
-    }
+  });
+}
+
+/** Typing changes which buttons make sense; redraw just the popup's action row. */
+function paintLinePopupButtons(): void {
+  const actions = document.querySelector(".line-popup-actions");
+  if (!actions) {
+    return;
+  }
+  const holder = document.createElement("div");
+  holder.innerHTML = renderLinePopup();
+  const next = holder.querySelector(".line-popup-actions");
+  if (!next) {
+    return;
+  }
+  actions.replaceWith(next);
+  next.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runAction(button.dataset.action || "", button);
+    });
   });
 }
 
@@ -2170,9 +2190,6 @@ function renderVoiceClipsPanel(): string {
   const viewedPhrases = tonePhrases(viewed);
   const speaksPhrases = tonePhrases(speaks);
   const summary = `· speaks ${toneLabel(speaks)} · ${readyClipCount(voice, speaksPhrases)} of ${speaksPhrases.length} lines ready`;
-  const editToggle = clipQueue
-    ? `<button type="button" class="small-button" disabled>Edit lines</button>`
-    : `<button type="button" class="small-button ${clipsEditing ? "is-on" : ""}" data-action="toggle-edit-lines" aria-pressed="${clipsEditing}">${clipsEditing ? "Done" : "Edit lines"}</button>`;
   return `
     <section class="panel phrase-panel">
       <div class="clips-strip">
@@ -2182,14 +2199,15 @@ function renderVoiceClipsPanel(): string {
           <select id="voice-clips-voice" aria-label="Voice to make clips for" ${clipQueue ? "disabled" : ""}>${voiceOptions(voice.id, true)}</select>
           <span class="clips-summary">${escapeHtml(summary)}</span>
         </div>
-        ${editToggle}
       </div>
       <div class="clips-grid">
         <div class="clips-card">
-          <div class="clips-card-head"><p class="eyebrow">Tone</p><span>${tones.length === 1 ? "1 tone" : `${tones.length} tones`}</span></div>
+          <div class="clips-card-head">
+            <p class="eyebrow">Tone</p>
+            <span class="clips-card-tools"><span>${tones.length === 1 ? "1 tone" : `${tones.length} tones`}</span><button class="small-button" type="button" data-action="open-tones" aria-haspopup="dialog" ${canEditPhrases() ? "" : "disabled"}>Manage</button></span>
+          </div>
           <div class="tone-list" aria-label="Tones">
             ${tones.map((tone) => renderToneRow(voice, tone, sameTone(tone, viewed), sameTone(tone, speaks))).join("")}
-            ${clipsEditing ? `<button type="button" class="tone-row is-add" data-action="new-tone" ${canEditPhrases() ? "" : "disabled"}><span class="tone-name">+ New tone</span></button>` : ""}
           </div>
         </div>
         <div class="clips-card clips-lines">${renderLinesCard(voice, viewed)}</div>
@@ -2202,13 +2220,11 @@ function renderLinesCard(voice: VoiceOption, viewed: VoiceTone): string {
   const viewedPhrases = tonePhrases(viewed);
   return `
     <div class="clips-card-head">
-      ${toneRename ? renderToneRenameForm() : `<p class="eyebrow">${escapeHtml(toneLabel(viewed))} lines</p>`}
+      <p class="eyebrow">${escapeHtml(toneLabel(viewed))} lines</p>
       <span>${readyClipCount(voice, viewedPhrases)} of ${viewedPhrases.length} ready</span>
     </div>
-    ${phraseEditor ? renderPhraseEditor() : ""}
     <div class="line-list">
-      ${viewedPhrases.length ? viewedPhrases.map((phrase) => renderLineRow(voice, phrase)).join("") : `<p class="empty">No lines in this tone yet.</p>`}
-      ${clipsEditing ? `<button type="button" class="line-row is-add" data-action="add-line" data-tone="${attr(viewed)}" ${canEditPhrases() ? "" : "disabled"}><span class="line-dot" aria-hidden="true"></span><p>Add a line to ${escapeHtml(toneLabel(viewed))}</p></button>` : ""}
+      ${viewedPhrases.length ? viewedPhrases.map((phrase) => renderLineRow(voice, phrase)).join("") : `<p class="empty">No lines in this tone yet. Add one below.</p>`}
     </div>
     ${renderClipsFooter(voice, viewed, viewedPhrases)}
   `;
@@ -2236,7 +2252,6 @@ function paintTonePick(): void {
     });
   });
   bindClipsControls(card);
-  bindPhraseEditor(card);
 }
 
 function renderToneRow(voice: VoiceOption, tone: VoiceTone, viewed: boolean, speaks: boolean): string {
@@ -2261,18 +2276,7 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
   const failed = Boolean(job && position === job.index && job.phase === "error");
   const queued = Boolean(job && position > job.index);
   const dot = `<span class="line-dot ${clip ? "is-ready" : ""}" aria-hidden="true"></span>`;
-  const text = `<p>${escapeHtml(phrase.text)}</p>`;
-  if (clipsEditing) {
-    return `
-      <div class="line-row ${clip ? "" : "is-missing"}">
-        ${dot}${text}
-        <span class="line-actions">
-          <button class="small-button" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${canEditPhrases() ? "" : "disabled"}>Edit</button>
-          <button class="small-button is-danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(phrase.id)}" ${canEditPhrases() ? "" : "disabled"}>Delete</button>
-        </span>
-      </div>
-    `;
-  }
+  const text = `<button class="line-open" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${busy ? "disabled" : ""} title="Edit, regenerate or delete this line">${escapeHtml(phrase.text)}</button>`;
   let trail: string;
   if (busy) {
     trail = `<span class="line-state is-busy" data-clip-elapsed>${escapeHtml(clipElapsedText())}</span>`;
@@ -2281,13 +2285,11 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
   } else if (queued) {
     trail = `<span class="line-state">Queued</span>`;
   } else if (clip) {
-    const redoLock = clipQueue ? "Wait for the current line" : clipGenerateLockTitle(voice);
     trail = `
       <span class="line-actions">
         <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play">
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>
         </button>
-        <button class="small-button" type="button" data-action="generate-clip" data-phrase-id="${attr(phrase.id)}" ${redoLock ? "disabled" : ""} title="${attr(redoLock || "Make this line again")}">Redo</button>
       </span>
     `;
   } else {
@@ -2320,23 +2322,7 @@ function formatQueueTime(totalSeconds: number): string {
 
 function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: PhraseDefinition[]): string {
   const speaks = voiceTone(voice);
-  const custom = isCustomTone(viewed);
-  if (clipsEditing) {
-    const guard = custom && canEditPhrases();
-    const title = custom ? "" : "Built-in tones keep their name and stay";
-    const actions = toneDeleteArmed
-      ? `<span class="clips-hint">Delete ${escapeHtml(toneLabel(viewed))} and its ${phrases.length} ${phrases.length === 1 ? "line" : "lines"}?</span>
-         <button class="small-button is-danger" type="button" data-action="delete-tone">Delete</button>
-         <button class="small-button" type="button" data-action="cancel-delete-tone">Cancel</button>`
-      : `<button class="small-button" type="button" data-action="rename-tone" ${guard ? "" : "disabled"} title="${attr(title)}">Rename tone</button>
-         <button class="small-button is-danger" type="button" data-action="arm-delete-tone" ${guard ? "" : "disabled"} title="${attr(title)}">Delete tone</button>`;
-    return `
-      <div class="clips-foot">
-        <div class="clips-foot-actions">${actions}</div>
-        <span class="clips-hint">A changed line keeps its old clip until a new one is made.</span>
-      </div>
-    `;
-  }
+  const addLine = `<button class="small-button" type="button" data-action="add-line" data-tone="${attr(viewed)}" ${canEditPhrases() ? "" : "disabled"}>+ Add line</button>`;
   const job = clipQueue && clipQueue.voiceId === voice.id ? clipQueue : null;
   if (job && job.phase === "working") {
     const total = job.phraseIds.length;
@@ -2352,38 +2338,156 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
     ? ""
     : `<button class="small-button" type="button" data-action="use-tone" data-tone="${attr(viewed)}" ${voice.profile && voiceBusy === null ? "" : "disabled"}>Use this tone</button>`;
   if (phrases.length === 0) {
-    return `<div class="clips-foot"><span class="clips-hint">Add a line to this tone under Edit lines.</span></div>`;
+    return `
+      <div class="clips-foot">
+        <div class="clips-foot-actions">${addLine}${useTone}</div>
+        <span class="clips-hint">A tone needs at least one line before a voice can speak it.</span>
+      </div>
+    `;
   }
   const missing = phrases.filter((phrase) => !clipForPhrase(voice, phrase));
   if (missing.length === 0) {
     return `
       <div class="clips-foot">
-        <div class="clips-foot-actions"><span class="clips-hint is-ready">All ${phrases.length} lines ready.</span>${useTone}</div>
+        <div class="clips-foot-actions"><span class="clips-hint is-ready">All ${phrases.length} lines ready.</span>${useTone}${addLine}</div>
       </div>
     `;
   }
   const lock = clipGenerateLockTitle(voice);
   const tileBad = !modelInstalled() || ramGenerationLocked();
-  const hint = tileBad ? "Fix the red card above first." : lock || `About ${CLIP_SECONDS} s a clip. Sounds off? Redo that line alone.`;
+  const hint = tileBad ? "Fix the red card above first." : lock || `About ${CLIP_SECONDS} s a clip. Sounds off? Open the line and regenerate it alone.`;
   return `
     <div class="clips-foot">
       <div class="clips-foot-actions">
         <button class="primary small-button clips-generate" type="button" data-action="generate-missing" ${lock || clipQueue ? "disabled" : ""}>Generate ${missing.length} missing · ~${escapeHtml(formatQueueTime(missing.length * CLIP_SECONDS))}</button>
         ${useTone}
+        ${addLine}
       </div>
       <span class="clips-hint">${escapeHtml(hint)}</span>
     </div>
   `;
 }
 
-function renderToneRenameForm(): string {
+/** One popup per line: edit the words, move it, make its clip, or delete it. The primary button
+ * says what it will do, and one click does all of it. */
+function renderLinePopup(): string {
+  const editor = phraseEditor;
+  if (!editor) {
+    return "";
+  }
+  const voice = clipsVoice();
+  const existing = editor.phraseId ? effectivePhrases().find((item) => item.id === editor.phraseId) ?? null : null;
+  const clip = existing ? clipForPhrase(voice, existing) : null;
+  const text = editor.text.trim();
+  const changed = existing ? text !== existing.text : text.length > 0;
+  const lock = clipQueue ? "Wait for the current line to finish" : clipGenerateLockTitle(voice);
+  const primary = !existing ? "Add and generate" : changed ? "Save and regenerate" : clip ? "Regenerate" : "Generate";
+  const primaryDisabled = Boolean(lock) || !text || voiceBusy !== null;
+  const status = clip
+    ? `<span class="line-clip-status is-ready">Clip ready</span>
+       <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play">
+         <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>
+       </button>`
+    : `<span class="line-clip-status">No clip yet</span>`;
   return `
-    <form class="tone-rename" id="tone-rename">
-      <input id="tone-rename-input" maxlength="80" value="${attr(toneRename?.value ?? "")}" aria-label="Tone name" autocomplete="off" />
-      <button class="primary small-button" type="submit">Save</button>
-      <button class="small-button" type="button" data-action="cancel-rename-tone">Cancel</button>
-    </form>
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel voice-popup line-popup" role="dialog" aria-modal="true" aria-labelledby="line-popup-title">
+        <div class="voice-info-head">
+          <div>
+            <p class="eyebrow">${escapeHtml(voice.name)}</p>
+            <h2 id="line-popup-title">${existing ? "Line" : "New line"}</h2>
+          </div>
+          <button class="small-button" type="button" data-action="cancel-phrase-editor">Close</button>
+        </div>
+        <form class="phrase-editor" id="phrase-editor">
+          <label>
+            <span>Line</span>
+            <input id="phrase-editor-text" name="text" maxlength="140" value="${attr(editor.text)}" placeholder="Back to the task." autocomplete="off" />
+          </label>
+          <label>
+            <span>Tone</span>
+            <select id="phrase-editor-tone" name="tone">${phraseToneOptions(editor.tone)}</select>
+          </label>
+          <div class="line-clip-row">${status}</div>
+          <div class="modal-actions line-popup-actions">
+            ${existing ? `<button class="danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(existing.id)}" ${canEditPhrases() ? "" : "disabled"}>Delete line</button>` : ""}
+            ${changed || !existing ? `<button type="button" data-action="save-line" ${text && canEditPhrases() ? "" : "disabled"}>${existing ? "Save only" : "Add only"}</button>` : ""}
+            <button class="primary" type="submit" ${primaryDisabled ? "disabled" : ""} title="${attr(lock)}">${primary}</button>
+          </div>
+        </form>
+        <p class="quiet">${escapeHtml(lock ? lock : `About ${CLIP_SECONDS} seconds. A changed line keeps its old clip until a new one is made.`)}</p>
+      </section>
+    </div>
   `;
+}
+
+/** Every tone in one place: rename or delete your own, add a new one. Built-in tones stay. */
+function renderTonesModal(): string {
+  const voice = clipsVoice();
+  const rows = phraseToneOrder()
+    .map((tone) => {
+      const count = tonePhrases(tone).length;
+      const lines = count === 1 ? "1 line" : `${count} lines`;
+      let tools: string;
+      if (!isCustomTone(tone)) {
+        tools = `<span class="tone-manage-note">Built in</span>`;
+      } else if (toneRename && sameTone(toneRename.from, tone)) {
+        tools = `
+          <form class="tone-rename" id="tone-rename">
+            <input id="tone-rename-input" maxlength="80" value="${attr(toneRename.value)}" aria-label="Tone name" autocomplete="off" />
+            <button class="primary small-button" type="submit">Save</button>
+            <button class="small-button" type="button" data-action="cancel-rename-tone">Cancel</button>
+          </form>`;
+      } else if (toneDeleteArmed && sameTone(toneDeleteArmed, tone)) {
+        tools = `
+          <span class="tone-manage-note">Delete ${escapeHtml(toneLabel(tone))} and its ${lines}?</span>
+          <button class="small-button is-danger" type="button" data-action="delete-tone" data-tone="${attr(tone)}">Delete</button>
+          <button class="small-button" type="button" data-action="cancel-delete-tone">Cancel</button>`;
+      } else {
+        tools = `
+          <button class="small-button" type="button" data-action="rename-tone" data-tone="${attr(tone)}" ${canEditPhrases() ? "" : "disabled"}>Rename</button>
+          <button class="small-button is-danger" type="button" data-action="arm-delete-tone" data-tone="${attr(tone)}" ${canEditPhrases() ? "" : "disabled"}>Delete</button>`;
+      }
+      const speaks = sameTone(tone, voiceTone(voice)) ? `<span class="tone-speaks">${escapeHtml(voice.name)} speaks</span>` : "";
+      return `
+        <div class="tone-manage-row">
+          <div class="tone-manage-name"><strong>${escapeHtml(toneLabel(tone))}</strong>${speaks}<span class="tone-count">${lines}</span></div>
+          <div class="tone-manage-tools">${tools}</div>
+        </div>
+      `;
+    })
+    .join("");
+  const adder =
+    newToneDraft === null
+      ? `<button class="small-button" type="button" data-action="new-tone" ${canEditPhrases() ? "" : "disabled"}>+ New tone</button>`
+      : `<form class="tone-rename" id="new-tone">
+          <input id="new-tone-input" maxlength="80" value="${attr(newToneDraft)}" placeholder="Coach, dry humor, drill sergeant…" aria-label="New tone name" autocomplete="off" />
+          <button class="primary small-button" type="submit">Create</button>
+          <button class="small-button" type="button" data-action="cancel-new-tone">Cancel</button>
+        </form>`;
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel voice-popup tones-popup" role="dialog" aria-modal="true" aria-labelledby="tones-title">
+        <div class="voice-info-head">
+          <div>
+            <p class="eyebrow">Clips</p>
+            <h2 id="tones-title">Tones</h2>
+          </div>
+          <button class="small-button" type="button" data-action="close-tones">Close</button>
+        </div>
+        <p>A tone is a set of lines. A voice speaks one tone in sessions; renaming a tone follows it everywhere, deleting one removes its lines.</p>
+        <div class="tone-manage-list">${rows}</div>
+        <div class="modal-actions">${adder}</div>
+      </section>
+    </div>
+  `;
+}
+
+function closeTonesPopup(): void {
+  tonesOpen = false;
+  toneRename = null;
+  toneDeleteArmed = null;
+  newToneDraft = null;
 }
 
 function renderVoiceHelpModal(): string {
@@ -2507,34 +2611,6 @@ function paintVoiceRam(): void {
   });
 }
 
-function renderPhraseEditor(): string {
-  const editor = phraseEditor;
-  if (!editor) {
-    return "";
-  }
-  return `
-    <form class="phrase-editor" id="phrase-editor">
-      <label>
-        <span>Set</span>
-        <select id="phrase-editor-tone" name="tone">${phraseToneOptions(editor.tone === NEW_SET ? "gentle" : editor.tone)}<option value="${NEW_SET}" ${editor.tone === NEW_SET ? "selected" : ""}>New set…</option></select>
-      </label>
-      <label>
-        <span>Phrase</span>
-        <input id="phrase-editor-text" name="text" maxlength="140" value="${attr(editor.text)}" placeholder="Back to the task." />
-      </label>
-      <div class="rule-editor-actions">
-        <button class="primary" type="submit">Save</button>
-        ${editor.phraseId ? `<button class="danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(editor.phraseId)}">Delete</button>` : ""}
-        <button type="button" data-action="cancel-phrase-editor">Cancel</button>
-      </div>
-      <label class="phrase-new-set" ${editor.tone === NEW_SET ? "" : "hidden"}>
-        <span>New set name</span>
-        <input name="newSet" maxlength="80" placeholder="Coach, dry humor, drill sergeant..." />
-      </label>
-    </form>
-  `;
-}
-
 function renderVoiceDialogs(): string {
   if (appView !== "main") {
     return "";
@@ -2549,6 +2625,8 @@ function renderVoiceDialogs(): string {
     ${showVoiceDialog && modelInfoOpen && !modelDeleteOpen && !voiceBusy ? renderModelInfoModal() : ""}
     ${showVoiceDialog && memoryInfoOpen && !voiceBusy ? renderMemoryInfoModal() : ""}
     ${showVoiceDialog && voiceHelpOpen ? renderVoiceHelpModal() : ""}
+    ${showVoiceDialog && phraseEditor && !voiceDeleteTargetId ? renderLinePopup() : ""}
+    ${showVoiceDialog && tonesOpen && !phraseEditor ? renderTonesModal() : ""}
     ${voiceBusy && !clipQueue ? renderVoiceBusyModal() : ""}
   `;
 }
@@ -4355,9 +4433,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "pick-tone") {
     clearFailedQueue();
     clipsTone = source?.dataset.tone ?? null;
-    toneRename = null;
-    toneDeleteArmed = false;
-    phraseEditor = null;
     paintTonePick();
     return;
   }
@@ -4385,32 +4460,43 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "toggle-edit-lines") {
-    clearFailedQueue();
-    clipsEditing = !clipsEditing;
-    phraseEditor = null;
-    toneRename = null;
-    toneDeleteArmed = false;
-    paintClipsPanel();
+  if (action === "open-tones" || action === "close-tones") {
+    closeTonesPopup();
+    tonesOpen = action === "open-tones";
+    render();
     return;
   }
 
-  if (action === "new-tone") {
-    openPhraseEditor(null, NEW_SET);
+  if (action === "new-tone" || action === "cancel-new-tone") {
+    newToneDraft = action === "new-tone" ? "" : null;
+    toneRename = null;
+    toneDeleteArmed = null;
+    render();
+    if (action === "new-tone") {
+      document.getElementById("new-tone-input")?.focus();
+    }
     return;
   }
 
   if (action === "add-line") {
-    openPhraseEditor(null, source?.dataset.tone || viewedTone(clipsVoice()));
+    if (canEditPhrases()) {
+      openPhraseEditor(null, source?.dataset.tone || viewedTone(clipsVoice()));
+    }
+    return;
+  }
+
+  if (action === "save-line") {
+    await saveLine(false);
     return;
   }
 
   if (action === "rename-tone") {
-    const tone = viewedTone(clipsVoice());
+    const tone = source?.dataset.tone ?? "";
     if (isCustomTone(tone)) {
       toneRename = { from: tone, value: tone };
-      toneDeleteArmed = false;
-      paintClipsPanel();
+      toneDeleteArmed = null;
+      newToneDraft = null;
+      render();
       (document.getElementById("tone-rename-input") as HTMLInputElement | null)?.select();
     }
     return;
@@ -4418,19 +4504,21 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "cancel-rename-tone") {
     toneRename = null;
-    paintClipsPanel();
+    render();
     return;
   }
 
   if (action === "arm-delete-tone" || action === "cancel-delete-tone") {
-    toneDeleteArmed = action === "arm-delete-tone" && isCustomTone(viewedTone(clipsVoice()));
+    const tone = source?.dataset.tone ?? "";
+    toneDeleteArmed = action === "arm-delete-tone" && isCustomTone(tone) ? tone : null;
     toneRename = null;
-    paintClipsPanel();
+    newToneDraft = null;
+    render();
     return;
   }
 
   if (action === "delete-tone") {
-    await deleteTone(viewedTone(clipsVoice()));
+    await deleteTone(source?.dataset.tone ?? "");
     return;
   }
 
@@ -4502,7 +4590,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "open-phrase-editor") {
     if (canEditPhrases()) {
       dismissVoiceInfo();
-      openPhraseEditor(source?.dataset.phraseId || null, source?.dataset.newSet ? NEW_SET : "gentle");
+      openPhraseEditor(source?.dataset.phraseId || null, viewedTone(clipsVoice()));
     }
     return;
   }
@@ -4834,65 +4922,76 @@ function restoreLibrary(backup: ReturnType<typeof libraryBackup>): void {
   ({ customPhrases, customPhraseSets, phraseOverrides, hiddenPhrases } = backup);
 }
 
-async function savePhraseForm(form: HTMLFormElement): Promise<void> {
+/** Saves the Line popup. With `regenerate`, the line's clip is made right after, in the queue.
+ * Saving never waits on the model: a changed line keeps its old clip until a new one exists. */
+async function saveLine(regenerate: boolean): Promise<void> {
   const editor = phraseEditor;
   if (!editor || !canEditPhrases()) {
     return;
   }
-  const text = formValue(form, "text").trim();
-  let tone = formValue(form, "tone") as VoiceTone;
-  if (tone === NEW_SET) {
-    const name = formValue(form, "newSet").trim().slice(0, 80);
-    if (!name) {
-      showFeedback("Name the new set");
-      return;
-    }
-    tone = phraseToneOrder().find((item) => item.toLowerCase() === name.toLowerCase()) ?? name;
-  }
+  const text = editor.text.trim();
+  const tone = phraseToneOrder().find((item) => sameTone(item, editor.tone)) ?? editor.tone;
   if (!text) {
-    showFeedback("Phrase needs text");
+    showFeedback("The line needs words");
     return;
   }
   const existing = editor.phraseId ? effectivePhrases().find((item) => item.id === editor.phraseId) : null;
-  const voice = clipsVoice();
-  // A clip says the old words, so new words need a new clip. A move between sets keeps it.
-  const reword = Boolean(existing && existing.text !== text && clipForPhrase(voice, existing));
-  if (reword && !canGenerateClip(voice)) {
-    showFeedback(`${clipGenerateLockTitle(voice)} Moving it to another set still works.`);
-    return;
-  }
-
   const backup = libraryBackup();
-  if (!phraseToneOrder().some((item) => item.toLowerCase() === tone.toLowerCase())) {
+  if (!phraseToneOrder().some((item) => sameTone(item, tone))) {
     customPhraseSets.push(tone);
   }
+  let id: string;
   if (existing) {
+    id = existing.id;
     const index = customPhrases.findIndex((phrase) => phrase.id === existing.id);
     if (index >= 0) {
-      customPhrases[index] = { id: existing.id, tone, text };
+      customPhrases[index] = { id, tone, text };
     } else {
-      phraseOverrides[existing.id] = { id: existing.id, tone, text };
+      phraseOverrides[id] = { id, tone, text };
     }
   } else {
-    customPhrases.push({ id: uniqueCustomPhraseId(text), tone, text });
+    id = uniqueCustomPhraseId(text);
+    customPhrases.push({ id, tone, text });
   }
   if (!(await persistPhraseLibrary())) {
     restoreLibrary(backup);
     render();
     return;
   }
-
   clipsTone = tone;
   phraseEditor = null;
   render();
-  if (reword && existing) {
-    if (!(await runClipQueue([existing.id]))) {
-      showFeedback("Phrase saved");
+  if (regenerate) {
+    if (!(await runClipQueue([id]))) {
+      showFeedback(existing ? "Line saved" : "Line added");
     }
     return;
   }
-  const moved = existing && existing.text === text && existing.tone.toLowerCase() !== tone.toLowerCase();
-  showFeedback(moved ? `Moved to ${toneLabel(tone)}` : existing ? "Phrase saved" : "Phrase added");
+  const moved = existing && existing.text === text && !sameTone(existing.tone, tone);
+  showFeedback(moved ? `Moved to ${toneLabel(tone)}` : existing ? "Line saved" : "Line added");
+}
+
+/** A new, empty tone. Its first line comes next, through the Line popup. */
+async function createTone(): Promise<void> {
+  const name = (newToneDraft ?? "").trim().slice(0, 80);
+  if (!name) {
+    showFeedback("Name the tone");
+    return;
+  }
+  if (phraseToneOrder().some((tone) => sameTone(tone, name))) {
+    showFeedback(`There is already a ${toneLabel(name)} tone`);
+    return;
+  }
+  const backup = libraryBackup();
+  customPhraseSets.push(name);
+  if (!(await persistPhraseLibrary())) {
+    restoreLibrary(backup);
+    render();
+    return;
+  }
+  closeTonesPopup();
+  clipsTone = name;
+  openPhraseEditor(null, name);
 }
 
 /** Custom phrases go; bundled ones are hidden, so they stay deletable without a clip cleanup. */
@@ -4911,7 +5010,7 @@ async function deletePhrase(phraseId: string): Promise<void> {
   }
   phraseEditor = null;
   render();
-  showFeedback("Phrase deleted");
+  showFeedback("Line deleted");
 }
 
 async function persistPhraseLibrary(): Promise<boolean> {
@@ -5436,7 +5535,7 @@ async function renameTone(): Promise<void> {
 
 /** Removes a custom tone and its lines. Voices that spoke it fall back to the first tone. */
 async function deleteTone(tone: VoiceTone): Promise<void> {
-  toneDeleteArmed = false;
+  toneDeleteArmed = null;
   if (!isCustomTone(tone) || !canEditPhrases()) {
     render();
     return;
@@ -6574,7 +6673,7 @@ function ensureSelectedVoice(): void {
   }
 }
 
-function openPhraseEditor(phraseId: string | null, tone = "gentle"): void {
+function openPhraseEditor(phraseId: string | null, tone: VoiceTone): void {
   const phrase = phraseId ? effectivePhrases().find((item) => item.id === phraseId) : null;
   phraseEditor = {
     phraseId,
