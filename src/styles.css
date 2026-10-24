@@ -1452,15 +1452,14 @@ dt {
 }
 
 .default-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  gap: 2px 18px;
+  justify-content: space-between;
+  gap: 18px;
 }
 
-.default-control > .field-help {
-  grid-column: 1 / -1;
-  margin-top: 0;
+.defaults-help {
+  margin-top: 12px;
 }
 
 .default-control > strong {

@@ -1698,7 +1698,6 @@ function renderSettings(): string {
             <select id="default-strictness">
               ${strictnessOptions(settings.default_strictness)}
             </select>
-            <small class="field-help">${STRICTNESS_HELP}</small>
           </label>
           <label class="default-control">
             <strong>Show session timer</strong>
@@ -1708,6 +1707,7 @@ function renderSettings(): string {
             </span>
           </label>
         </div>
+        <small class="field-help defaults-help">Strictness is ${STRICTNESS_HELP.charAt(0).toLowerCase()}${STRICTNESS_HELP.slice(1)}</small>
       </section>
 
       <div class="settings-feature-grid">
