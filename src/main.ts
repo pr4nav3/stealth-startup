@@ -1164,7 +1164,7 @@ function render(): void {
           <h1>Supervisor</h1>
         </div>
         <div class="topbar-status">
-          <div class="status-chip" aria-label="Session status">${escapeHtml(current ? statusChip(current) : "READY")}</div>
+          <button class="status-chip" type="button" data-tab="session" aria-label="${current ? "Session status" : "Today's focused time; opens the Session tab"}">${escapeHtml(current ? statusChip(current) : todayChip())}</button>
           <button class="theme-toggle" type="button" data-action="toggle-theme">${theme === "dark" ? "Dark" : "Light"}</button>
         </div>
       </header>
@@ -6114,6 +6114,12 @@ function permissionNotice(current: CurrentSession | null): string {
     return `<section class="notice">Screen Recording permission is missing. Supervisor will fall back to app-name rules until macOS exposes window titles.</section>`;
   }
   return "";
+}
+
+/** "TODAY · 1H 12M", or a nudge to start when nothing has been done yet. */
+function todayChip(): string {
+  const seconds = dayFocusMap().get(dayKey(new Date())) ?? 0;
+  return seconds > 0 ? `Today · ${formatHours(seconds)}` : "Today · nothing yet";
 }
 
 function statusChip(current: CurrentSession | null): string {

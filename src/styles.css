@@ -964,9 +964,12 @@ h1 {
   padding: 0 12px;
   background: var(--sv-panel);
   box-shadow: var(--shadow-control);
+  color: var(--ink);
   font-family: var(--font-mono);
   font-size: var(--sv-type-1);
+  font-weight: 500;
   letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .tabs button,
