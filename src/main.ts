@@ -588,6 +588,8 @@ let historySearchTimer: number | null = null;
 let historySearchRequest = 0;
 /** The week (and data state) whose charts already played their entrance. */
 let historyChartsFor = "";
+/** Arriving on History opens a short window in which its charts rise, even across the data refresh. */
+let historyAnimateUntil = 0;
 /** The week picker under the toolbar: open, the month it shows (its first day), and that
  * month's days with sessions. */
 let weekPickerOpen = false;
@@ -1228,7 +1230,7 @@ function renderSession(current: CurrentSession | null): string {
         ${renderStartAction()}
       </section>
       ${onboardingOpen && onboardingVisible() ? renderOnboardingModal() : ""}
-      ${preflightOpen ? renderPreflightModal() : ""}
+      <div id="preflight-layer">${preflightOpen ? renderPreflightModal() : ""}</div>
     `;
   }
 
@@ -2999,9 +3001,14 @@ function renderHistory(): string {
   const sessions = historyWeek?.sessions ?? [];
   const recap = weekRecap && weekRecap.start === weekStart ? weekRecap : null;
   const searching = historySearch.trim().length > 0;
-  const chartsKey = `${weekStart}:${recap ? 1 : 0}:${trends.weeks.length}`;
-  const animate = historyChartsFor !== chartsKey;
-  historyChartsFor = chartsKey;
+  // Both charts rise together on the first draw that has the week's data, and on arriving at the
+  // tab. The refresh that lands a moment after arrival redraws inside the window, so it restarts
+  // the rise a few ms in rather than cutting it short; a pane switch or a poll later leaves the
+  // bars standing.
+  const animate = recap !== null && (historyChartsFor !== weekStart || performance.now() < historyAnimateUntil);
+  if (recap) {
+    historyChartsFor = weekStart;
+  }
   const emptyWeek = historyWeek?.oldest_day
     ? "No sessions this week."
     : "Stop a session and the local report lands here. Nothing leaves this machine.";
@@ -3948,13 +3955,12 @@ function bindEvents(): void {
         ruleEditor = null;
       }
       if (activeTab === "history") {
-        historyChartsFor = "";
+        historyAnimateUntil = performance.now() + 500;
       }
       closeWeekPicker();
       render();
       if (activeTab === "history") {
-        void refreshTrends();
-        void refreshHistoryWeek();
+        void refreshTrends(false).then(() => refreshHistoryWeek());
       }
       if (leavingWebcam) {
         void stopWebcamPreview();
@@ -4058,38 +4064,8 @@ function bindEvents(): void {
     void invokeSnapshot(mute ? "snooze_session" : "resume_session");
   });
 
-  bindDraftField("preflight-goal", "goal");
-
-  document.querySelectorAll<HTMLDetailsElement>("[data-preflight-section]").forEach((details) => {
-    details.addEventListener("toggle", () => {
-      if (details.dataset.preflightSection === "blocks") {
-        preflightBlocksOpen = details.open;
-      } else {
-        preflightAdvancedOpen = details.open;
-      }
-    });
-  });
-
+  bindPreflight(document);
   bindClipsControls(document);
-
-  document.getElementById("preflight-duration")?.addEventListener("input", (event) => {
-    const slider = event.target as HTMLInputElement;
-    draft.duration_minutes = Number(slider.value || 25);
-    slider.style.setProperty("--range-progress", `${((draft.duration_minutes - 15) / 75) * 100}%`);
-    const output = document.getElementById("preflight-duration-output");
-    if (output) {
-      output.textContent = `${draft.duration_minutes} min`;
-    }
-  });
-
-  document.getElementById("preflight-strictness")?.addEventListener("change", (event) => {
-    draft.strictness = (event.target as HTMLSelectElement).value as Strictness;
-  });
-
-  document.getElementById("preflight-voice")?.addEventListener("change", (event) => {
-    draft.voiceId = (event.target as HTMLSelectElement).value;
-    void updateSelectedVoice(draft.voiceId);
-  });
 
   document.getElementById("default-strictness")?.addEventListener("change", (event) => {
     void updateDefaultStrictness((event.target as HTMLSelectElement).value as Strictness);
@@ -4121,10 +4097,67 @@ function bindEvents(): void {
   bindVoiceWaveforms();
 }
 
-function bindDraftField(id: string, key: "goal"): void {
-  document.getElementById(id)?.addEventListener("input", (event) => {
-    draft[key] = (event.target as HTMLTextAreaElement).value;
+/** The preflight's own controls, inside `root`: the whole document after a rebuild, or just the layer. */
+function bindPreflight(root: ParentNode): void {
+  root.querySelector<HTMLTextAreaElement>("#preflight-goal")?.addEventListener("input", (event) => {
+    draft.goal = (event.target as HTMLTextAreaElement).value;
   });
+
+  root.querySelectorAll<HTMLDetailsElement>("[data-preflight-section]").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      if (details.dataset.preflightSection === "blocks") {
+        preflightBlocksOpen = details.open;
+      } else {
+        preflightAdvancedOpen = details.open;
+      }
+    });
+  });
+
+  root.querySelector<HTMLInputElement>("#preflight-duration")?.addEventListener("input", (event) => {
+    const slider = event.target as HTMLInputElement;
+    draft.duration_minutes = Number(slider.value || 25);
+    slider.style.setProperty("--range-progress", `${((draft.duration_minutes - 15) / 75) * 100}%`);
+    const output = root.querySelector("#preflight-duration-output");
+    if (output) {
+      output.textContent = `${draft.duration_minutes} min`;
+    }
+  });
+
+  root.querySelector<HTMLSelectElement>("#preflight-strictness")?.addEventListener("change", (event) => {
+    draft.strictness = (event.target as HTMLSelectElement).value as Strictness;
+  });
+
+  root.querySelector<HTMLSelectElement>("#preflight-voice")?.addEventListener("change", (event) => {
+    draft.voiceId = (event.target as HTMLSelectElement).value;
+    void updateSelectedVoice(draft.voiceId);
+  });
+}
+
+/**
+ * Opening or closing the preflight repaints only its layer. Home underneath keeps its calendar,
+ * quote and scroll position instead of being rebuilt behind the modal.
+ */
+function paintPreflightLayer(): void {
+  const layer = document.getElementById("preflight-layer");
+  if (!layer) {
+    render();
+    return;
+  }
+  layer.innerHTML = preflightOpen ? renderPreflightModal() : "";
+  layer.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runAction(button.dataset.action || "", button);
+    });
+  });
+  layer.querySelectorAll<HTMLButtonElement>("[data-rule-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void handleRuleAction(button);
+    });
+  });
+  bindPreflight(layer);
+  if (preflightOpen) {
+    layer.querySelector<HTMLTextAreaElement>("#preflight-goal")?.focus();
+  }
 }
 
 function releaseVoiceWorker(): void {
@@ -4253,15 +4286,14 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     preflightAdvancedOpen = false;
     preflightOpen = true;
     ruleEditor = null;
-    render();
+    paintPreflightLayer();
     return;
   }
 
   if (action === "close-preflight") {
     preflightOpen = false;
     ruleEditor = null;
-    animateCalendarSoon();
-    render();
+    paintPreflightLayer();
     return;
   }
 
