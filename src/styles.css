@@ -2446,6 +2446,38 @@ button.line-open:disabled {
   color: var(--sv-muted);
 }
 
+/* The whole row is the way in: it lifts to white-soft with an ink border, and its words underline. */
+.line-row.is-openable {
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.line-row.is-openable:hover,
+.line-row.is-openable:has(button.line-open:focus-visible) {
+  border-color: var(--ink);
+  background: var(--white-soft);
+}
+
+.line-row.is-openable:hover button.line-open,
+.line-row.is-openable:has(button.line-open:focus-visible) button.line-open {
+  text-decoration-color: currentColor;
+  text-decoration-style: dotted;
+}
+
+.line-edit-hint {
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.line-row.is-openable:hover .line-edit-hint,
+.line-row.is-openable:has(button.line-open:focus-visible) .line-edit-hint {
+  color: var(--ink);
+}
+
 .line-row.is-busy button.line-open {
   color: inherit;
 }

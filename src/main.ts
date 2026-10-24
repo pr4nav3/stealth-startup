@@ -634,6 +634,8 @@ let toneDeleteArmed: VoiceTone | null = null;
 let newToneDraft: string | null = null;
 let clipQueue: ClipQueue | null = null;
 let clipQueueTicker: number | null = null;
+/** A one-line job started from the line popup reopens that line when its clip lands. */
+let reopenLineAfterQueue: string | null = null;
 let ignoreVoiceWorkerError = false;
 const clipAssetRevision = new Map<string, number>();
 let voiceHelpOpen = false;
@@ -1166,7 +1168,7 @@ function render(): void {
       ${activeTab === "session" ? renderSession(current) : ""}
       ${activeTab === "settings" ? renderSettings() : ""}
       ${activeTab === "history" ? renderHistory() : ""}
-      ${renderVoiceDialogs()}
+      <div id="voice-layer">${renderVoiceDialogs()}</div>
       ${renderHistoryConfirm()}
     </main>
   `;
@@ -2081,6 +2083,15 @@ function paintClipsPanel(): void {
 
 /** The voice select and the tone-rename form, inside `root`. */
 function bindClipsControls(root: ParentNode): void {
+  // A click anywhere on a row that is not on one of its buttons opens the line.
+  root.querySelectorAll<HTMLElement>(".line-row.is-openable").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      if ((event.target as Element).closest("button")) {
+        return;
+      }
+      row.querySelector<HTMLButtonElement>(".line-open")?.click();
+    });
+  });
   root.querySelector<HTMLSelectElement>("#voice-clips-voice")?.addEventListener("change", (event) => {
     const voiceId = (event.target as HTMLSelectElement).value;
     if (!availableVoices().some((item) => item.id === voiceId)) {
@@ -2148,6 +2159,23 @@ function paintLinePopupButtons(): void {
       void runAction(button.dataset.action || "", button);
     });
   });
+}
+
+/** A line or tones popup opening or closing repaints only the dialog layer; the page under it stays put. */
+function paintVoiceLayer(): void {
+  const layer = document.getElementById("voice-layer");
+  if (!layer) {
+    render();
+    return;
+  }
+  layer.innerHTML = renderVoiceDialogs();
+  layer.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runAction(button.dataset.action || "", button);
+    });
+  });
+  bindClipsControls(layer);
+  bindPhraseEditor(layer);
 }
 
 /** Model and memory, the two things that can stop a clip being made. Each tile opens its numbers. */
@@ -2275,27 +2303,30 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
   const busy = Boolean(job && position === job.index && job.phase === "working");
   const failed = Boolean(job && position === job.index && job.phase === "error");
   const queued = Boolean(job && position > job.index);
+  const openable = !busy && canEditPhrases();
   const dot = `<span class="line-dot ${clip ? "is-ready" : ""}" aria-hidden="true"></span>`;
-  const text = `<button class="line-open" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${busy ? "disabled" : ""} title="Edit, regenerate or delete this line">${escapeHtml(phrase.text)}</button>`;
+  const text = `<button class="line-open" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${openable ? "" : "disabled"} title="Edit, regenerate or delete this line">${escapeHtml(phrase.text)}</button>`;
+  const hint = openable ? `<span class="line-edit-hint" aria-hidden="true">Edit ›</span>` : "";
   let trail: string;
   if (busy) {
     trail = `<span class="line-state is-busy" data-clip-elapsed>${escapeHtml(clipElapsedText())}</span>`;
   } else if (failed) {
     trail = `<span class="line-actions"><span class="line-state is-bad" title="${attr(job?.error ?? "")}">Failed</span><button class="small-button" type="button" data-action="generate-clip" data-phrase-id="${attr(phrase.id)}">Retry</button></span>`;
   } else if (queued) {
-    trail = `<span class="line-state">Queued</span>`;
+    trail = `<span class="line-actions"><span class="line-state">Queued</span>${hint}</span>`;
   } else if (clip) {
     trail = `
       <span class="line-actions">
+        ${hint}
         <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play">
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>
         </button>
       </span>
     `;
   } else {
-    trail = `<span class="line-state">No clip</span>`;
+    trail = `<span class="line-actions"><span class="line-state">No clip</span>${hint}</span>`;
   }
-  return `<div class="line-row ${clip ? "" : "is-missing"} ${busy ? "is-busy" : ""}">${dot}${text}${trail}</div>`;
+  return `<div class="line-row ${clip ? "" : "is-missing"} ${busy ? "is-busy" : ""} ${openable ? "is-openable" : ""}">${dot}${text}${trail}</div>`;
 }
 
 function clipElapsedText(): string {
@@ -4463,7 +4494,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "open-tones" || action === "close-tones") {
     closeTonesPopup();
     tonesOpen = action === "open-tones";
-    render();
+    paintVoiceLayer();
     return;
   }
 
@@ -4471,7 +4502,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     newToneDraft = action === "new-tone" ? "" : null;
     toneRename = null;
     toneDeleteArmed = null;
-    render();
+    paintVoiceLayer();
     if (action === "new-tone") {
       document.getElementById("new-tone-input")?.focus();
     }
@@ -4496,7 +4527,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
       toneRename = { from: tone, value: tone };
       toneDeleteArmed = null;
       newToneDraft = null;
-      render();
+      paintVoiceLayer();
       (document.getElementById("tone-rename-input") as HTMLInputElement | null)?.select();
     }
     return;
@@ -4504,7 +4535,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "cancel-rename-tone") {
     toneRename = null;
-    render();
+    paintVoiceLayer();
     return;
   }
 
@@ -4513,7 +4544,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     toneDeleteArmed = action === "arm-delete-tone" && isCustomTone(tone) ? tone : null;
     toneRename = null;
     newToneDraft = null;
-    render();
+    paintVoiceLayer();
     return;
   }
 
@@ -4615,7 +4646,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "cancel-phrase-editor") {
     phraseEditor = null;
-    render();
+    paintVoiceLayer();
     return;
   }
 
@@ -4962,7 +4993,9 @@ async function saveLine(regenerate: boolean): Promise<void> {
   phraseEditor = null;
   render();
   if (regenerate) {
+    reopenLineAfterQueue = id;
     if (!(await runClipQueue([id]))) {
+      reopenLineAfterQueue = null;
       showFeedback(existing ? "Line saved" : "Line added");
     }
     return;
@@ -5464,6 +5497,16 @@ async function runClipQueue(phraseIds: string[]): Promise<boolean> {
           ? "Clip ready"
           : "Clips ready",
     );
+  }
+  const reopen = reopenLineAfterQueue;
+  reopenLineAfterQueue = null;
+  const done = finished && finished.phase === "working" && finished.index >= finished.phraseIds.length;
+  const onPage = appView === "main" && activeTab === "settings" && settingsView === "voice";
+  const phrase = reopen ? effectivePhrases().find((item) => item.id === reopen) : null;
+  if (done && onPage && phrase && !editorIsOpen() && clipForPhrase(clipsVoice(), phrase)) {
+    render();
+    openPhraseEditor(phrase.id, phrase.tone);
+    return true;
   }
   render();
   return true;
@@ -6680,7 +6723,8 @@ function openPhraseEditor(phraseId: string | null, tone: VoiceTone): void {
     tone: phrase?.tone ?? tone,
     text: phrase?.text ?? "",
   };
-  render();
+  paintVoiceLayer();
+  (document.getElementById("phrase-editor-text") as HTMLInputElement | null)?.focus();
 }
 
 function phraseToneOrder(): VoiceTone[] {
