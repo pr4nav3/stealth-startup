@@ -80,6 +80,29 @@ body.overlay-view {
   overflow: hidden;
 }
 
+/* Scrollbars in the app's own ink and cream: a flat track and a square thumb, both themes. */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--sv-panel-alt);
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid var(--sv-panel-alt);
+  background: var(--sv-ink);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  border-width: 2px;
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--sv-panel-alt);
+}
+
 button,
 input,
 select,
@@ -162,7 +185,7 @@ p {
   width: min(100%, 1120px);
   min-height: 100vh;
   margin: 0 auto;
-  padding: 24px;
+  padding: 14px 24px 24px;
 }
 
 .topbar {
@@ -993,6 +1016,10 @@ button[data-action="cancel-delete-voice"] {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.webcam-side .setting-row:last-child {
+  min-height: 46px;
+}
+
 .webcam-side .setting-row > span:first-child {
   font-family: var(--font-sans);
   font-size: var(--sv-type-2);
@@ -1425,10 +1452,15 @@ dt {
 }
 
 .default-control {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 18px;
+  gap: 2px 18px;
+}
+
+.default-control > .field-help {
+  grid-column: 1 / -1;
+  margin-top: 0;
 }
 
 .default-control > strong {
@@ -1753,10 +1785,19 @@ dt {
   text-transform: uppercase;
 }
 
-.phrase-editor input,
 .phrase-editor select {
   width: 100%;
   min-height: 40px;
+}
+
+.phrase-editor textarea {
+  width: 100%;
+  min-height: 92px;
+  padding: 10px 12px;
+  font-family: var(--font-sans);
+  font-size: var(--sv-type-2);
+  line-height: 1.35;
+  resize: none;
 }
 
 /* Two fields on one row: the site or app, and its name once a site is recognised. */
@@ -2244,10 +2285,6 @@ dt {
   font-weight: 650;
 }
 
-.small-button.is-danger {
-  border-color: var(--sv-coral);
-}
-
 .clips-grid {
   display: grid;
   grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
@@ -2629,12 +2666,14 @@ button.line-open:disabled {
   color: var(--ink);
 }
 
-.line-clip-row .voice-play {
-  width: 36px;
-  min-width: 36px;
-  height: 36px;
-  min-height: 36px;
-  padding: 0;
+.line-play {
+  gap: 8px;
+  min-height: 34px;
+}
+
+.line-play svg {
+  width: 10px;
+  height: 10px;
 }
 
 .line-popup-actions {
@@ -2821,7 +2860,6 @@ button.line-open:disabled {
   overflow-y: hidden;
   padding: 0;
   scroll-snap-type: x proximity;
-  scrollbar-color: var(--sv-ink) var(--sv-panel-alt);
 }
 
 .voice-card {

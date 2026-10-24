@@ -428,6 +428,8 @@ interface WebcamFrame {
   device?: string;
   provider?: string;
   error?: string | null;
+  /** False on a preview picture sent between detections; its labels are the last detection's. */
+  detected?: boolean;
 }
 
 interface VoiceRecordingSnapshot {
@@ -679,6 +681,8 @@ let webcamError = "";
 let webcamHitStreak = 0;
 let webcamAlarmAtMs = 0;
 let webcamPreviewStarted = false;
+/** Camera names in the order the worker opens them (empty where the OS gives none). */
+let webcamCameras: string[] = [];
 
 function getAppRoot(): HTMLDivElement {
   const element = document.querySelector<HTMLDivElement>("#app");
@@ -1787,9 +1791,7 @@ function renderWebcamSettings(): string {
             </label>
             <label class="setting-row">
               <span>Camera</span>
-              <select id="webcam-camera" aria-label="Camera">
-                ${[0, 1, 2, 3].map((index) => `<option value="${index}" ${settings.webcam_camera === index ? "selected" : ""}>Camera ${index}</option>`).join("")}
-              </select>
+              <select id="webcam-camera" aria-label="Camera">${cameraOptions()}</select>
             </label>
           </section>
           <section class="panel webcam-test-panel">
@@ -1801,6 +1803,29 @@ function renderWebcamSettings(): string {
       </section>
     </section>
   `;
+}
+
+/** Named cameras where the OS lists them; otherwise the first four indexes. The saved one always shows. */
+function cameraOptions(): string {
+  const names = webcamCameras.length ? [...webcamCameras] : [0, 1, 2, 3].map((index) => `Camera ${index}`);
+  while (names.length <= settings.webcam_camera) {
+    names.push(`Camera ${names.length}`);
+  }
+  return names
+    .map((name, index) => `<option value="${index}" ${settings.webcam_camera === index ? "selected" : ""}>${escapeHtml(name)}</option>`)
+    .join("");
+}
+
+async function refreshCameras(): Promise<void> {
+  try {
+    webcamCameras = await invoke<string[]>("list_cameras");
+  } catch {
+    webcamCameras = [];
+  }
+  const select = document.getElementById("webcam-camera");
+  if (select) {
+    select.innerHTML = cameraOptions();
+  }
 }
 
 function renderWebcamMetrics(frame: WebcamFrame | null): string {
@@ -2128,10 +2153,18 @@ function bindPhraseEditor(root: ParentNode): void {
     event.preventDefault();
     void saveLine(true);
   });
-  phraseForm?.querySelector<HTMLInputElement>('input[name="text"]')?.addEventListener("input", (event) => {
+  const text = phraseForm?.querySelector<HTMLTextAreaElement>('textarea[name="text"]');
+  text?.addEventListener("input", () => {
     if (phraseEditor) {
-      phraseEditor.text = (event.target as HTMLInputElement).value;
+      phraseEditor.text = text.value;
       paintLinePopupButtons();
+    }
+  });
+  // Enter submits, as the old single-line field did; a line is one sentence, never two rows.
+  text?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      phraseForm?.requestSubmit();
     }
   });
   phraseForm?.querySelector<HTMLSelectElement>('select[name="tone"]')?.addEventListener("change", (event) => {
@@ -2360,7 +2393,7 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
     const left = Math.max(1, total - job.index) * CLIP_SECONDS;
     return `
       <div class="clips-foot">
-        <button class="small-button is-danger" type="button" data-action="stop-clip-queue" ${job.stopAfter ? "disabled" : ""}>${job.stopAfter ? "Stopping after this line" : "Stop after this line"}</button>
+        <button class="small-button danger" type="button" data-action="stop-clip-queue" ${job.stopAfter ? "disabled" : ""}>${job.stopAfter ? "Stopping after this line" : "Stop after this line"}</button>
         <span class="clips-hint">${job.index} of ${total} done · about ${escapeHtml(formatQueueTime(left))} left</span>
       </div>
     `;
@@ -2416,8 +2449,8 @@ function renderLinePopup(): string {
   const primaryDisabled = Boolean(lock) || !text || voiceBusy !== null;
   const status = clip
     ? `<span class="line-clip-status is-ready">Clip ready</span>
-       <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play">
-         <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>
+       <button class="small-button line-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}">
+         <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>Play
        </button>`
     : `<span class="line-clip-status">No clip yet</span>`;
   return `
@@ -2433,7 +2466,7 @@ function renderLinePopup(): string {
         <form class="phrase-editor" id="phrase-editor">
           <label>
             <span>Line</span>
-            <input id="phrase-editor-text" name="text" maxlength="140" value="${attr(editor.text)}" placeholder="Back to the task." autocomplete="off" />
+            <textarea id="phrase-editor-text" name="text" rows="3" maxlength="140" placeholder="Back to the task." autocomplete="off">${escapeHtml(editor.text)}</textarea>
           </label>
           <label>
             <span>Tone</span>
@@ -2472,12 +2505,12 @@ function renderTonesModal(): string {
       } else if (toneDeleteArmed && sameTone(toneDeleteArmed, tone)) {
         tools = `
           <span class="tone-manage-note">Delete ${escapeHtml(toneLabel(tone))} and its ${lines}?</span>
-          <button class="small-button is-danger" type="button" data-action="delete-tone" data-tone="${attr(tone)}">Delete</button>
+          <button class="small-button danger" type="button" data-action="delete-tone" data-tone="${attr(tone)}">Delete</button>
           <button class="small-button" type="button" data-action="cancel-delete-tone">Cancel</button>`;
       } else {
         tools = `
           <button class="small-button" type="button" data-action="rename-tone" data-tone="${attr(tone)}" ${canEditPhrases() ? "" : "disabled"}>Rename</button>
-          <button class="small-button is-danger" type="button" data-action="arm-delete-tone" data-tone="${attr(tone)}" ${canEditPhrases() ? "" : "disabled"}>Delete</button>`;
+          <button class="small-button danger" type="button" data-action="arm-delete-tone" data-tone="${attr(tone)}" ${canEditPhrases() ? "" : "disabled"}>Delete</button>`;
       }
       const speaks = sameTone(tone, voiceTone(voice)) ? `<span class="tone-speaks">${escapeHtml(voice.name)} speaks</span>` : "";
       return `
@@ -2567,7 +2600,7 @@ function renderModelInfoModal(): string {
         </div>
         <p>${
           installed
-            ? "Loaded only while a clip is being made. Check for updates compares the installed files with the pack; nothing is downloaded unless a file is missing or damaged."
+            ? "Loaded only while a clip is being made. Check for updates downloads only what is missing from the pack."
             : `A one-time download of about ${escapeHtml(formatBytes(model?.required_bytes ?? 0))}. Saved clips play without it; making new ones needs it.`
         }</p>
         <div class="modal-actions">
@@ -2595,12 +2628,13 @@ function renderMemoryInfoModal(): string {
           </div>
           <button class="small-button" type="button" data-action="close-memory-info">Close</button>
         </div>
+        <p>Making a clip loads the voice model for about ${CLIP_SECONDS} seconds and needs:</p>
         <div class="voice-kv">
           <div><span>Needs free</span><strong>${escapeHtml(need ? formatBytes(need) : "—")}</strong></div>
           <div><span>Free now</span><strong class="${locked ? "is-bad" : ""}" data-ram-free>${escapeHtml(free === null ? "—" : formatBytes(free))}</strong></div>
           <div><span>In this machine</span><strong data-ram-machine>${escapeHtml(system?.total_ram_bytes ? formatBytes(system.total_ram_bytes) : "—")}</strong></div>
         </div>
-        <p data-ram-copy>${escapeHtml(ramLockCopy(locked, free, need, peak))}</p>
+        <p data-ram-copy>${escapeHtml(ramLockCopy(locked, peak))}</p>
         <p class="quiet">Clips you already have keep playing. They never need the model or this memory.</p>
         <div class="modal-actions">
           <button class="${locked ? "primary" : ""}" type="button" data-action="check-ram">Check again</button>
@@ -2610,13 +2644,11 @@ function renderMemoryInfoModal(): string {
   `;
 }
 
-function ramLockCopy(locked: boolean, free: number | null, need: number, peak: number | null): string {
+function ramLockCopy(locked: boolean, peak: number | null): string {
   if (locked) {
-    return `Making a clip loads the voice model for about ${CLIP_SECONDS} seconds and needs about ${need ? formatBytes(need) : "enough"} free; you have ${free === null ? "?" : formatBytes(free)}. Close other apps, then check again.`;
+    return "Close other apps, then check again.";
   }
-  return peak
-    ? `Making a clip loads the voice model for about ${CLIP_SECONDS} seconds, then frees it. The last one peaked at ${formatBytes(peak)}.`
-    : `Making a clip loads the voice model for about ${CLIP_SECONDS} seconds, then frees it.`;
+  return peak ? `Enough right now. The last clip peaked at ${formatBytes(peak)}; the memory is freed again after each clip.` : "Enough right now. The memory is freed again after each clip.";
 }
 
 /** The memory tile and popup follow the live numbers without a full render. */
@@ -2626,7 +2658,6 @@ function paintVoiceRam(): void {
   }
   const system = voiceBackend.system;
   const free = system.available_ram_bytes ?? null;
-  const need = system.min_free_ram_bytes ?? 0;
   const locked = ramGenerationLocked();
   const value = document.querySelector("[data-memory-value]");
   if (value) {
@@ -2634,7 +2665,7 @@ function paintVoiceRam(): void {
     value.closest("[data-memory-tile]")?.classList.toggle("is-bad", locked);
   }
   document.querySelectorAll("[data-ram-copy]").forEach((copy) => {
-    copy.textContent = ramLockCopy(locked, free, need, system.last_peak_ram_bytes ?? null);
+    copy.textContent = ramLockCopy(locked, system.last_peak_ram_bytes ?? null);
   });
   document.querySelectorAll("[data-ram-free]").forEach((node) => {
     node.textContent = free === null ? "—" : formatBytes(free);
@@ -2896,7 +2927,7 @@ function renderDownloadBusyModal(): string {
           ? "Cancelling download"
           : "Downloading model pack";
   const copy = upToDate
-    ? "The installed model and voice runtime are the latest. Nothing was downloaded."
+    ? "The installed model and voice runtime match the latest pack. Nothing was downloaded."
     : done
       ? "The voice model is installed. Saved clips play without keeping this window open."
       : checking
@@ -2919,7 +2950,7 @@ function renderDownloadBusyModal(): string {
   const note = done
     ? "You can close this and start cloning a voice."
     : checking
-      ? "Only a missing or damaged file gets fetched; matching files are kept as they are."
+      ? "Nothing is downloaded unless part of the pack is missing."
       : `This is a ${total > 0 ? formatBytes(total) : "large"} download and can take several minutes depending on your connection.`;
 
   return `
@@ -2929,14 +2960,20 @@ function renderDownloadBusyModal(): string {
         <h2>${escapeHtml(title)}</h2>
         <p>${escapeHtml(copy)}</p>
         ${
-          checking
-            ? `<div class="loading-bar" aria-label="Checking installed files"><span></span></div>`
-            : `<div class="loading-bar determinate" aria-label="Model download progress"><span style="width: ${percent}%"></span></div>`
+          upToDate
+            ? ""
+            : checking
+              ? `<div class="loading-bar" aria-label="Checking installed files"><span></span></div>`
+              : `<div class="loading-bar determinate" aria-label="Model download progress"><span style="width: ${percent}%"></span></div>`
         }
-        <div class="download-meta">
+        ${
+          upToDate
+            ? ""
+            : `<div class="download-meta">
           <span>${escapeHtml(progressText)}</span>
           <span>${escapeHtml(eta)}</span>
-        </div>
+        </div>`
+        }
         <p class="quiet busy-note">${escapeHtml(note)}</p>
         <div class="modal-actions">
           ${
@@ -4385,6 +4422,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     settingsView = "webcam";
     webcamError = "";
     render();
+    void refreshCameras();
     await startWebcamPreview();
     return;
   }
@@ -4960,7 +4998,7 @@ async function saveLine(regenerate: boolean): Promise<void> {
   if (!editor || !canEditPhrases()) {
     return;
   }
-  const text = editor.text.trim();
+  const text = editor.text.replace(/\s+/g, " ").trim();
   const tone = phraseToneOrder().find((item) => sameTone(item, editor.tone)) ?? editor.tone;
   if (!text) {
     showFeedback("The line needs words");
@@ -5851,10 +5889,8 @@ function applyWebcamFrame(frame: WebcamFrame): void {
   }
   webcamFrame = frame;
   const alerting = webcamWouldAlert(frame);
-  if (alerting) {
-    webcamHitStreak += 1;
-  } else {
-    webcamHitStreak = 0;
+  if (frame.detected !== false) {
+    webcamHitStreak = alerting ? webcamHitStreak + 1 : 0;
   }
   // During a session the session nudges, through the same voice and popup as everything else.
   if (webcamHitStreak >= 8 && !snapshot?.current) {
@@ -6532,11 +6568,12 @@ async function toggleVoicePreview(): Promise<void> {
 
 /** Mirrors `Strictness::focus_config` in the backend: the seconds a distraction may stay open
  * before Supervisor speaks up. */
-const STRICTNESS_HELP = "How long a distraction can stay open before a nudge: Gentle 90 s, Normal 60 s, Strict 30 s.";
+const STRICTNESS_HELP = "How long a distraction can stay open before a nudge.";
+const STRICTNESS_SECONDS: Record<Strictness, number> = { gentle: 90, normal: 60, strict: 30 };
 
 function strictnessOptions(selected: Strictness): string {
   return (["gentle", "normal", "strict"] as Strictness[])
-    .map((value) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label(value)}</option>`)
+    .map((value) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label(value)} · ${STRICTNESS_SECONDS[value]} s</option>`)
     .join("");
 }
 

@@ -14,8 +14,10 @@ const WORKER_EVENT: &str = "webcam-frame";
 /// Watch rate during a session. The worker jumps to its burst rate (5) from the first frame that
 /// looks like a phone, so with 3-of-5 smoothing a phone still shows up in about a second.
 const SESSION_FPS: &str = "2";
-/// The Settings preview is a picture the user watches; keep it smooth.
-const PREVIEW_FPS: &str = "4";
+/// The Settings preview detects at this rate (a phone still clears in about a second)…
+const PREVIEW_DETECT_FPS: &str = "4";
+/// …and sends pictures at this rate between detections, so the preview looks like video.
+const PREVIEW_FPS: &str = "15";
 /// A worker that was sending frames and then goes this long without one is stuck (frozen camera
 /// driver). Frames come at least twice a second, so this is never just a slow frame.
 const STALL_AFTER: Duration = Duration::from_secs(15);
@@ -55,6 +57,13 @@ pub struct WebcamFrame {
     pub provider: String,
     #[serde(default)]
     pub error: Option<String>,
+    /// False on a preview picture sent between detections: the labels are the last detection's.
+    #[serde(default = "yes")]
+    pub detected: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl WebcamFrame {
@@ -72,6 +81,7 @@ impl WebcamFrame {
             device: String::new(),
             provider: String::new(),
             error: Some(message.into()),
+            detected: true,
         }
     }
 }
@@ -242,11 +252,11 @@ fn spawn_worker(
 
     let mut command = worker_command(&app)?;
     if preview {
-        command.arg("--preview");
+        command.arg("--preview").arg("--preview-fps").arg(PREVIEW_FPS);
     }
     command
         .arg("--fps")
-        .arg(if preview { PREVIEW_FPS } else { SESSION_FPS })
+        .arg(if preview { PREVIEW_DETECT_FPS } else { SESSION_FPS })
         .arg("--device")
         .arg(if gpu { "gpu" } else { "cpu" })
         .arg("--camera")
@@ -290,6 +300,71 @@ fn spawn_worker(
     let gpu_failed = Arc::clone(&state.gpu_failed);
     std::thread::spawn(move || read_worker(app, stdout, stop, on_frame, failed_at, last_line_at, gpu_failed));
     Ok(())
+}
+
+/// Camera names in the order the worker opens them: OpenCV's Media Foundation backend numbers
+/// devices the way MFEnumDeviceSources lists them. Empty where the OS gives no list.
+#[cfg(windows)]
+pub fn camera_names() -> Vec<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Media::MediaFoundation::{
+        IMFActivate, MFCreateAttributes, MFEnumDeviceSources, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+    };
+    use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
+
+    // SAFETY: plain Media Foundation enumeration; every buffer it hands out is freed below.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut attributes = None;
+        if MFCreateAttributes(&mut attributes, 1).is_err() {
+            return Vec::new();
+        }
+        let Some(attributes) = attributes else {
+            return Vec::new();
+        };
+        if attributes
+            .SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        let mut devices: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count = 0u32;
+        if MFEnumDeviceSources(&attributes, &mut devices, &mut count).is_err() || devices.is_null() {
+            return Vec::new();
+        }
+        let names = std::slice::from_raw_parts(devices, count as usize)
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let mut name = PWSTR::null();
+                let mut length = 0u32;
+                let friendly = device.as_ref().and_then(|device| {
+                    device
+                        .GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut name, &mut length)
+                        .ok()
+                        .and_then(|_| name.to_string().ok())
+                });
+                if !name.is_null() {
+                    CoTaskMemFree(Some(name.0 as *const _));
+                }
+                friendly.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| format!("Camera {index}"))
+            })
+            .collect();
+        // Each IMFActivate is dropped by the slice iteration's clones going out of scope, but the
+        // array itself is ours to free.
+        for device in std::slice::from_raw_parts_mut(devices, count as usize) {
+            drop(device.take());
+        }
+        CoTaskMemFree(Some(devices as *const _));
+        names
+    }
+}
+
+#[cfg(not(windows))]
+pub fn camera_names() -> Vec<String> {
+    Vec::new()
 }
 
 pub fn stop_preview(state: &WebcamPreview) {

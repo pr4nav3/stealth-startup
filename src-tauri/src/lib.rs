@@ -453,6 +453,12 @@ fn start_webcam_preview(app: AppHandle, state: State<'_, AppState>) -> Result<()
     webcam::start_worker(app, &state.webcam, settings.webcam_gpu, settings.webcam_camera, true, on_webcam_frame)
 }
 
+/// Enumeration can take a moment on a slow driver, so it runs off the main thread.
+#[tauri::command(async)]
+fn list_cameras() -> Vec<String> {
+    webcam::camera_names()
+}
+
 /// A session that still wants the camera gets a worker without pictures back.
 #[tauri::command]
 fn stop_webcam_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
@@ -597,7 +603,8 @@ pub fn run() {
             set_voice_tone,
             delete_voice_clip,
             start_webcam_preview,
-            stop_webcam_preview
+            stop_webcam_preview,
+            list_cameras
         ])
         .build(tauri::generate_context!())
         .expect("failed to run Supervisor")

@@ -47,6 +47,9 @@ def parse_args() -> argparse.Namespace:
         "--burst-fps", type=float, default=5.0, help="rate from the first frame that looks like a phone until it clears"
     )
     parser.add_argument("--preview", action="store_true", help="include a jpeg in every line for the app")
+    parser.add_argument(
+        "--preview-fps", type=float, default=15.0, help="picture rate in preview mode; detection still runs at --fps"
+    )
     parser.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
     parser.add_argument("--self-test", action="store_true", help="load models, run one blank frame, exit")
     parser.add_argument("--face-score", type=float, default=0.55)
@@ -169,6 +172,11 @@ def main() -> int:
 
     last_size = None
     tracker_state = TrackerState.default()
+    # The preview sends pictures faster than it detects: between detections a frame goes out
+    # with the last labels and boxes, so the picture moves like video at the detection's cost.
+    labels = None
+    last_detect = 0.0
+    face, phones, persons = None, [], []
     try:
         while True:
             started = time.monotonic()
@@ -176,32 +184,36 @@ def main() -> int:
             if not ok:
                 return fail(args.device, "The camera stopped sending frames.")
 
-            detections = object_detector.detect(frame)
-            phones = [b for b in detections if b.class_id == CELL_PHONE_CLASS]
-            persons = [b for b in detections if b.class_id == PERSON_CLASS]
-            # Present means a face or a person. A person already answers it, so the face pass
-            # only runs when nobody was found, or for the Settings preview that draws it.
-            face = None
-            if args.preview or not persons:
-                face, last_size = detect_face(face_detector, frame, last_size)
-            labels = compose_frame(
-                tracker_state,
-                face_in_frame=face is not None,
-                person_in_frame=bool(persons),
-                phone_raw=bool(phones),
-                phone_count=len(phones),
-                phone_confidence=max((p.score for p in phones), default=0.0),
-            )
-            row = {"ts": time.time(), "device": args.device, "provider": provider, **labels}
+            # Watch slowly; check fast while any recent frame looked like a phone, so it is
+            # confirmed or cleared in about a second without paying the fast rate all session.
+            detect_fps = args.burst_fps if tracker_state.phone.recent_hit() else args.fps
+            detect = labels is None or started - last_detect >= 1.0 / detect_fps
+            if detect:
+                last_detect = started
+                detections = object_detector.detect(frame)
+                phones = [b for b in detections if b.class_id == CELL_PHONE_CLASS]
+                persons = [b for b in detections if b.class_id == PERSON_CLASS]
+                # Present means a face or a person. A person already answers it, so the face pass
+                # only runs when nobody was found, or for the Settings preview that draws it.
+                face = None
+                if args.preview or not persons:
+                    face, last_size = detect_face(face_detector, frame, last_size)
+                labels = compose_frame(
+                    tracker_state,
+                    face_in_frame=face is not None,
+                    person_in_frame=bool(persons),
+                    phone_raw=bool(phones),
+                    phone_count=len(phones),
+                    phone_confidence=max((p.score for p in phones), default=0.0),
+                )
+            row = {"ts": time.time(), "device": args.device, "provider": provider, "detected": detect, **labels}
             if args.preview:
                 draw_boxes(frame, face, phones, persons)
                 row["jpeg"] = encode_preview(frame)
             emit(row)
 
-            # Watch slowly; check fast while any recent frame looked like a phone, so it is
-            # confirmed or cleared in about a second without paying the fast rate all session.
-            fps = args.burst_fps if tracker_state.phone.recent_hit() else args.fps
-            leftover = 1.0 / fps - (time.monotonic() - started)
+            rate = args.preview_fps if args.preview else detect_fps
+            leftover = 1.0 / rate - (time.monotonic() - started)
             if leftover > 0:
                 time.sleep(leftover)
     except KeyboardInterrupt:
