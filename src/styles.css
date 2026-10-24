@@ -2112,14 +2112,9 @@ dt {
   margin-bottom: 14px;
 }
 
-/* Sized so Voices, the two tiles and Clips fit the 920×760 window without scrolling. */
 .voice-page {
   display: grid;
-  gap: 10px;
-}
-
-.voice-head h2 {
-  font-size: 1.2rem;
+  gap: 14px;
 }
 
 .voice-page .subpage-head {
@@ -2149,7 +2144,7 @@ dt {
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
-  padding: 5px 8px 5px 14px;
+  padding: 10px 12px 10px 16px;
   border: var(--border);
   border-radius: 6px;
   background: var(--panel);
@@ -2160,7 +2155,7 @@ dt {
 .voice-tile .eyebrow {
   margin: 0;
   color: var(--sv-muted);
-  font-size: 0.66rem;
+  font-size: var(--sv-type-4);
 }
 
 .voice-tile strong {
@@ -2183,8 +2178,8 @@ dt {
 }
 
 .voice-tile > button {
-  min-width: 30px;
-  min-height: 30px;
+  min-width: 40px;
+  min-height: 40px;
   padding: 0;
   background: var(--white-soft);
   font-family: var(--font-sans);
@@ -2208,7 +2203,7 @@ dt {
 
 /* Clips: whose, then the tones beside the viewed tone's lines, as two inner cards. */
 .phrase-panel {
-  gap: 10px;
+  gap: 12px;
 }
 
 .clips-strip {
@@ -2239,13 +2234,8 @@ dt {
 
 .clips-for select {
   width: auto;
-  min-width: 150px;
-  min-height: 32px;
+  min-width: 170px;
   font-weight: 650;
-}
-
-.clips-strip .small-button {
-  min-height: 30px;
 }
 
 .small-button.is-on {
@@ -2259,17 +2249,17 @@ dt {
 
 .clips-grid {
   display: grid;
-  grid-template-columns: minmax(200px, 230px) minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+  gap: 14px;
   align-items: stretch;
 }
 
 .clips-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
   min-height: 0;
-  padding: 8px 10px 10px;
+  padding: 12px;
   border: var(--border);
   border-radius: 6px;
   background: var(--white-soft);
@@ -2280,30 +2270,29 @@ dt {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
-  padding-bottom: 4px;
+  padding-bottom: 8px;
   border-bottom: 1.5px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
 }
 
 .clips-card-head .eyebrow {
   margin: 0;
-  color: var(--sv-muted);
-  font-size: 0.66rem;
 }
 
 .clips-card-head > span {
   color: var(--sv-muted);
   font-family: var(--font-mono);
-  font-size: 0.66rem;
+  font-size: var(--sv-type-4);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
+/* Eight tones show at once; past that the list scrolls inside its card. */
 .tone-list {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 4px;
-  max-height: 200px;
+  gap: 8px;
+  max-height: 392px;
   overflow: auto;
   padding-right: 2px;
 }
@@ -2313,8 +2302,8 @@ button.tone-row {
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 42px;
+  padding: 0 12px;
   border-radius: 6px;
   background: var(--panel);
   box-shadow: none;
@@ -2346,8 +2335,8 @@ button.tone-row.is-add {
 }
 
 .tone-dot {
-  width: 9px;
-  height: 9px;
+  width: 11px;
+  height: 11px;
   border: 1.5px solid var(--sv-border);
   border-radius: 50%;
   background: transparent;
@@ -2366,7 +2355,7 @@ button.tone-row.is-add {
 .tone-speaks,
 .tone-count {
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: var(--sv-type-4);
   font-weight: 500;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2383,7 +2372,7 @@ button.tone-row.is-on .tone-count {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
 }
 
 .line-list .empty {
@@ -2394,10 +2383,10 @@ button.tone-row.is-on .tone-count {
 .line-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 12px;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 42px;
+  padding: 0 12px;
   border: var(--border);
   border-radius: 6px;
   background: var(--panel);
@@ -2462,8 +2451,8 @@ button.line-row.is-add .line-dot {
 }
 
 .line-dot {
-  width: 9px;
-  height: 9px;
+  width: 11px;
+  height: 11px;
   border: 1.5px solid var(--sv-border);
   border-radius: 50%;
   background: transparent;
@@ -2479,7 +2468,7 @@ button.line-row.is-add .line-dot {
 
 .line-state {
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: var(--sv-type-4);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--sv-muted);
@@ -2497,28 +2486,25 @@ button.line-row.is-add .line-dot {
 .line-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
 .line-actions .small-button {
-  min-height: 24px;
-  padding: 0 8px;
-  box-shadow: none;
-  font-size: 0.62rem;
+  min-height: 34px;
+  padding: 0 12px;
 }
 
 .line-actions .voice-play {
-  width: 24px;
-  min-width: 24px;
-  height: 24px;
-  min-height: 24px;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
   padding: 0;
-  box-shadow: none;
 }
 
 .line-actions .voice-play svg {
-  width: 9px;
-  height: 9px;
+  width: 11px;
+  height: 11px;
 }
 
 .clips-foot {
@@ -2526,9 +2512,9 @@ button.line-row.is-add .line-dot {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 6px 12px;
+  gap: 8px 12px;
   margin-top: auto;
-  padding-top: 6px;
+  padding-top: 10px;
   border-top: 1.5px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
 }
 
@@ -2540,17 +2526,17 @@ button.line-row.is-add .line-dot {
 }
 
 .clips-foot .small-button {
-  min-height: 28px;
+  min-height: 36px;
 }
 
-.clips-generate {
-  min-height: 30px;
-  padding: 0 14px;
+.clips-foot .clips-generate {
+  min-height: 40px;
+  padding: 0 16px;
 }
 
 .clips-hint {
   color: var(--sv-muted);
-  font-size: var(--sv-type-4);
+  font-size: var(--sv-type-3);
 }
 
 .clips-hint.is-ready {
@@ -2568,12 +2554,12 @@ button.line-row.is-add .line-dot {
 .tone-rename input {
   flex: 1;
   min-width: 80px;
-  min-height: 30px;
-  padding: 0 8px;
+  min-height: 36px;
+  padding: 0 10px;
 }
 
 .tone-rename .small-button {
-  min-height: 30px;
+  min-height: 36px;
 }
 
 /* The three popups off this page share one shape. */
@@ -2651,7 +2637,7 @@ button.line-row.is-add .line-dot {
   }
 
   .tone-list {
-    max-height: 160px;
+    max-height: 240px;
   }
 }
 
@@ -2665,7 +2651,6 @@ button.line-row.is-add .line-dot {
   flex-direction: column;
   gap: 8px;
   grid-column: 1 / -1;
-  padding: 12px;
 }
 
 .voice-roster-panel {
@@ -2699,7 +2684,7 @@ button.line-row.is-add .line-dot {
   flex: 0 0 auto;
   width: 160px;
   min-width: 160px;
-  height: 120px;
+  height: 132px;
   flex-direction: column;
   gap: 8px;
   border: var(--border);
@@ -2728,8 +2713,8 @@ button.line-row.is-add .line-dot {
 
 .voice-card-wave {
   width: 88px;
-  height: 24px;
-  max-height: 24px;
+  height: 32px;
+  max-height: 32px;
 }
 
 .voice-card-mute {
