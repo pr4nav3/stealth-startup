@@ -17,11 +17,6 @@ use activity_normalize::idle_elapsed_seconds;
 #[cfg(not(target_os = "windows"))]
 use activity_normalize::normalize_title_text;
 
-/// Zero-width and bidi marks out of a name.
-pub fn strip_invisible(value: &str) -> String {
-    activity_normalize::strip_zero_width(value)
-}
-
 use serde::Serialize;
 use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
@@ -86,6 +81,7 @@ pub struct CapturePermissions {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionState {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Granted,
     #[cfg_attr(target_os = "windows", allow(dead_code))]
     Missing,
@@ -272,7 +268,7 @@ fn bundle_display_name(path: &std::path::Path) -> Option<String> {
     if !path.extension()?.to_str()?.eq_ignore_ascii_case("app") {
         return None;
     }
-    let name = strip_invisible(path.file_stem()?.to_str()?);
+    let name = activity_normalize::strip_zero_width(path.file_stem()?.to_str()?);
     Some(name.trim().to_string()).filter(|name| !name.is_empty())
 }
 

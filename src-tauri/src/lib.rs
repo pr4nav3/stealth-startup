@@ -921,7 +921,7 @@ fn automation_input(
     }
     #[allow(unreachable_code)]
     {
-        let _ = (key, cmd, ctrl, alt, x, y, hold_ms);
+        let _ = (kind, key, cmd, ctrl, alt, x, y, hold_ms);
         Err("only on macOS".to_string())
     }
 }
@@ -980,7 +980,7 @@ fn automation_snapshot(label: String, path: String, height: Option<f64>, app: Ap
             }
             #[cfg(not(target_os = "macos"))]
             {
-                let _ = (webview, path);
+                let _ = (webview, path, height);
             }
         })
         .map_err(|error| error.to_string())
