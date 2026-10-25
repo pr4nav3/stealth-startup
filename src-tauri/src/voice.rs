@@ -510,12 +510,7 @@ impl WorkerKiller {
             }
         }
         #[cfg(unix)]
-        {
-            let _ = std::process::Command::new("kill")
-                .arg("-9")
-                .arg(self.pid.to_string())
-                .status();
-        }
+        kill_process_group(self.pid);
         #[cfg(windows)]
         {
             use windows::Win32::Foundation::CloseHandle;
@@ -547,6 +542,12 @@ fn spawn_serve_worker(root: &Path) -> Result<(LiveWorker, WorkerKiller), String>
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
+    }
+    // Its own process group, so a kill reaches anything it started (the job object's job).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
     let mut child = command.spawn().map_err(|error| error.to_string())?;
     let stderr_tail = Arc::new(Mutex::new(Vec::new()));
@@ -1051,6 +1052,9 @@ pub fn start_recording(
     if let Some(previous) = recording.last.take() {
         let _ = fs::remove_file(previous.path);
     }
+    // Ask first, so the prompt names Supervisor and a "no" is said, not recorded as silence.
+    #[cfg(target_os = "macos")]
+    crate::macos::microphone_access()?;
 
     let (command_tx, command_rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -2038,6 +2042,15 @@ fn run_recording_thread(
     }
 }
 
+/// A blocked microphone records digital silence on macOS (and on Windows with the privacy
+/// switch off) instead of failing; cloning that would make a voice of nothing.
+const SILENT_RECORDING: &str = "The recording is silent. Check that Supervisor can use the microphone (System Settings > Privacy & Security > Microphone on a Mac) and that the right input is selected, then record again.";
+
+/// No sample louder than the quietest room noise a working microphone picks up.
+fn is_silent(samples: &[i16]) -> bool {
+    samples.iter().all(|sample| sample.unsigned_abs() < 40)
+}
+
 fn recording_clip_from_samples(
     path: PathBuf,
     samples: Vec<i16>,
@@ -2045,6 +2058,9 @@ fn recording_clip_from_samples(
 ) -> Result<VoiceRecordingClip, String> {
     if samples.is_empty() {
         return Err("No audio was captured.".to_string());
+    }
+    if is_silent(&samples) {
+        return Err(SILENT_RECORDING.to_string());
     }
     write_wav(&path, &samples, sample_rate)?;
     let bytes = fs::metadata(&path)
@@ -2398,6 +2414,14 @@ fn finish_generation_peak(root: &Path, peak_ram_bytes: u64) {
     let mut budget = load_generation_budget(root);
     budget.generation_count = budget.generation_count.saturating_add(1);
     let _ = write_json(&generation_budget_path(root), &budget);
+}
+
+/// The worker and anything it started: it leads its own process group (see the spawns).
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-9", "--", &format!("-{pid}")])
+        .status();
 }
 
 /// Ties a child to this process on Windows (job object: it dies when the handle closes).
@@ -2877,6 +2901,37 @@ fn dir_size(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn killing_a_worker_takes_what_it_started_with_it() {
+        use std::os::unix::process::CommandExt;
+        let mut worker = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let grandchild = child_pids(worker.id());
+        assert!(!grandchild.is_empty(), "the worker started nothing to check");
+        kill_process_group(worker.id());
+        let _ = worker.wait();
+        std::thread::sleep(Duration::from_millis(200));
+        for pid in grandchild {
+            let alive = std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().unwrap().success();
+            assert!(!alive, "child {pid} outlived its worker");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_silent_recording_is_refused() {
+        assert!(is_silent(&[0; 48_000]));
+        assert!(is_silent(&[3, -5, 12, -20]));
+        assert!(!is_silent(&[0, 900, -1200, 40]));
+        let path = std::env::temp_dir().join("supervisor-silent-test.wav");
+        assert_eq!(recording_clip_from_samples(path, vec![0; 48_000], 48_000).unwrap_err(), SILENT_RECORDING);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

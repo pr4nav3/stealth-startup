@@ -9,7 +9,8 @@ const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
         &[" - Google Chrome", " — Google Chrome", " - Chromium", " — Chromium"],
     ),
     (
-        "msedge",
+        // "msedge" on Windows; the macOS app is "Microsoft Edge".
+        "edge",
         &[
             " - Microsoft Edge",
             " — Microsoft Edge",
@@ -149,6 +150,14 @@ pub fn strip_browser_suffix_for_exe(exe_name: &str, title: &str) -> String {
             if let Some(prefix) = normalized_title.strip_suffix(normalized_suffix.as_str()) {
                 return prefix.trim_end().to_owned();
             }
+            // macOS Chromium browsers add the profile after the name with an en dash:
+            // "YouTube - Google Chrome – Alex (Work)".
+            if let Some(index) = normalized_title.rfind(normalized_suffix.as_str()) {
+                let rest = &normalized_title[index + normalized_suffix.len()..];
+                if rest.starts_with(" – ") || rest.starts_with(" - ") {
+                    return normalized_title[..index].trim_end().to_owned();
+                }
+            }
         }
         if let Some(stripped) = strip_profile_browser_suffix(&normalized_title, browser_key) {
             return stripped;
@@ -175,7 +184,7 @@ fn strip_profile_browser_suffix(title: &str, browser_key: &str) -> Option<String
     ];
     let chrome_markers = [" - Google Chrome", " — Google Chrome"];
 
-    let markers: &[&str] = if browser_key == "msedge" {
+    let markers: &[&str] = if browser_key == "edge" {
         &edge_markers
     } else if browser_key == "chrome" {
         &chrome_markers
@@ -345,6 +354,29 @@ mod tests {
                 "Inbox - Profile 1 - Microsoft Edge",
             ),
             Some("Inbox".to_string())
+        );
+    }
+
+    #[test]
+    fn strips_macos_browser_names_and_profiles() {
+        // Titles as the macOS Accessibility API reports them, with the app names macOS uses.
+        assert_eq!(
+            normalize_title_for_browser("Google Chrome", "YouTube - Google Chrome – Alex (Work)").as_deref(),
+            Some("YouTube")
+        );
+        assert_eq!(
+            normalize_title_for_browser("Google Chrome", "New Tab - Google Chrome – Alex (Work)").as_deref(),
+            Some("New Tab")
+        );
+        assert_eq!(normalize_title_for_browser("Microsoft Edge", "Inbox - Microsoft Edge").as_deref(), Some("Inbox"));
+        assert_eq!(normalize_title_for_browser("Brave Browser", "Rust - Brave").as_deref(), Some("Rust"));
+        assert_eq!(normalize_title_for_browser("Firefox", "Docs — Mozilla Firefox").as_deref(), Some("Docs"));
+        // Safari puts nothing after the page title.
+        assert_eq!(normalize_title_for_browser("Safari", "Start Page").as_deref(), Some("Start Page"));
+        // A page whose own title mentions the browser keeps it.
+        assert_eq!(
+            normalize_title_for_browser("Google Chrome", "Why Google Chrome is slow - Google Chrome").as_deref(),
+            Some("Why Google Chrome is slow")
         );
     }
 

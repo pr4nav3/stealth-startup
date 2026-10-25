@@ -194,28 +194,45 @@ fn sysctl_u64(name: &str) -> Option<u64> {
 /// macOS asks once per app. The webcam worker is our child process, so the answer given to
 /// Supervisor covers it. Asking here makes the prompt name Supervisor, and lets us wait for it.
 pub fn camera_access() -> Result<(), String> {
+    let video = unsafe { objc2_av_foundation::AVMediaTypeVideo }
+        .ok_or("macOS did not provide the video media type")?;
+    media_access(
+        video,
+        "Camera access is off for Supervisor. Turn it on in System Settings > Privacy & Security > Camera, then start the preview again.",
+    )
+}
+
+/// The same for the microphone, before a voice sample is recorded. Without it a denied
+/// microphone gives silence, not an error.
+pub fn microphone_access() -> Result<(), String> {
+    let audio = unsafe { objc2_av_foundation::AVMediaTypeAudio }
+        .ok_or("macOS did not provide the audio media type")?;
+    media_access(
+        audio,
+        "Microphone access is off for Supervisor. Turn it on in System Settings > Privacy & Security > Microphone, then record again.",
+    )
+}
+
+fn media_access(kind: &objc2_av_foundation::AVMediaType, denied: &str) -> Result<(), String> {
     use block2::RcBlock;
     use objc2::runtime::Bool;
-    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeVideo};
+    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice};
 
-    const DENIED: &str = "Camera access is off for Supervisor. Turn it on in System Settings > Privacy & Security > Camera, then start the preview again.";
-
-    let video = unsafe { AVMediaTypeVideo }.ok_or("macOS did not provide the video media type")?;
-    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(video) };
+    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(kind) };
     if status == AVAuthorizationStatus::Authorized {
         return Ok(());
     }
     if status != AVAuthorizationStatus::NotDetermined {
-        return Err(DENIED.to_string());
+        return Err(denied.to_string());
     }
 
     let (sender, receiver) = std::sync::mpsc::channel();
     let handler = RcBlock::new(move |granted: Bool| {
         let _ = sender.send(granted.as_bool());
     });
-    unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(video, &handler) };
+    unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(kind, &handler) };
     match receiver.recv() {
         Ok(true) => Ok(()),
-        _ => Err(DENIED.to_string()),
+        _ => Err(denied.to_string()),
     }
 }

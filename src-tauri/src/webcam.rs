@@ -271,6 +271,11 @@ fn spawn_worker(
         use std::os::windows::process::CommandExt;
         command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 
     let mut child = command
         .spawn()
@@ -396,6 +401,8 @@ pub fn stop_preview(state: &WebcamPreview) {
         flag.store(true, Ordering::SeqCst);
     }
     if let Some(mut child) = state.take_child() {
+        #[cfg(unix)]
+        crate::voice::kill_process_group(child.id());
         let _ = child.kill();
         let _ = child.wait();
     }

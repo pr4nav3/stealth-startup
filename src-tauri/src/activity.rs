@@ -17,6 +17,11 @@ use activity_normalize::idle_elapsed_seconds;
 #[cfg(not(target_os = "windows"))]
 use activity_normalize::normalize_title_text;
 
+/// Zero-width and bidi marks out of a name (storage cleans old rows with it too).
+pub fn strip_invisible(value: &str) -> String {
+    activity_normalize::strip_zero_width(value)
+}
+
 use serde::Serialize;
 use std::collections::HashMap;
 #[cfg(not(target_os = "windows"))]
@@ -142,7 +147,7 @@ fn capture_foreground(
             // Without Screen Recording the window list gives no titles; Accessibility does.
             if sample.window_title.is_none() {
                 sample.window_title = browser_macos::focused_window_title(sample.process_id)
-                    .and_then(|title| normalize_title_text(&title));
+                    .and_then(|title| clean_title(&sample.app_name, &title));
             }
             if crate::website::is_browser(&sample.app_name.to_lowercase()) {
                 sample.browser = Some(browser_macos::read_browser(sample.process_id));
@@ -191,16 +196,20 @@ fn sample_from_active_window(
     idle_seconds: Option<f64>,
 ) -> ActivitySample {
     let app_name = activity_normalize::strip_zero_width(&active_window.app_name).trim().to_string();
+    let window_title = clean_title(&app_name, &active_window.title);
     ActivitySample {
         captured_at,
         platform: platform(),
-        app_label: activity_normalize::app_label(&app_name, None),
+        app_label: activity_normalize::app_label(
+            &app_name,
+            bundle_display_name(&active_window.process_path).as_deref(),
+        ),
         app_identity: app_identity(&active_window.process_path.to_string_lossy(), &app_name),
         app_key: None,
         app_name,
         process_path: active_window.process_path.to_string_lossy().into_owned(),
         process_id: active_window.process_id,
-        window_title: non_empty(active_window.title),
+        window_title,
         window_id: active_window.window_id,
         bounds: Bounds {
             x: active_window.position.x,
@@ -216,6 +225,18 @@ fn sample_from_active_window(
     }
 }
 
+/// What the Finder and the Dock call an app: its bundle's file name ("Visual Studio Code" for
+/// `Visual Studio Code.app`). The window list names the process instead, which for many apps
+/// is an internal name ("Code", "Electron"). Not a bundle: `None`, and the process name stands.
+#[cfg(not(target_os = "windows"))]
+fn bundle_display_name(path: &std::path::Path) -> Option<String> {
+    if !path.extension()?.to_str()?.eq_ignore_ascii_case("app") {
+        return None;
+    }
+    let name = strip_invisible(path.file_stem()?.to_str()?);
+    Some(name.trim().to_string()).filter(|name| !name.is_empty())
+}
+
 /// macOS: the bundle identifier, so a renamed app stays one app. Elsewhere: the program path.
 #[cfg(not(target_os = "windows"))]
 fn app_identity(process_path: &str, app_name: &str) -> String {
@@ -226,9 +247,12 @@ fn app_identity(process_path: &str, app_name: &str) -> String {
     crate::app_identity::fallback_identity(process_path, app_name)
 }
 
+/// The title as attribution reads it: blank and placeholder titles are `None`, and a
+/// browser's name and profile come off the end ("YouTube - Google Chrome – Alex" is
+/// "YouTube"), so title fallbacks and the New Tab check see the page's own title.
 #[cfg(not(target_os = "windows"))]
-fn non_empty(value: String) -> Option<String> {
-    normalize_title_text(&value)
+fn clean_title(app_name: &str, raw: &str) -> Option<String> {
+    activity_normalize::normalize_title_for_browser(app_name, raw).or_else(|| normalize_title_text(raw))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -385,6 +409,27 @@ mod tests {
             sample.permissions.screen_recording,
             PermissionState::Missing
         );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn apps_are_named_by_their_bundle_not_their_process() {
+        let name = |path: &str| bundle_display_name(std::path::Path::new(path));
+        assert_eq!(name("/Applications/Visual Studio Code.app").as_deref(), Some("Visual Studio Code"));
+        assert_eq!(name("/Applications/\u{200e}WhatsApp.app").as_deref(), Some("WhatsApp"));
+        assert_eq!(name("/usr/local/bin/tool"), None);
+        let mut window = active_window("main.rs");
+        window.app_name = "Code".to_string();
+        window.process_path = std::path::PathBuf::from("/Applications/Visual Studio Code.app");
+        let sample = sample_from_active_window(
+            window,
+            "2026-10-25T00:00:00Z".to_string(),
+            CapturePermissions { screen_recording: PermissionState::Granted, accessibility: PermissionState::Granted },
+            None,
+        );
+        assert_eq!(sample.app_label, "Visual Studio Code");
+        // The key stays the process name, so history and rules keyed on it carry on.
+        assert_eq!(sample.app_name, "Code");
     }
 
     #[cfg(not(target_os = "windows"))]

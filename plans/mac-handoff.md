@@ -170,6 +170,26 @@ Supervisor code.
       together; Tauri skips `nsis` on a Mac without a word, so one list serves both OSes.
       The day-to-day `tauri.conf.json` has `bundle.active` false and only the dev window.
 
+## Backend parity audit (2026-10-25)
+
+Every `cfg(windows)` path was read against its macOS twin. The macOS build's dead-code
+warnings list exactly what Windows does that the Mac does not: only `app_identity`'s
+Windows-only identity helpers (product family, script hosts) remain.
+
+| Windows does | macOS before | macOS now |
+|---|---|---|
+| Names an app by its exe's FileDescription ("Visual Studio Code" for Code.exe) | Process name from the window list ("Code") | The bundle's file name, what Finder and the Dock show; the key stays the process name so history and rules carry on |
+| Strips the browser name and profile from window titles | Raw AX title ("YouTube - Google Chrome – Alex (Work)"), so title fallbacks and the New Tab check missed | Same cleanup, with the macOS app names and the en-dash profile suffix |
+| Clean names in storage | A left-to-right mark stuck to "\u{200e}WhatsApp" in keys, labels and rules | Stripped at capture; schema v13 cleans what was stored |
+| Job object kills the worker's whole process tree | `kill -9` of the worker only | Workers lead their own process group; quit and stop kill the group |
+| Microphone: denied gives silence too | No permission request; a denied mic recorded silence and cloned from it | Asks first (`microphone_access`, prompt names Supervisor); any silent recording is refused with a clear message on every OS |
+| Address bar read retried after 5 s | A freshly launched Chromium browser read "site not read" for up to ~6 s | Searched every tick for 15 s after first asking |
+| Script hosts (python, java) named by their script | A GUI app run by python shows as "Python" | Not done; rare on a Mac (most Python GUI apps ship as their own bundle) |
+
+Still to see on this Mac (each needs the desktop, so only with the user's go-ahead): the
+microphone prompt and a recorded sample, Brave and Edge reading the address within the first
+seconds after launch, and the Now line naming each app the way the Dock does.
+
 ## 0. Mac code that did not exist (built 2026-10-25)
 
 In the order a user would hit it.

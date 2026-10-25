@@ -1273,6 +1273,7 @@ function renderSession(current: CurrentSession | null): string {
         <aside class="panel session-rules-card">
           <p class="eyebrow">Distractions</p>
           ${renderSessionDistractions(current.exceptions)}
+          ${renderNowLine(current)}
           <button type="button" data-action="open-session-rules">Edit distractions</button>
         </aside>
       </div>
@@ -1280,6 +1281,44 @@ function renderSession(current: CurrentSession | null): string {
       ${renderActiveSessionControls(current)}
     </section>
     ${sessionRulesOpen ? renderSessionRulesModal() : ""}
+  `;
+}
+
+/** What is in front right now, named the way History names it, and how it counts. */
+function nowReading(current: CurrentSession): { name: string; detail: string } {
+  if (current.status === "paused") {
+    return { name: "Paused", detail: "Nothing is recorded until you resume" };
+  }
+  if (current.camera.phone) {
+    return { name: "Phone", detail: "In view of the camera" };
+  }
+  const focus = current.focus;
+  if (!focus) {
+    return { name: "Looking…", detail: "Reading the window in front" };
+  }
+  if (focus.state === "idle") {
+    return { name: "Away", detail: "No input for a few minutes" };
+  }
+  const { activity, sample } = focus;
+  const verdict = focus.distracting ? "a distraction" : "work";
+  if (activity.kind === "website") {
+    return { name: siteNames[activity.key] ?? activity.label, detail: `In ${sample.app_label} · ${verdict}` };
+  }
+  if (activity.kind === "other_websites") {
+    const unread = sample.platform === "macos" && sample.permissions.accessibility === "missing";
+    return { name: sample.app_label, detail: unread ? "Allow Accessibility to see the site" : "Site not read · work" };
+  }
+  return { name: appNames[activity.key] ?? activity.label, detail: focus.distracting ? "A distraction" : "Work" };
+}
+
+function renderNowLine(current: CurrentSession): string {
+  const now = nowReading(current);
+  return `
+    <div class="session-now">
+      <span>Now</span>
+      <strong>${escapeHtml(now.name)}</strong>
+      <small>${escapeHtml(now.detail)}</small>
+    </div>
   `;
 }
 

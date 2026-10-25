@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 13;
 /// Weeks of history the Trends page and the attention-span chart can draw.
 const TREND_WEEK_COUNT: usize = 8;
 const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
@@ -766,6 +766,52 @@ impl SessionStorage {
             self.rescore_history()?;
             tx.execute_batch("PRAGMA user_version = 12;").map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
+        }
+        if version < 13 {
+            // macOS names some apps with an invisible left-to-right mark ("\u{200e}WhatsApp").
+            // Until 2026-10-25 it went into app keys and labels, so a rule typed as "whatsapp"
+            // never matched and History showed a stray mark. Capture strips it now; this cleans
+            // what was stored before. A clean key that already exists keeps the older rows apart.
+            let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            for (table, column) in [
+                ("app_identity", "key"),
+                ("app_identity", "label"),
+                ("span", "app"),
+                ("span", "activity_key"),
+                ("span", "label"),
+                ("rule", "value"),
+                ("app_name", "key"),
+                ("app_name", "name"),
+            ] {
+                self.strip_invisible_marks(table, column)?;
+            }
+            tx.execute_batch("PRAGMA user_version = 13;").map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn strip_invisible_marks(&self, table: &str, column: &str) -> Result<(), String> {
+        let values: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare(&format!("SELECT DISTINCT {column} FROM {table}"))
+                .map_err(|error| error.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?;
+            rows.collect::<Result<_, _>>().map_err(|error| error.to_string())?
+        };
+        for value in values {
+            let clean = crate::activity::strip_invisible(&value).trim().to_string();
+            if clean != value && !clean.is_empty() {
+                self.conn
+                    .execute(
+                        &format!("UPDATE OR IGNORE {table} SET {column} = ?2 WHERE {column} = ?1"),
+                        params![value, clean],
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
         }
         Ok(())
     }
@@ -2558,6 +2604,30 @@ mod tests {
             rows.collect::<Result<_, _>>().unwrap()
         };
         assert!(!columns.iter().any(|column| column == "neutral_seconds" || column == "unrated_seconds"));
+    }
+
+    #[test]
+    fn version_thirteen_strips_the_invisible_mark_from_stored_app_names() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Old", Strictness::Normal, "2026-10-24T12:00:00Z", 60).unwrap();
+        storage.insert_span(id, &app("\u{200e}WhatsApp"), "focused", 0, 60).unwrap();
+        storage.close_session(id, "2026-10-24T12:01:00Z", "stopped", 60).unwrap();
+        storage.conn.execute_batch(
+            "INSERT INTO app_identity (identity, key, label) VALUES
+               ('bundle:net.whatsapp.whatsapp', '\u{200e}whatsapp', '\u{200e}WhatsApp');
+             INSERT INTO rule (target, value, classification, source) VALUES
+               ('app', '\u{200e}whatsapp', 'distracting', 'user');
+             PRAGMA user_version = 12;",
+        ).unwrap();
+        let reopened = SessionStorage::from_connection(storage.conn).unwrap();
+        let (key, label): (String, String) = reopened.conn.query_row(
+            "SELECT key, label FROM app_identity WHERE identity = 'bundle:net.whatsapp.whatsapp'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((key.as_str(), label.as_str()), ("whatsapp", "WhatsApp"));
+        let report = reopened.get_session_report(id).unwrap();
+        assert_eq!(report.spans[0].label, "WhatsApp");
+        assert!(reopened.read_rules().unwrap().contains(&AppRule::app("whatsapp")));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use objc2_core_foundation::{
     kCFBooleanTrue, CFArray, CFBoolean, CFDictionary, CFRetained, CFString, CFType, Type, CFURL,
 };
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 const TIMEOUT_SECONDS: f32 = 0.3;
 /// After a failed search, leave that browser alone for a while instead of re-walking it.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
+/// A Chromium browser builds its accessibility tree over a few seconds after it is first
+/// asked (longer on a cold launch); keep searching every tick until then.
+const TREE_BUILD_GRACE: Duration = Duration::from_secs(15);
 /// Toolbars come before page content; a browser window reaches its web area well within this.
 const MAX_VISITED: usize = 400;
 const MAX_DEPTH: usize = 12;
@@ -74,14 +77,14 @@ struct Reader {
     paths: HashMap<u64, Vec<usize>>,
     failed: HashMap<u64, Instant>,
     /// Browsers already told to build their accessibility tree (Chromium needs asking).
-    enabled: HashSet<u64>,
+    enabled: HashMap<u64, Instant>,
 }
 
 thread_local! {
     static READER: RefCell<Reader> = RefCell::new(Reader {
         paths: HashMap::new(),
         failed: HashMap::new(),
-        enabled: HashSet::new(),
+        enabled: HashMap::new(),
     });
 }
 
@@ -113,8 +116,9 @@ impl Reader {
         // Chromium exposes its web area only once a client asks, and builds it over the next
         // second or two; Safari and Firefox ignore the switch. Measured: YouTube in Chrome reads
         // on the fourth tick, Safari on the first.
-        let just_enabled = self.enabled.insert(pid);
+        let just_enabled = !self.enabled.contains_key(&pid);
         if just_enabled {
+            self.enabled.insert(pid, Instant::now());
             enable_chromium_accessibility(&app);
         }
         let Some(window) = attr(&app, "AXFocusedWindow") else {
@@ -133,7 +137,8 @@ impl Reader {
         let Some(web_area) = web_area else {
             self.paths.remove(&pid);
             // A tree still being built is not a failure; search again next tick.
-            if !just_enabled {
+            let building = self.enabled.get(&pid).is_some_and(|at| at.elapsed() < TREE_BUILD_GRACE);
+            if !building {
                 self.failed.insert(pid, Instant::now());
             }
             return BrowserRead::default();
