@@ -872,12 +872,12 @@ fn automation_snapshot(label: String, path: String, height: Option<f64>, app: Ap
                 use objc2_web_kit::WKWebView;
                 let web_view: &WKWebView = &*webview.inner().cast::<WKWebView>();
                 // Only the page the user sees: the view's bounds run on under the title bar.
-                let configuration = objc2_web_kit::WKSnapshotConfiguration::new();
+                let configuration = objc2_web_kit::WKSnapshotConfiguration::new(objc2::MainThreadMarker::new_unchecked());
                 if let Some(height) = height {
                     let bounds = web_view.bounds();
-                    configuration.setRect(objc2_foundation::CGRect::new(
-                        objc2_foundation::CGPoint::new(0.0, 0.0),
-                        objc2_foundation::CGSize::new(bounds.size.width, height),
+                    configuration.setRect(objc2_core_foundation::CGRect::new(
+                        objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                        objc2_core_foundation::CGSize::new(bounds.size.width, height),
                     ));
                 }
                 let handler = block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
