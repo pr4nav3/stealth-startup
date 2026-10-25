@@ -348,15 +348,18 @@ h1 {
   color: var(--sv-colored-ink);
 }
 
-.active-state-card h2 {
-  margin-top: 14px;
+/* Two groups: "Current session" with the state under it, then the goal label with the goal.
+   `.state-slab.` outranks the shared `.state-slab h2` rule further down, which otherwise
+   wins the tie and pushes the state 30px away from its label. */
+.state-slab.active-state-card h2 {
+  margin-top: 6px;
   font-size: clamp(2.4rem, 7cqi, 3.5rem);
   font-weight: 750;
   letter-spacing: -0.04em;
 }
 
 .active-goal {
-  margin-top: 22px;
+  margin-top: 28px;
 }
 
 .active-goal span,
