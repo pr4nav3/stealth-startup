@@ -105,7 +105,12 @@ Checklist with what was seen: `plans/mac-handoff.md`. The app builds, tests pass
 - **An unsigned rebuild silently drops the Accessibility grant.** An ad-hoc debug bundle carries a per-build identifier, and macOS keys the grant to it: System Settings keeps showing Supervisor on, but `AXIsProcessTrusted` is false, every browser is Other websites and the Getting started step reads as not done. Build with `npm run bundle:mac-dev` after `scripts/make_mac_dev_cert.sh` (once per Mac) and the grant follows the certificate instead. There is no Developer ID certificate on any machine yet; a release needs one.
 - **Only Safari and Chrome are verified.** Firefox, Edge, Brave and Arc are expected to work (`AXURL` on the web area) but have not been seen.
 - **Chrome's profile suffix** (" – Name (email)", en dash) is not stripped by the title cleanup, so a Chrome New Tab is found by its address (`chrome://newtab/`), never by its title. Fine while the address reads.
-- Camera and microphone prompts, the RAM gate under load, shell surfaces (Cmd-Tab, Spotlight, Dock, desktop), media presence, Continuity Camera, the two Python venvs, frozen workers, signing and notarization: written, not yet run on the Mac.
+- **The webcam path is verified through the UI on the Mac** (camera prompt, preview frames, a session with the interrupt card); the voice worker runs from the CLI but a clip has not been generated through the app's UI there, so the microphone prompt and the RAM gate under load are unseen.
+- **A signed debug build must carry `Entitlements.plist`** or the camera is refused silently with no prompt; `npm run bundle:mac-dev` does this now.
+- **The session row's `nudge_count`, `drift_count` and `distracted_seconds` are written at stop**, not during the session; read the live snapshot or the spans while it runs.
+- **No Developer ID.** Dev builds are signed with a local certificate; Gatekeeper rejects the DMG on any other Mac until a Developer ID signs and notarizes it.
+- **The Mac YOLO export is a different file** from the benchmarked Windows one (same weights, newer export tools). `download_models.py` accepts both hashes.
+- Shell surfaces (Cmd-Tab, Spotlight, Dock, desktop), media presence, Continuity Camera, Intel Macs: written, not yet run.
 
 Windows `active-win-pos-rs` is now macOS/Linux-only. Do not add it back on Windows.
 

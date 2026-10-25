@@ -1504,7 +1504,7 @@ function syncOverlayPlacement(current: CurrentSession | null): void {
   requestAnimationFrame(() => fitOverlayWindow());
 }
 
-function fitOverlayWindow(): void {
+function fitOverlayWindow(attempt = 0): void {
   if (appView !== "overlay") {
     return;
   }
@@ -1514,6 +1514,25 @@ function fitOverlayWindow(): void {
   }
   const interrupt = overlayPlacement === "interrupt";
   const width = interrupt ? OVERLAY_INTERRUPT_WIDTH : OVERLAY_CORNER_WIDTH;
+  // Measure only once the window has this placement's width: at another width the text
+  // wraps differently and the height is wrong. Ask for the width first (the window opens at
+  // its config size), then wait for it; WebKit applies a resize a few frames late.
+  if (Math.round(window.innerWidth) !== width) {
+    if (attempt === 0) {
+      lastOverlayFit = "";
+      void invoke("set_status_window_size", {
+        width,
+        height: Math.ceil(shell.getBoundingClientRect().height),
+        center: interrupt,
+      }).catch((error) => {
+        lastError = errorText(error);
+      });
+    }
+    if (attempt < 60) {
+      requestAnimationFrame(() => fitOverlayWindow(attempt + 1));
+    }
+    return;
+  }
   const height = Math.ceil(shell.getBoundingClientRect().height);
   const key = `${width}x${height}`;
   if (key === lastOverlayFit) {
@@ -2048,11 +2067,22 @@ function renderVoiceSettings(): string {
 /** A stat value never wraps or clips: it steps down (to a floor) until it fits its tile. */
 window.addEventListener("resize", () => requestAnimationFrame(fitShareStats));
 
+/** Stat values never wrap or ellipsize: shrink the font until the value fits its tile. The
+ *  report tiles use the system monospace, which is wider on a Mac (SF Mono) than on Windows,
+ *  so "40:00 min" overflows there at the stylesheet's size. */
 function fitShareStats(): void {
   document.querySelectorAll<HTMLElement>(".share-stats strong").forEach((value) => {
     let size = 1.1;
     value.style.fontSize = `${size}rem`;
     while (size > 0.72 && value.scrollWidth > value.clientWidth) {
+      size -= 0.04;
+      value.style.fontSize = `${size.toFixed(2)}rem`;
+    }
+  });
+  document.querySelectorAll<HTMLElement>(".report-stat strong").forEach((value) => {
+    value.style.fontSize = "";
+    let size = parseFloat(getComputedStyle(value).fontSize) / 16;
+    while (size > 0.9 && value.scrollWidth > value.clientWidth) {
       size -= 0.04;
       value.style.fontSize = `${size.toFixed(2)}rem`;
     }

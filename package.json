@@ -9,7 +9,7 @@
     "build:ui": "vite build",
     "check": "tsc --noEmit && vite build",
     "dev:ui": "vite --host 127.0.0.1",
-    "bundle:mac-dev": "APPLE_SIGNING_IDENTITY='Supervisor Dev' tauri build --debug --bundles app --config '{\"bundle\":{\"active\":true,\"targets\":[\"app\"]}}'"
+    "bundle:mac-dev": "APPLE_SIGNING_IDENTITY='Supervisor Dev' tauri build --debug --bundles app --config '{\"bundle\":{\"active\":true,\"targets\":[\"app\"],\"macOS\":{\"entitlements\":\"Entitlements.plist\"}}}'"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"

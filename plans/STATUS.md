@@ -28,11 +28,34 @@ ship target. Everything through 2026-10-24 was written and run on Windows. On
       `child_pids` on macOS; camera names from AVFoundation; bidi marks
       stripped from app names
 - [x] `SUPERVISOR_PROBE` runs the capture probe inside the debug bundle
-- [x] Dev signing: `scripts/make_mac_dev_cert.sh` once per Mac, then
-      `npm run bundle:mac-dev`; permission grants survive rebuilds
-- [ ] Not yet: Python venvs, webcam and voice workers on the Mac, frozen
-      workers, Developer ID signing and notarization, shell surfaces, media
-      presence, other browsers
+- [x] Dev signing: `scripts/make_mac_dev_cert.sh` once per Mac (own keychain,
+      no password dialogs), then `npm run bundle:mac-dev`; permission grants
+      survive rebuilds
+- [x] Webcam worker on the Mac: `.venv-webcam`, YuNet downloaded, YOLO26s
+      re-exported (both hashes accepted), 12 unit tests, CPU and CoreML
+      self-tests, frozen with PyInstaller (346 MB), every library signed by
+      `scripts/sign_webcam_runtime.sh`; the release bundle
+      (`tauri.bundle.conf.json`, app + DMG) carries it and the worker runs
+      from inside the app
+- [x] Voice worker on the Mac: `.venv-voice-runtime-macos` (Python 3.11,
+      torch 2.6), one clip generated from `derek.wav` on CPU in 37 s wall
+- [x] CI: `.github/workflows/ci.yml` runs `npm run check`, `cargo test` and a
+      Mac debug bundle on macOS and Windows for every push
+- [x] WebKit layout pass: every screen screenshotted in a real WKWebView at two
+      sizes and both themes; three Mac-only layout bugs fixed (Home overflow,
+      Settings cards, report tiles). Window sizes corrected for the title bar
+      that macOS counts inside a window's inner height (status window was
+      losing its last row)
+- [x] Live flows driven inside the real app (`SUPERVISOR_AUTOMATION`, debug
+      builds) and checked against the database: preflight → start → pause →
+      resume → stop → report, crash recovery, History (weeks, report, delete),
+      Settings (strictness, timer, rules), Voice page, Webcam prompt and
+      preview, a full YouTube distraction with the interrupt card, "Not today",
+      2 nudges recorded
+- [ ] Not yet on the Mac: a voice clip through the app's own UI (microphone
+      prompt), the RAM gate under load, the tray menu, Developer ID signing and
+      notarization, shell surfaces, media presence, Firefox/Edge/Brave/Arc, an
+      Intel build
 
 ## Branches
 
@@ -199,12 +222,12 @@ live run on Windows was 2026-10-18.
 
 ## Next
 
-1. **macOS pass, continued**: section 0 of `plans/mac-handoff.md` is built and
-   the address read is verified. Left: the two Python venvs and
-   `webcam_bakeoff/models/yolo26s.onnx` (not in git, copy from the Windows
-   machine), a webcam session and a voice clip on the Mac, the remaining
-   checklist sections, then frozen workers and signing (a dev certificate
-   first, so rebuilds keep the Accessibility grant).
+1. **macOS pass, continued**: everything that runs without a person at the
+   Mac is done (`plans/mac-handoff.md`). Left: a webcam session and a voice
+   clip through the app's UI on the Mac, the unverified checklist sections
+   (shell surfaces, media presence, other browsers), then the Apple Developer
+   Program for a Developer ID certificate and notarization, and an Intel Mac
+   for the x86_64 frozen worker.
 2. **Live test pass on Windows** of everything on this branch (nothing since
    2026-10-18 has run outside the test suite and the mock): a V2 session with
    "Not today" and "Never a distraction", the schema v12 migration on a real
@@ -233,9 +256,13 @@ live run on Windows was 2026-10-18.
 - [ ] GitHub Release for the macOS ARM64 zip (SHA-256 `fcfd9bc86932f16b53449b7b6e29ab108b9ba9f23aec8d1af5333fe4b1f79ae5`) and the Windows x64 zip (SHA-256 `69bace321f9f5f8f6c6fbec3c4dc20a50f109ffa60ed9fdd5c19f76f26ec9b0a`). Do not commit the zips
 - [ ] Runtime manifest with both targets, and `SUPERVISOR_VOICE_PACK_MANIFEST_URL`
 - [ ] Frozen webcam worker built on each OS (`scripts/build_webcam_runtime.py`);
-      `webcam_bakeoff/models/yolo26s.onnx` is not in git (see that README)
+      `webcam_bakeoff/models/yolo26s.onnx` is not in git (see that README).
+      Apple Silicon: done 2026-10-25, signed with the dev identity. Windows
+      and Intel Mac: not yet
 - [ ] Windows installer, and a decision on code signing
-- [ ] macOS signing and notarization
+- [ ] macOS Developer ID signing and notarization (the signing steps exist
+      and work with the dev identity: `scripts/sign_webcam_runtime.sh`, then
+      `APPLE_SIGNING_IDENTITY` on `tauri build`; swap in the Developer ID)
 
 ## Test gate
 

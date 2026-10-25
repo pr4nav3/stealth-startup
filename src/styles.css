@@ -183,10 +183,7 @@ p {
   display: flex;
   flex-direction: column;
   width: min(100%, 1120px);
-  /* A definite height, not min-height: WebKit otherwise stretches the Home grid to the whole
-     viewport as if the top bar, tabs and Start button took no room, and Home overflows the
-     window by 110px. A short window still scrolls; the content just overflows the shell. */
-  height: 100vh;
+  min-height: 100vh;
   margin: 0 auto;
   padding: 14px 24px 24px;
 }
@@ -507,6 +504,11 @@ h1 {
 .home-grid {
   display: grid;
   flex: 1 1 auto;
+  /* WebKit (the macOS webview) sizes a grid that is a flex item against the shell's 100vh
+     instead of the room left under the top bar and tabs, so Home overflowed by 110px there.
+     A zero height with flex growth makes both engines give it exactly the leftover room. */
+  height: 0;
+  min-height: 0;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   align-items: stretch;
   gap: 14px;
@@ -1494,7 +1496,7 @@ dt {
 }
 
 .settings-feature-card .voice-summary {
-  flex: 1;
+  flex: 1 1 auto;
 }
 
 .settings-feature-card .voice-summary button {
@@ -1602,7 +1604,10 @@ dt {
 }
 
 .voice-summary {
-  display: grid;
+  /* A column, not a grid: WebKit sizes a grid's auto rows here against the window instead of
+     the card, and in a tall window the text and button spread down the whole page. */
+  display: flex;
+  flex-direction: column;
   gap: 10px;
 }
 

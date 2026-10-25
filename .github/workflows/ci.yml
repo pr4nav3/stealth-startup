@@ -1,0 +1,34 @@
+# Every push is checked on both ship targets, so a change made on Windows cannot quietly
+# break the Mac (or the other way round). Tests and the UI check on both; the Mac job also
+# bundles a debug Supervisor.app, since bundling is where Mac-only config bites.
+# The Python workers are not built here: their models are not in git.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run check
+      - run: cargo test
+        working-directory: src-tauri
+      - name: Bundle the debug app (macOS)
+        if: runner.os == 'macOS'
+        run: npx tauri build --debug --bundles app --config '{"bundle":{"active":true,"targets":["app"]}}'

@@ -577,9 +577,14 @@ pub fn run() {
             });
 
             setup_status_window(app)?;
+            if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                size_page_exactly(&main);
+            }
             setup_tray(app)?;
             start_session_ticker(app.handle().clone());
             start_voice_worker_ticker(app.handle().clone());
+            #[cfg(debug_assertions)]
+            start_automation(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -639,7 +644,8 @@ pub fn run() {
             delete_voice_clip,
             start_webcam_preview,
             stop_webcam_preview,
-            list_cameras
+            list_cameras,
+            automation_result
         ])
         .build(tauri::generate_context!())
         .expect("failed to run Supervisor")
@@ -814,7 +820,7 @@ fn set_status_window_size(
         return Ok(());
     };
     let width = width.clamp(200.0, 800.0);
-    let height = height.clamp(120.0, 960.0);
+    let height = height.clamp(120.0, 960.0) + titlebar_inset(&window);
     window
         .set_size(tauri::LogicalSize::new(width, height))
         .map_err(|error| error.to_string())?;
@@ -829,6 +835,36 @@ fn set_status_window_size(
         let _ = window.set_always_on_top(pin);
     }
     place_status_window(&app, Some((width, height)), center)
+}
+
+/// How much of a window's "inner" height the title bar takes. On macOS the window's content
+/// view runs under the title bar (Tauri's full-size content view), the page is laid out below
+/// it, and so a window asked for 286 shows 258 of page. On Windows the inner size is the page.
+fn titlebar_inset(window: &tauri::WebviewWindow) -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWindow;
+        if let Ok(pointer) = window.ns_window() {
+            let ns_window: &NSWindow = unsafe { &*pointer.cast::<NSWindow>() };
+            let frame = ns_window.frame();
+            let content = ns_window.contentLayoutRect();
+            return (frame.size.height - content.size.height).max(0.0);
+        }
+    }
+    let _ = window;
+    0.0
+}
+
+/// Give the page the size the config asked for, title bar not included.
+fn size_page_exactly(window: &tauri::WebviewWindow) {
+    let inset = titlebar_inset(window);
+    if inset <= 0.0 {
+        return;
+    }
+    let Ok(scale) = window.scale_factor() else { return };
+    let Ok(inner) = window.inner_size() else { return };
+    let logical: tauri::LogicalSize<f64> = inner.to_logical(scale);
+    let _ = window.set_size(tauri::LogicalSize::new(logical.width, logical.height + inset));
 }
 
 fn position_status_window(app: &AppHandle) -> Result<(), String> {
@@ -905,6 +941,58 @@ fn counted_new_nudge(seen: &mut (u64, u64), id: u64, nudges: u64) -> bool {
     let before = if seen.0 == id { seen.1 } else { 0 };
     *seen = (id, nudges);
     nudges > before
+}
+
+/// Debug builds only: with `SUPERVISOR_AUTOMATION=<dir>`, a script dropped at `<dir>/cmd.js`
+/// runs inside the main window's page (as the body of an async function; `return` a
+/// JSON-serializable value) and its result lands in `<dir>/result.json`. This is how the
+/// app's own flows are driven end to end on a Mac, where no WebDriver exists.
+#[cfg(debug_assertions)]
+fn start_automation(app: AppHandle) {
+    let Some(dir) = std::env::var_os("SUPERVISOR_AUTOMATION").map(PathBuf::from) else {
+        return;
+    };
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let script_path = dir.join("cmd.js");
+        let Ok(script) = std::fs::read_to_string(&script_path) else {
+            continue;
+        };
+        let _ = std::fs::remove_file(&script_path);
+        let _ = std::fs::remove_file(dir.join("result.json"));
+        // A first line `//window=overlay` targets another window; the main window otherwise.
+        let label = script
+            .lines()
+            .next()
+            .and_then(|line| line.trim().strip_prefix("//window="))
+            .map(str::trim)
+            .unwrap_or(MAIN_WINDOW_LABEL)
+            .to_string();
+        let Some(window) = app.get_webview_window(&label) else {
+            let _ = std::fs::write(dir.join("result.json"), format!("{{\"error\":\"no window {label}\"}}"));
+            continue;
+        };
+        let wrapped = format!(
+            "(async () => {{ let out; try {{ out = {{ ok: await (async () => {{ {script} }})() }}; }} \
+             catch (error) {{ out = {{ error: String(error && error.stack || error) }}; }} \
+             window.__TAURI_INTERNALS__.invoke('automation_result', {{ text: JSON.stringify(out) }}); }})();"
+        );
+        if let Err(error) = window.eval(&wrapped) {
+            let _ = std::fs::write(dir.join("result.json"), format!("{{\"error\":{:?}}}", error.to_string()));
+        }
+    });
+}
+
+/// The receiving end of `start_automation`; inert in release builds and without the variable.
+#[tauri::command]
+fn automation_result(text: String) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        return Err("automation is off".to_string());
+    }
+    let dir = std::env::var_os("SUPERVISOR_AUTOMATION").map(PathBuf::from).ok_or("automation is off")?;
+    let tmp = dir.join("result.json.part");
+    std::fs::write(&tmp, text).map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, dir.join("result.json")).map_err(|error| error.to_string())
 }
 
 fn start_session_ticker(app: AppHandle) {

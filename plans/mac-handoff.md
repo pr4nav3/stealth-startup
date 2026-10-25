@@ -23,11 +23,22 @@ Ticked items below were seen on this Mac; the rest is still unverified.
   Settings still shows Supervisor on, but `AXIsProcessTrusted` is false and every browser is
   Other websites; toggling the switch re-enables the stale entry and does not help. So, once
   per Mac, `sh scripts/make_mac_dev_cert.sh` (a self-signed "Supervisor Dev" certificate in
-  the login keychain), then always build with `npm run bundle:mac-dev`. The designated
-  requirement becomes `identifier "app.supervisor.desktop" and certificate leaf = H"…"`,
-  which survives rebuilds. Switching from ad-hoc to signed once needs
-  `tccutil reset Accessibility app.supervisor.desktop` and a fresh approval. A release needs
-  a Developer ID certificate from the Apple Developer Program (none on this Mac yet).
+  its own `supervisor-dev` keychain with a known password, so codesign never asks for the
+  login password even across the frozen worker's hundreds of files), then always build with
+  `npm run bundle:mac-dev`. The designated requirement becomes
+  `identifier "app.supervisor.desktop" and certificate leaf = H"…"`, which survives
+  rebuilds. Switching certificates (ad-hoc to signed, or a new dev cert) needs
+  `tccutil reset Accessibility app.supervisor.desktop` and one fresh approval. A release
+  needs a Developer ID certificate from the Apple Developer Program (none on this Mac yet).
+- **Release bundle.** `scripts/build_webcam_runtime.py`, then
+  `sh scripts/sign_webcam_runtime.sh "<identity>"` (signs every library in the frozen worker
+  under the hardened runtime with the camera entitlement, and fixes PyInstaller's
+  Python.framework layout so codesign accepts it), then
+  `APPLE_SIGNING_IDENTITY="<identity>" npx tauri build --config src-tauri/tauri.bundle.conf.json`.
+  Seen on this Mac with the dev identity: Supervisor.app (368 MB, with `webcam/` and
+  `voices/` resources) and a DMG; `nsis` in the target list is skipped silently on a Mac,
+  so the shared target list is fine. `codesign --verify --deep --strict` passes on the app;
+  `spctl` rejects it, as it will until a Developer ID signs and notarizes it.
 - **Run the bundle, not the bare binary.** `npm run tauri dev` runs `target/debug/supervisor`
   from a terminal, so permission prompts name the terminal and the grant goes to it.
   `npm run bundle:mac-dev` then `open src-tauri/target/debug/bundle/macos/Supervisor.app`.
@@ -67,20 +78,24 @@ Supervisor code.
       Win32 probe tests are `#[cfg(windows)]`. `system_resource_queries_return_real_values`
       passed on the first real run of the `macos.rs` memory and disk calls (rustc 1.99,
       Node 24, Python 3.12 on hand; the venvs below are not made yet).
-- [ ] **Webcam worker venv.** `python3 -m venv .venv-webcam`, then with
+- [x] **Webcam worker venv.** `python3 -m venv .venv-webcam`, then with
       `.venv-webcam/bin/python`: `pip install -r webcam_bakeoff/build-requirements.txt` and
       `webcam_bakeoff/download_models.py`. Debug builds run the worker from this venv
-      (`webcam.rs`, `worker_command`). The pinned onnxruntime differs for Intel and Apple
-      Silicon (`webcam_bakeoff/requirements.txt`).
-- [ ] **`webcam_bakeoff/models/yolo26s.onnx` is not in git** and the worker will not start
-      without it. Copy it from the Windows machine (38 MB; `download_models.py` checks its
-      SHA-256 and rejects any other file, so a fresh export only works if it reproduces the
-      exact file). Then `run_tracker.py --self-test` on CPU and on GPU (CoreML).
-- [ ] **Voice worker venv.** Debug builds look for `.venv-voice-runtime-macos/bin/python` at
-      the repo root (`voice_runtime.rs`, `debug_worker_python`). Create it with Python 3.11 and
-      `pip install -r voice_worker/requirements.txt` (Chatterbox from a pinned git commit; the
-      first run downloads weights). The `resemble-perth` watermarker that failed on macOS in
-      the bakeoff is already patched to a no-op inside the worker.
+      (`webcam.rs`, `worker_command`). Done with Python 3.12: opencv 4.14.0, onnxruntime
+      1.29.0 with `CoreMLExecutionProvider`, numpy 2.4.6. A python.org Python needs
+      `/Applications/Python 3.12/Install Certificates.command` once or downloads fail.
+- [x] **`webcam_bakeoff/models/yolo26s.onnx` is not in git.** Re-exported on the Mac with
+      `export_models.py` (ultralytics 8.4.188 / onnx 1.23.2); the bytes differ from the
+      Windows export, so `download_models.py` now accepts both hashes. 12 worker unit tests
+      pass with it; `run_tracker.py --self-test` passes on CPU (1.4 s first frame) and on
+      CoreML (6.4 s first frame, model compilation).
+- [x] **Voice worker venv.** Debug builds look for `.venv-voice-runtime-macos/bin/python` at
+      the repo root (`voice_runtime.rs`, `debug_worker_python`). Made with Homebrew's
+      Python 3.11 (`brew install python@3.11`, then
+      `/opt/homebrew/opt/python@3.11/bin/python3.11 -m venv .venv-voice-runtime-macos`) and
+      `pip install -r voice_worker/requirements.txt -r voice_worker/build-requirements.txt`:
+      torch 2.6.0 with Metal (`mps`) available. The `resemble-perth` watermarker that failed
+      on macOS in the bakeoff is already patched to a no-op inside the worker.
 - [ ] **Voice runtime zip.** A frozen `macos-arm64` runtime already exists in a GitHub
       release (SHA-256 in `plans/STATUS.md`; example manifest in
       `voice_worker/release_manifest.macos-arm64.example.json`). There is no Intel build.
@@ -88,15 +103,68 @@ Supervisor code.
 - [x] **Run the app.** The debug bundle (see "Permissions and signing"), not `npm run dev`,
       so permissions attach to Supervisor. `npm run dev:ui` plus
       `http://127.0.0.1:1420/mock.html` renders every screen with fixtures and no backend.
-      Home fits the 920x760 window exactly; WebKit needed `.app-shell { height: 100vh }`
-      (with `min-height` it stretched the Home grid to the whole viewport and the page
-      scrolled by 110px).
+      Home fits the 920x760 window exactly after the WebKit layout pass below.
+- [x] **WebKit layout pass (2026-10-25).** The Mac webview is WebKit, Windows is Chromium,
+      and WebKit sizes a grid or a `flex: 1` item inside a column flexbox against the
+      window instead of its parent. Three places broke: Home overflowed by 110px
+      (`.home-grid` now `height: 0; min-height: 0` under `flex: 1 1 auto`), the Settings
+      Voice/Webcam cards threw their text and buttons to the bottom of a tall window
+      (`.voice-summary` is a flex column, not a grid, and `flex: 1 1 auto`), and the report's
+      "40:00 min" tile ellipsized because SF Mono is wider than Consolas (`fitShareStats`
+      now shrinks report tiles too). Every mock screen was then screenshotted in a real
+      WKWebView at 920x760 and 1850x1530, light and dark (46 shots: Home, empty Home,
+      preflight, live session, Settings, Voice, Webcam, History, empty History, report,
+      Trends, overlay): no horizontal overflow, nothing clipped, nothing displaced. Harness:
+      a `WKWebView` snapshot tool over `mock.html` with CSS animations disabled (an
+      offscreen window never runs them, so fade-ins stay invisible). Rule of thumb for new
+      CSS: no `flex: 1` or `display: grid` with auto rows as a flex-column child without
+      checking it in Safari at a tall window.
+- [x] **Engine matrix (2026-10-25).** The same measurement script ran 34 states of the mock
+      in WebKit and in Chromium at 920x760 (every tab and subpage, the onboarding, preflight,
+      session-rules, delete-all, report-delete, tones, new-voice and info modals, the voice
+      page offline / low RAM / no model, the history week picker and Apps pane, both status
+      window placements) and compared page height, horizontal overflow, modal count and the
+      size of every main panel. Every modal opens in both; no WebKit clipping or overflow;
+      the only differences are 5–17 px of font metrics (Inter and SF Mono versus Consolas),
+      not layout. The model, memory and line popups were measured in the running app
+      instead (480x266, 480x374, 480x445, all inside the window) against Chromium's
+      268/378/459.
+- [x] **Status window interrupt card was 71 px too tall.** `fitOverlayWindow` measured the
+      card on the frame after asking for the 520 px width, while the window was still 228 px
+      wide, where the text wraps taller; the cached height then stuck. WebView2 resizes
+      within the frame, WebKit does not. It now asks for the placement's width, waits until
+      `innerWidth` matches it, then measures. Polled in the running app: corner card
+      228x201, interrupt card 520x369, zero slack in both.
 - [x] **Seeing what the capture resolves to.** `SUPERVISOR_PROBE` (above) is the Mac twin of
       `manual_foreground_probe`; it runs inside the bundle because a test binary has no
       Accessibility grant.
-- [ ] **Bundle targets.** `src-tauri/tauri.bundle.conf.json` lists `nsis`, `app` and `dmg`
-      together. Confirm Tauri skips `nsis` on a Mac, or split the targets per OS. The
-      day-to-day `tauri.conf.json` has `bundle.active` false and only the dev window.
+- [x] **Driving the app's own flows.** There is no WebDriver for Tauri on macOS, so debug
+      builds take `SUPERVISOR_AUTOMATION=<dir>`: a script written to `<dir>/cmd.js` runs
+      inside the main window's page (first line `//window=overlay` targets the status
+      window) and its return value lands in `<dir>/result.json` (`lib.rs`,
+      `start_automation`). Launch with
+      `open …/Supervisor.app --env SUPERVISOR_AUTOMATION=/tmp/supervisor-automation`.
+      Verified this way on 2026-10-25, each step checked against `sessions.db`: preflight
+      (goal, duration) → start → pause → resume → stop → report; a YouTube tab in front
+      read by address within one tick; crash recovery (a killed app's session comes back
+      `abandoned` with its time); History week navigation, report, delete with its confirm;
+      Settings strictness and timer toggle persist, rule add; Voice page with the model
+      Installed and the RAM tile; Webcam page listing "FaceTime HD Camera", the camera
+      prompt naming Supervisor, and the preview streaming 640x360 frames from the venv
+      worker; a full distraction: YouTube in front → `suspicious` 5 s → `distracted`, the
+      status window to its centered 520-wide interrupt card, "Not today" back to Locked in
+      with YouTube recorded as focused, and the stopped session reporting 2 nudges and
+      3 drifts (the session row's counters are written at stop, not live). Not yet verified
+      through the UI: voice clip generation, the tray menu (native, outside the page).
+- [x] **Window sizes are 28px short on a Mac.** Tauri gives macOS windows a full-size content
+      view: a window's "inner" height includes the title bar while the page is laid out below
+      it, so the main window asked for 760 gave the page 732, and the status window sized to
+      its content (201) showed 173 and cut off its last row. Windows has no such gap.
+      `titlebar_inset` (frame minus `contentLayoutRect`, through `objc2-app-kit`) is added
+      whenever a window is sized; both pages now measure exactly what was asked.
+- [x] **Bundle targets.** `src-tauri/tauri.bundle.conf.json` lists `nsis`, `app` and `dmg`
+      together; Tauri skips `nsis` on a Mac without a word, so one list serves both OSes.
+      The day-to-day `tauri.conf.json` has `bundle.active` false and only the dev window.
 
 ## 0. Mac code that did not exist (built 2026-10-25)
 
@@ -136,19 +204,27 @@ In the order a user would hit it.
       signing").
 - [ ] A release build opens without Gatekeeper warnings. Code signing and notarization are
       not set up yet.
-- [ ] Freeze the webcam worker on the Mac, Apple Silicon and Intel separately:
-      `.venv-webcam/bin/python scripts/build_webcam_runtime.py`
-      then `npm run build -- --config src-tauri/tauri.bundle.conf.json`.
-      PyInstaller cannot cross-compile. The script fails if the frozen worker's CPU or GPU
-      self-test fails. Intel Macs use onnxruntime 1.23.2; Apple Silicon uses 1.29.0
-      (`webcam_bakeoff/requirements.txt`). macOS 14 or newer.
-- [ ] The frozen worker's libraries must be signed for notarization. `Entitlements.plist`
-      gives the app camera and microphone. Confirm the worker, which is a separate program
-      inside the app, is allowed to open the camera under the hardened runtime. If Gatekeeper
-      blocks it, sign the worker with the same identity and
-      `com.apple.security.device.camera`.
+- [x] Freeze the webcam worker on the Mac (Apple Silicon done; Intel still needs an Intel Mac):
+      `.venv-webcam/bin/python scripts/build_webcam_runtime.py` staged 346 MB under
+      `build/webcam/`, and the frozen worker passed both self-tests (CPU 290 ms, CoreML
+      2.9 s first frame). Then `npm run build -- --config src-tauri/tauri.bundle.conf.json`.
+      PyInstaller cannot cross-compile. Intel Macs use onnxruntime 1.23.2; Apple Silicon
+      uses 1.29.0 (`webcam_bakeoff/requirements.txt`). macOS 14 or newer.
+- [x] The frozen worker's libraries are signed by `scripts/sign_webcam_runtime.sh` with the
+      same identity, hardened runtime, and `com.apple.security.device.camera` plus the two
+      entitlements a frozen Python needs (`allow-unsigned-executable-memory`,
+      `disable-library-validation`). After signing, no ad-hoc or unsigned Mach-O is left in
+      the worker tree, and it still passes both self-tests from inside the bundled app.
+      Whether the camera actually opens for the worker under the hardened runtime is still to
+      be seen in a webcam session.
 - [ ] The camera prompt must name Supervisor, not Terminal or Python. In a dev build it will
       name the terminal, because dev runs the venv directly.
+- [x] **A signed debug bundle without entitlements never prompts.** Signing with the hardened
+      runtime (any identity) and no `com.apple.security.device.camera` entitlement makes
+      `AVCaptureDevice.requestAccess` answer "denied" at once, with no dialog, and the Webcam
+      page says camera access is off. `npm run bundle:mac-dev` now passes `Entitlements.plist`
+      like the release config does; the Getting started / webcam copy was right, the build
+      was wrong.
 - [ ] GPU mode (`Run on GPU` in webcam settings) must report CoreML, not an error, on a Mac
       with a GPU. It should show an error, not silently use the CPU, when CoreML cannot start.
 
@@ -183,8 +259,17 @@ not say "Not enough free RAM" on a Mac that has plenty.
 
 ## 4. Voice cloning RAM gate
 
-- [ ] Run voice cloning end to end. The RAM check now uses free + inactive pages, minus
-      speculative pages (already counted as free). Purgeable pages are not added.
+- [ ] Run voice cloning end to end in the app. The RAM check now uses free + inactive pages,
+      minus speculative pages (already counted as free). Purgeable pages are not added.
+- [x] The worker itself runs on the Mac: with the pinned Chatterbox Nano files in
+      `~/Library/Application Support/app.supervisor.desktop/voice/model_packs/chatterbox-nano-minimal/`
+      (fetched by hand from the same Hugging Face revision the app downloads),
+      `chatterbox_nano_worker.py --device cpu` made a 1.8 s clip from `derek.wav` in 37 s
+      wall: imports 7.3 s, model load 10.2 s, conditioning 15.8 s, synthesis 2.8 s. The
+      one-shot CLI needs `--cache-dir` outside `--out-dir`, or it refuses its own caches as
+      "output directory is not empty" (the app's `--serve` path does not hit this).
+      `--device mps` fails inside Chatterbox ("Output channels > 65536 not supported at the
+      MPS device", torch 2.6.0); the app always passes `--device cpu`, so nothing to change.
 
 ## 5. Window capture (library: `active-win-pos-rs`)
 
@@ -228,14 +313,19 @@ is ignored when it does not (the desktop). The login window gives no sample. Uti
 
 - [ ] Continuity Camera can make an iPhone the default camera. Confirm camera 0 is the
       built-in camera, or that the worker's error is clear when it is not.
-- [ ] PyInstaller on macOS puts symlinks inside the frozen folder. Confirm Tauri's resource
-      copy keeps them, and that the installed worker still runs.
+- [x] PyInstaller 6.22 on macOS put no symlinks in the frozen folder (`find -type l` is
+      empty; Python.framework's `Current`, `Python` and `Resources` are real copies).
+      `sign_webcam_runtime.sh` turns those back into symlinks so codesign accepts the
+      framework; Tauri's resource copy then flattens them again (`Python` becomes a file,
+      `Current` and `Resources` are dropped). The installed worker still runs, and
+      `codesign --verify --deep --strict` passes on the app and on the framework inside it.
 - [ ] `npm run tauri dev` uses the venv, not the frozen worker. Only `npm run build` with
       `tauri.bundle.conf.json` bundles `build/webcam/`.
 
 ## 7. App behavior
 
-- [ ] Single instance: launching a second copy focuses the running window and exits.
+- [x] Single instance: a second `Contents/MacOS/supervisor` launched by hand exits at once;
+      one process remains.
 - [ ] Storage: the database is created under `~/Library/Application Support/app.supervisor.desktop/`
       (seen: `sessions.db` plus WAL, and a 29 s session with its spans after the first run).
       Still to try: a corrupt file is moved aside with the "starting fresh" card; a folder with
