@@ -154,8 +154,12 @@ Supervisor code.
       worker; a full distraction: YouTube in front → `suspicious` 5 s → `distracted`, the
       status window to its centered 520-wide interrupt card, "Not today" back to Locked in
       with YouTube recorded as focused, and the stopped session reporting 2 nudges and
-      3 drifts (the session row's counters are written at stop, not live). Not yet verified
-      through the UI: voice clip generation, the tray menu (native, outside the page).
+      3 drifts (the session row's counters are written at stop, not live). Later passes
+      covered the rest through the UI: webcam monitoring in a session, clip generation for
+      the starter voice and for a voice the user recorded through the microphone prompt
+      ("Pranav", five clips), the tray menu through `automation_tray`, Spotlight / Cmd-Tab /
+      Mission Control through `automation_input`, Firefox / Brave / Edge by address, media
+      presence through `automation_media`, and an idle Away span.
 - [x] **Window sizes are 28px short on a Mac.** Tauri gives macOS windows a full-size content
       view: a window's "inner" height includes the title bar while the page is laid out below
       it, so the main window asked for 760 gave the page 732, and the status window sized to
