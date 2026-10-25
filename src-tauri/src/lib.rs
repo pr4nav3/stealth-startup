@@ -645,7 +645,8 @@ pub fn run() {
             start_webcam_preview,
             stop_webcam_preview,
             list_cameras,
-            automation_result
+            automation_result,
+            automation_tray
         ])
         .build(tauri::generate_context!())
         .expect("failed to run Supervisor")
@@ -710,35 +711,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_main_window(app),
-            "show_status" => {
-                with_sessions(app, |sessions, now| {
-                    sessions.set_status_window_enabled(true, now);
-                });
-                let _ = show_status_window_internal(app);
-            }
-            "pin_status" => {
-                with_sessions(app, |sessions, now| {
-                    sessions.set_status_window_enabled(true, now);
-                    sessions.set_status_window_on_top(true, now);
-                });
-                let _ = set_status_window_on_top_internal(app, true);
-                let _ = show_status_window_internal(app);
-            }
-            "pause_resume" => with_sessions(app, |sessions, now| sessions.toggle_pause(now)),
-            "snooze" => with_sessions(app, |sessions, now| {
-                sessions.snooze(now, 5 * 60);
-            }),
-            "stop" => {
-                with_sessions(app, |sessions, now| {
-                    sessions.stop(now);
-                });
-                hide_status_window(app);
-            }
-            "quit" => app.exit(0),
-            _ => {}
-        })
+        .on_menu_event(|app, event| tray_action(app, event.id.as_ref()))
         .on_tray_icon_event(|tray, event| {
             if matches!(
                 event,
@@ -757,6 +730,49 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     }
 
     builder.build(app)?;
+    Ok(())
+}
+
+/// What each tray menu item does. One function so the debug hook can run the same code.
+fn tray_action(app: &AppHandle, id: &str) {
+    match id {
+        "show" => show_main_window(app),
+        "show_status" => {
+            with_sessions(app, |sessions, now| {
+                sessions.set_status_window_enabled(true, now);
+            });
+            let _ = show_status_window_internal(app);
+        }
+        "pin_status" => {
+            with_sessions(app, |sessions, now| {
+                sessions.set_status_window_enabled(true, now);
+                sessions.set_status_window_on_top(true, now);
+            });
+            let _ = set_status_window_on_top_internal(app, true);
+            let _ = show_status_window_internal(app);
+        }
+        "pause_resume" => with_sessions(app, |sessions, now| sessions.toggle_pause(now)),
+        "snooze" => with_sessions(app, |sessions, now| {
+            sessions.snooze(now, 5 * 60);
+        }),
+        "stop" => {
+            with_sessions(app, |sessions, now| {
+                sessions.stop(now);
+            });
+            hide_status_window(app);
+        }
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
+/// Debug builds only, for the automation hook: runs a tray menu item by id.
+#[tauri::command]
+fn automation_tray(id: String, app: AppHandle) -> Result<(), String> {
+    if !cfg!(debug_assertions) || std::env::var_os("SUPERVISOR_AUTOMATION").is_none() {
+        return Err("automation is off".to_string());
+    }
+    tray_action(&app, &id);
     Ok(())
 }
 
