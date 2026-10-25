@@ -52,10 +52,17 @@ ship target. Everything through 2026-10-24 was written and run on Windows. On
       Settings (strictness, timer, rules), Voice page, Webcam prompt and
       preview, a full YouTube distraction with the interrupt card, "Not today",
       2 nudges recorded
-- [ ] Not yet on the Mac: a voice clip through the app's own UI (microphone
-      prompt), the RAM gate under load, the tray menu, Developer ID signing and
-      notarization, shell surfaces, media presence, Firefox/Edge/Brave/Arc, an
-      Intel build
+- [x] Second live pass: webcam monitoring inside a session, five voice clips
+      generated from the Voice page (after fixing the venv-symlink bug in
+      `voice_runtime.rs`), kill -9 leaves no worker, Finder folders count,
+      Chrome's video wake lock is the assertion media presence reads
+- [x] `scripts/mac-ui-check/check.sh`: every mock state laid out in WebKit,
+      fails on overflow, a modal or overlay card taller than its window, or
+      a scrolling Home; runs in CI on the macOS job
+- [ ] Not yet on the Mac: recording a new voice (microphone prompt), the tray
+      menu, Cmd-Tab/Spotlight/Dock surfaces, the 3-minute Away path, other
+      browsers (none installed), an Intel build, Developer ID signing and
+      notarization
 
 ## Branches
 

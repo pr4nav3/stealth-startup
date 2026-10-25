@@ -647,10 +647,8 @@ fn resolve_dev_path(path: PathBuf) -> Option<PathBuf> {
         candidates
     };
 
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
+    // Not canonicalized: a venv interpreter may be a symlink that must stay as written.
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
 fn inferred_python_for_worker(worker: &Path) -> Option<PathBuf> {
@@ -660,9 +658,9 @@ fn inferred_python_for_worker(worker: &Path) -> Option<PathBuf> {
     } else {
         dir.join(".venv").join("bin").join("python")
     };
-    python
-        .is_file()
-        .then(|| python.canonicalize().unwrap_or(python))
+    // Never canonicalize a venv's python: on macOS and Linux `bin/python` is a symlink to the
+    // base interpreter, and resolving it runs that interpreter without the venv's packages.
+    python.is_file().then_some(python)
 }
 
 fn debug_worker_launch() -> Option<WorkerLaunch> {
@@ -895,8 +893,8 @@ mod tests {
 
         let launch = worker_launch_from_paths(worker.clone(), None).unwrap();
 
-        assert_eq!(launch.program, python.canonicalize().unwrap());
-        assert_eq!(launch.prefix_args, vec![worker.canonicalize().unwrap()]);
+        assert_eq!(launch.program, python);
+        assert_eq!(launch.prefix_args, vec![worker.clone()]);
 
         let _ = fs::remove_dir_all(root);
     }

@@ -32,3 +32,6 @@ jobs:
       - name: Bundle the debug app (macOS)
         if: runner.os == 'macOS'
         run: npx tauri build --debug --bundles app --config '{"bundle":{"active":true,"targets":["app"]}}'
+      - name: Lay out every screen in WebKit (macOS)
+        if: runner.os == 'macOS'
+        run: sh scripts/mac-ui-check/check.sh

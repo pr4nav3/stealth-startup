@@ -244,6 +244,9 @@ compile). Nothing below has executed on a Mac.
 - [x] RAM, per-process memory, and free disk (`libc`, plus `mach2` to release a port).
       `cargo test system_resource_queries_return_real_values` passes on this Mac.
 
+- [x] The premise holds: while a YouTube video plays in Chrome, `pmset -g assertions` shows
+      Chrome's own pid holding `NoDisplaySleepAssertion "Video Wake Lock"`, which is what
+      `keeps_display_awake` looks for. The 3-minute idle path itself was not sat through.
 - [ ] Media keeps an idle user present (`keeps_display_awake` in `macos.rs`, IOKit
       `IOPMCopyAssertionsByProcess`). With no input for 3+ minutes, the session must stay on
       the site (not Away) while: a YouTube video plays in Chrome, in Safari, and in Firefox,
@@ -296,9 +299,9 @@ is ignored when it does not (the desktop). The login window gives no sample. Uti
 `CoreServices/Applications` (Screen Sharing) still count. The rule is tested on Windows.
 
 - [ ] Cmd-Tab, Spotlight, Mission Control, Launchpad, Notification Center, Control Center,
-      and the Dock must keep the previous window counting.
-- [ ] Clicking the desktop must keep the previous window. Opening a Finder folder must count
-      as Finder.
+      and the Dock must keep the previous window counting. (Needs keystrokes; not driven.)
+- [x] Opening a Finder folder counts as Finder: probe with `~/Downloads` in front resolved
+      `App Finder [App]` with the folder as the title. Clicking the desktop not driven.
 - [ ] Without Screen Recording permission, window titles are missing, so a Finder folder
       looks like the desktop and gets ignored. Confirm that, and whether the app should ask
       for Screen Recording before trusting this.
