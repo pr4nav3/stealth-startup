@@ -33,10 +33,14 @@ main() {
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
 
+  # HTTPS only, except for a local test server given by SUPERVISOR_INSTALL_BASE.
+  proto="=https"
+  [ -n "${SUPERVISOR_INSTALL_BASE:-}" ] && proto="=http,https"
+
   echo "Downloading $APP..."
-  curl -fL --proto '=https' --retry 3 --progress-bar -o "$tmp/$zip" "$BASE/$zip" \
+  curl -fL --proto "$proto" --retry 3 --progress-bar -o "$tmp/$zip" "$BASE/$zip" \
     || fail "could not download $BASE/$zip"
-  curl -fsSL --proto '=https' --retry 3 -o "$tmp/$zip.sha256" "$BASE/$zip.sha256" \
+  curl -fsSL --proto "$proto" --retry 3 -o "$tmp/$zip.sha256" "$BASE/$zip.sha256" \
     || fail "could not download the checksum"
 
   expected=$(awk '{print $1}' "$tmp/$zip.sha256")
