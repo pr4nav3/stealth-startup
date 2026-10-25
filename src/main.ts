@@ -7602,6 +7602,40 @@ function streakLabel(days: number): string {
   return `${days} day${days === 1 ? "" : "s"}`;
 }
 
+/** The day's strip as runs of on/off-task, cut into equal bins and each bin given the state
+ *  that filled most of it. A few seconds in a tab can't paint a line, a real drift still shows,
+ *  and the picture stays readable for any length of day. The stats stay exact. */
+const STRIP_BINS = 48;
+
+function stripRuns(segments: DaySummary["segments"], bins = STRIP_BINS): { on: boolean; left: number; width: number }[] {
+  const onSeconds = new Array<number>(bins).fill(0);
+  const offSeconds = new Array<number>(bins).fill(0);
+  for (const segment of segments) {
+    for (const span of segment.report.spans) {
+      const on = stripOnTask(span.state);
+      if (!on && !stripOffTask(span.state)) continue;
+      const a = segment.start + (span.started_offset_seconds / segment.duration) * segment.width;
+      const b = a + (span.seconds / segment.duration) * segment.width;
+      for (let k = Math.floor(a * bins); k < Math.min(bins, Math.ceil(b * bins)); k += 1) {
+        const overlap = Math.min(b, (k + 1) / bins) - Math.max(a, k / bins);
+        if (overlap > 0) (on ? onSeconds : offSeconds)[k] += overlap;
+      }
+    }
+  }
+  const runs: { on: boolean; left: number; width: number }[] = [];
+  for (let k = 0; k < bins; k += 1) {
+    if (onSeconds[k] + offSeconds[k] === 0) continue;
+    const on = onSeconds[k] >= offSeconds[k];
+    const last = runs[runs.length - 1];
+    if (last && last.on === on && Math.abs(last.left + last.width - k / bins) < 1e-9) {
+      last.width += 1 / bins;
+    } else {
+      runs.push({ on, left: k / bins, width: 1 / bins });
+    }
+  }
+  return runs;
+}
+
 function renderDayCard(todayStreakDays: number): string {
   if (!dayCard) {
     if (history.length > 0) {
@@ -7629,26 +7663,8 @@ function renderDayCard(todayStreakDays: number): string {
   }
   const summary = summarizeDay(dayCard);
   const streakText = streakLabel(streakInfo(summary.day).days);
-  const strip = summary.segments
-    .flatMap((segment) =>
-      segment.report.spans
-        .filter((span) => stripOnTask(span.state) || stripOffTask(span.state))
-        .map((span) => {
-          const left = (segment.start + (span.started_offset_seconds / segment.duration) * segment.width) * 100;
-          const width = ((span.seconds / segment.duration) * segment.width) * 100;
-          return `<i class="${stripOnTask(span.state) ? "strip-on" : "strip-off"}" style="left: ${left.toFixed(2)}%; width: ${width.toFixed(2)}%"></i>`;
-        }),
-    )
-    .join("");
-  const ticks = summary.segments
-    .flatMap((segment) =>
-      segment.report.events
-        .filter((event) => event.kind === "nudge")
-        .map((event) => {
-          const left = (segment.start + Math.min(1, event.at_offset_seconds / segment.duration) * segment.width) * 100;
-          return `<b style="left: ${left.toFixed(2)}%"></b>`;
-        }),
-    )
+  const strip = stripRuns(summary.segments)
+    .map((run) => `<i class="${run.on ? "strip-on" : "strip-off"}" style="left: ${(run.left * 100).toFixed(2)}%; width: ${(run.width * 100).toFixed(2)}%"></i>`)
     .join("");
   return `
     <section class="panel last-session-card">
@@ -7658,7 +7674,7 @@ function renderDayCard(todayStreakDays: number): string {
           <strong>${escapeHtml(dayTitle(summary.day))}</strong>
           <span>${escapeHtml(cardNote(summary))}</span>
         </span>
-        <span class="share-strip" aria-hidden="true">${ticks}<span class="share-strip-fill">${strip}</span></span>
+        <span class="share-strip" aria-hidden="true"><span class="share-strip-fill">${strip}</span></span>
         <span class="share-stats">
           <span><small>Focused</small><strong>${escapeHtml(formatHours(summary.focusedSeconds))}</strong></span>
           <span><small>Attention span</small><strong>${escapeHtml(formatMinutes(summary.attentionSeconds))}</strong></span>
@@ -7774,14 +7790,9 @@ async function copyCard(): Promise<void> {
   ctx.clip();
   ctx.fillStyle = palette.track;
   ctx.fillRect(stripX, stripY, stripW, stripH);
-  for (const segment of summary.segments) {
-    for (const span of segment.report.spans) {
-      if (!stripOnTask(span.state) && !stripOffTask(span.state)) continue;
-      ctx.fillStyle = stripOnTask(span.state) ? STRIP_GREEN : STRIP_RED;
-      const x = stripX + (segment.start + (span.started_offset_seconds / segment.duration) * segment.width) * stripW;
-      const w = Math.max(2, (span.seconds / segment.duration) * segment.width * stripW);
-      ctx.fillRect(x, stripY, w, stripH);
-    }
+  for (const run of stripRuns(summary.segments)) {
+    ctx.fillStyle = run.on ? STRIP_GREEN : STRIP_RED;
+    ctx.fillRect(stripX + run.left * stripW, stripY, run.width * stripW, stripH);
   }
   ctx.restore();
   ctx.strokeStyle = palette.border;
@@ -7789,19 +7800,6 @@ async function copyCard(): Promise<void> {
   ctx.beginPath();
   ctx.roundRect(stripX, stripY, stripW, stripH, 6);
   ctx.stroke();
-  ctx.fillStyle = ink;
-  for (const segment of summary.segments) {
-    for (const event of segment.report.events) {
-      if (event.kind !== "nudge") continue;
-      const x = stripX + (segment.start + Math.min(1, event.at_offset_seconds / segment.duration) * segment.width) * stripW;
-      ctx.beginPath();
-      ctx.moveTo(x - 6, stripY - 12);
-      ctx.lineTo(x + 6, stripY - 12);
-      ctx.lineTo(x, stripY - 3);
-      ctx.closePath();
-      ctx.fill();
-    }
-  }
 
   const stats: [string, string][] = [
     ["FOCUSED", formatHours(summary.focusedSeconds)],

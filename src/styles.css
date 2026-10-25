@@ -193,7 +193,8 @@ p {
    zero-height grid it stops stretching the rows (a gap under the cards); with a definite
    shell both engines fill Home exactly. Pages that scroll keep min-height, so their bottom
    padding survives. */
-.app-shell:has(> .home-ready) {
+.app-shell:has(> .home-ready),
+.app-shell:has(> .active-session-page) {
   height: 100vh;
 }
 
@@ -306,14 +307,21 @@ h1 {
   gap: 14px;
 }
 
+/* Like Home, the live view fills the window: the cards grow, the timer sits at the bottom of
+   the state card, and the controls sit on the bottom edge. Nothing is added to do it. */
 .active-session-page {
-  display: grid;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
   gap: 14px;
   container-type: inline-size;
 }
 
 .active-session-grid {
   display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
   grid-template-columns: minmax(0, 1.45fr) minmax(230px, 0.72fr);
   align-items: stretch;
   gap: 14px;
