@@ -53,7 +53,7 @@ def load_asset(path: Path) -> dict[str, Any]:
     }
 
 
-def build_manifest(version: str, asset_paths: Sequence[Path]) -> dict[str, Any]:
+def build_manifest(version: str, asset_paths: Sequence[Path], partial: bool = False) -> dict[str, Any]:
     version = version.strip()
     if not version:
         raise ValueError("version must not be empty")
@@ -63,7 +63,7 @@ def build_manifest(version: str, asset_paths: Sequence[Path]) -> dict[str, Any]:
     if len(targets) != len(set(targets)):
         raise ValueError("runtime targets must be unique")
     missing = REQUIRED_TARGETS.difference(targets)
-    if missing:
+    if missing and not partial:
         raise ValueError(f"missing runtime targets: {', '.join(sorted(missing))}")
 
     return {
@@ -80,12 +80,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--version", required=True, help="Release version.")
     parser.add_argument("--output", type=Path, required=True, help="Manifest output path.")
     parser.add_argument("assets", nargs="+", type=Path, help="Runtime .asset.json files.")
+    parser.add_argument("--partial", action="store_true", help="Publish without every target; the missing ones get a clear 'not published' error in the app.")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    manifest = build_manifest(args.version, args.assets)
+    manifest = build_manifest(args.version, args.assets, args.partial)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     temporary.write_text(

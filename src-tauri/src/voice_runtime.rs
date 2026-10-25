@@ -264,8 +264,7 @@ pub fn runtime_target() -> String {
 }
 
 fn fetch_manifest() -> Result<VoicePackManifest, String> {
-    let url = manifest_url()
-        .ok_or_else(|| "voice pack manifest URL is not configured for this build".to_string())?;
+    let url = manifest_url();
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(MANIFEST_CONNECT_TIMEOUT)
         .timeout(MANIFEST_TIMEOUT)
@@ -330,7 +329,14 @@ fn select_runtime_asset(
     Ok(asset.clone())
 }
 
-fn manifest_url() -> Option<String> {
+/// Where installed copies look for the voice runtime. A fixed GitHub Release (tag
+/// `voice-runtime`, marked pre-release so it never becomes "latest" for the app installer)
+/// holds this manifest and the zips it lists; publishing a new runtime replaces those assets,
+/// and no app build has to change. See plans/distribution.md.
+const DEFAULT_MANIFEST_URL: &str =
+    "https://github.com/pr4nav3/stealth-startup/releases/download/voice-runtime/voice-runtime-manifest.json";
+
+fn manifest_url() -> String {
     std::env::var("SUPERVISOR_VOICE_PACK_MANIFEST_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
@@ -339,6 +345,7 @@ fn manifest_url() -> Option<String> {
                 .map(str::to_string)
                 .filter(|url| !url.trim().is_empty())
         })
+        .unwrap_or_else(|| DEFAULT_MANIFEST_URL.to_string())
 }
 
 fn install_archive(
@@ -541,13 +548,32 @@ fn extract_zip(archive_path: &Path, out_dir: &Path, cancel: &AtomicBool) -> Resu
                 entry.name()
             ));
         };
-        let out_path = out_dir.join(relative);
+        let out_path = out_dir.join(&relative);
         if entry.is_dir() {
             fs::create_dir_all(&out_path).map_err(|error| error.to_string())?;
             continue;
         }
         if let Some(parent) = out_path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        // PyInstaller's macOS output relies on symlinks (`_internal/Python` into
+        // Python.framework); a copy in its place breaks the library's rpath. A link may only
+        // point inside the runtime.
+        if entry.is_symlink() {
+            let mut target = String::new();
+            io::Read::read_to_string(&mut entry, &mut target).map_err(|error| error.to_string())?;
+            if !symlink_stays_inside(&relative, &target) {
+                return Err(format!(
+                    "voice runtime archive contains an unsafe link: {} -> {target}",
+                    entry.name()
+                ));
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &out_path).map_err(|error| error.to_string())?;
+            #[cfg(not(unix))]
+            return Err(format!("voice runtime archive contains a link: {}", entry.name()));
+            #[cfg(unix)]
+            continue;
         }
         let mut output = File::create(&out_path).map_err(|error| error.to_string())?;
         io::copy(&mut entry, &mut output).map_err(|error| error.to_string())?;
@@ -576,6 +602,25 @@ fn safe_relative_path(value: &str) -> Option<PathBuf> {
         }
     }
     (!safe.as_os_str().is_empty()).then_some(safe)
+}
+
+/// Whether a link at `link` (relative to the runtime root) pointing at `target` resolves
+/// inside the root, judged on the path text alone: relative, and never climbing above it.
+fn symlink_stays_inside(link: &Path, target: &str) -> bool {
+    let target = Path::new(target);
+    if target.is_absolute() || target.as_os_str().is_empty() {
+        return false;
+    }
+    let mut depth = link.components().count().saturating_sub(1);
+    for component in target.components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            _ => return false,
+        }
+    }
+    true
 }
 
 #[cfg(unix)]
@@ -825,6 +870,33 @@ mod tests {
         assert!(!archive.exists());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_links_must_stay_inside_the_runtime() {
+        let link = Path::new("_internal/Python");
+        assert!(symlink_stays_inside(link, "Python.framework/Versions/3.11/Python"));
+        assert!(symlink_stays_inside(Path::new("a/b/lib"), "../c/lib"));
+        assert!(!symlink_stays_inside(link, "../../etc/passwd"));
+        assert!(!symlink_stays_inside(link, "/usr/lib/libSystem.B.dylib"));
+        assert!(!symlink_stays_inside(link, ""));
+    }
+
+    /// Install a real runtime zip through the app's own install path and print the worker it
+    /// would launch: `SUPERVISOR_TEST_RUNTIME_ZIP=dist/supervisor-voice-runtime-macos-arm64.zip
+    /// cargo test manual_install_real_runtime_zip -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual: needs a built runtime zip"]
+    fn manual_install_real_runtime_zip() {
+        let zip = PathBuf::from(std::env::var("SUPERVISOR_TEST_RUNTIME_ZIP").expect("set SUPERVISOR_TEST_RUNTIME_ZIP"));
+        let root = test_dir("real-runtime");
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("runtime.zip");
+        fs::copy(&zip, &archive).unwrap();
+        let asset = asset_for_archive(&archive);
+        install_archive(&root, &archive, "manual", &runtime_target(), &asset, &AtomicBool::new(false)).unwrap();
+        let (_, executable) = installed_runtime(&root).unwrap().unwrap();
+        println!("installed worker: {}", executable.display());
     }
 
     #[test]

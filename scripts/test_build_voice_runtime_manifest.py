@@ -30,6 +30,8 @@ class VoiceRuntimeManifestTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "missing runtime targets"):
                 build_manifest("runtime-1", [mac])
+            partial = build_manifest("runtime-1", [mac], partial=True)
+            self.assertEqual([runtime["target"] for runtime in partial["runtimes"]], ["macos-arm64"])
 
     def write_asset(self, root: Path, target: str, executable: str) -> Path:
         path = root / f"{target}.asset.json"

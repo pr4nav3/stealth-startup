@@ -15,6 +15,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -66,6 +67,14 @@ def zip_dir(source: Path, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(source.rglob("*")):
+            # Keep symlinks as symlinks. PyInstaller on macOS links `_internal/Python` into
+            # Python.framework; stored as a copy, its @loader_path rpath points outside the
+            # runtime and the worker cannot load libintl.
+            if path.is_symlink():
+                info = zipfile.ZipInfo(str(path.relative_to(source)))
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                archive.writestr(info, os.readlink(path))
+                continue
             if path.is_dir():
                 continue
             archive.write(path, path.relative_to(source))
@@ -83,7 +92,7 @@ def build_runtime(args: argparse.Namespace) -> Path:
     target = args.target or runtime_target()
     ensure_native_target(target)
     executable = f"{WORKER_NAME}.exe" if target.startswith("windows-") else WORKER_NAME
-    output = args.output or (repo / "dist" / f"supervisor-voice-runtime-{target}.zip")
+    output = args.output or (repo / "build" / "voice-runtime" / f"supervisor-voice-runtime-{target}.zip")
 
     if runtime_dir.exists():
         shutil.rmtree(runtime_dir)

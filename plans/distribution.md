@@ -45,10 +45,46 @@ Before the public line works: `scripts/install-mac.sh` must be on `main` (the ra
 `main`, which is behind `app-v2-simplified-rules`), and at least one GitHub Release must exist
 with the zip and `.sha256`.
 
-Known gap for real users: a release build finds the voice runtime only through
-`SUPERVISOR_VOICE_PACK_MANIFEST_URL` at build time (`voice_runtime.rs`, `manifest_url`), which
-no release sets yet (`plans/STATUS.md`, "Ship"). Until it does, voice cloning in an installed
-copy cannot download its runtime. Webcam and website tracking are unaffected.
+## Voice runtime (downloaded by the app, separate from app releases)
+
+Installed copies download the frozen voice worker on first use. The app reads a manifest at a
+fixed address compiled in as the default (`voice_runtime.rs`, `DEFAULT_MANIFEST_URL`;
+`SUPERVISOR_VOICE_PACK_MANIFEST_URL` still overrides it):
+
+```
+https://github.com/pr4nav3/stealth-startup/releases/download/voice-runtime/voice-runtime-manifest.json
+```
+
+That address is a GitHub Release with tag **`voice-runtime`**, marked **pre-release** so it never
+becomes "latest" (the Mac installer reads "latest" for the app). It holds the manifest and one
+zip per target. A new runtime means replacing those assets; app releases never change for it.
+
+Build and publish, on a Mac (Windows: the same with the Windows venv, then rebuild the manifest
+with both asset files and without `--partial`):
+
+```
+.venv-voice-runtime-macos/bin/python scripts/build_voice_runtime.py
+# edit build/voice-runtime/*.asset.json: url = the release asset URL above, with the zip's name
+python3 scripts/build_voice_runtime_manifest.py --version <name> --partial \
+  --output build/voice-runtime/voice-runtime-manifest.json build/voice-runtime/*.asset.json
+```
+
+Then upload `voice-runtime-manifest.json` and the zip to the `voice-runtime` release.
+
+Tested 2026-10-25: the macOS arm64 runtime (245 MB, sha256 `210878b6…`) installed through the
+app's own install code (`cargo test manual_install_real_runtime_zip -- --ignored`) and the
+installed worker made a 1.96 s clip from `derek.wav` over its `--serve` protocol. First use is
+slow: 58 s of imports, 11 s model load, 16 s voice conditioning, then about 3 s a clip.
+
+Bug fixed on the way: the build script's zipper followed symlinks, storing PyInstaller's 33
+links as copies; the copied `_internal/Python` then looked for `libintl.8.dylib` outside the
+runtime and the worker could not start at all. The zip now stores links, and the installer
+recreates them, refusing any that point outside the runtime. Any runtime zip built before
+2026-10-25 (including the old August one in `plans/STATUS.md`) has this bug on macOS.
+
+Not yet: the release itself (needs uploading), a Windows runtime in the manifest (a Windows
+copy gets "no voice runtime is published for windows-x64" until then), and the download step
+over real HTTPS from GitHub, which can only be tried once the release exists.
 
 ### Making a release
 

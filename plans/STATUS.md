@@ -260,8 +260,8 @@ live run on Windows was 2026-10-18.
 ## Ship, after the app behavior is settled
 
 - [ ] Prod voice path: download the frozen zip, generate, play, delete, regenerate
-- [ ] GitHub Release for the macOS ARM64 zip (SHA-256 `fcfd9bc86932f16b53449b7b6e29ab108b9ba9f23aec8d1af5333fe4b1f79ae5`) and the Windows x64 zip (SHA-256 `69bace321f9f5f8f6c6fbec3c4dc20a50f109ffa60ed9fdd5c19f76f26ec9b0a`). Do not commit the zips
-- [ ] Runtime manifest with both targets, and `SUPERVISOR_VOICE_PACK_MANIFEST_URL`
+- [ ] Upload the voice runtime to the fixed `voice-runtime` GitHub Release (pre-release): macOS arm64 zip rebuilt and tested 2026-10-25 (SHA-256 `210878b6061a85fba0ef1b2b222a365b3eff5b8a469ae1772653b17955a8bc6b`, in `build/voice-runtime/`) plus its manifest. The older macOS zip (`fcfd9bc8…`) cannot start on a Mac (zipped without symlinks); rebuild the Windows x64 zip (`69bace32…`) with the current worker before adding it. Do not commit the zips. See `plans/distribution.md`
+- [x] Installed copies find the runtime without build-time setup: the manifest address is compiled in (`DEFAULT_MANIFEST_URL`); a macOS-only manifest is built with `--partial`. Add the Windows target when its zip is rebuilt
 - [ ] Frozen webcam worker built on each OS (`scripts/build_webcam_runtime.py`);
       `webcam_bakeoff/models/yolo26s.onnx` is not in git (see that README).
       Apple Silicon: done 2026-10-25, signed with the dev identity. Windows
