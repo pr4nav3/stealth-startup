@@ -1,6 +1,6 @@
 # Webcam Tracking
 
-Last updated: 2026-10-19
+Last updated: 2026-10-24
 
 The tracker runs as a Settings preview and, when the user turns it on, during
 every session (see Sessions below).
@@ -89,4 +89,12 @@ recorded, never nudged.
 ## Out of scope
 
 Gaze-to-pixel, walked-away nudges, cloud models,
-frame storage, MediaPipe runtime wheels, a second camera (index 0 only for now).
+frame storage, MediaPipe runtime wheels.
+
+## Camera choice and preview (2026-10-24)
+
+The camera is a setting (`webcam_camera`, an index passed to the worker). Settings lists
+devices by name where the OS gives a list (Windows, Media Foundation, in OpenCV's order);
+elsewhere it offers "Camera 0" to "Camera 3". The Settings preview sends pictures at 15 a
+second (`--preview-fps`) while detection stays at 2 fps; between detections the last labels and
+boxes are resent, and `detected` marks the frames that were really analysed.

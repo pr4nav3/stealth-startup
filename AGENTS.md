@@ -12,4 +12,4 @@ Supervisor-specific defaults:
 - Add no new dependency unless the current phase needs it.
 - Leave one runnable check for non-trivial logic.
 
-Baseline branch: `main`. Tracker: `plans/STATUS.md`. Agent starter bugs: `plans/known-issues.md`.
+Baseline branch: `app-v2-simplified-rules` (`main` is an ancestor; fast-forward it when ready). Tracker: `plans/STATUS.md`. Agent starter bugs: `plans/known-issues.md`. Mac work: `plans/mac-handoff.md`.

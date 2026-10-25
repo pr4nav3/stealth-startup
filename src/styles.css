@@ -4137,6 +4137,7 @@ button.trend-door-go {
 
 .recap-head {
   justify-content: flex-start;
+  margin-bottom: 0;
 }
 
 .recap-head > div:first-of-type {
@@ -4290,6 +4291,11 @@ button.recap-bar-col:active .recap-bar {
   --plot-ink: var(--ink);
 }
 
+/* On the dark panel the line reads as a grey mark, not a cream border. */
+[data-theme="dark"] .trend-recovery {
+  --plot-ink: #8f8c82;
+}
+
 .trend-head {
   display: grid;
   gap: 6px;
@@ -4300,7 +4306,12 @@ button.recap-bar-col:active .recap-bar {
 }
 
 .trend-hint {
-  opacity: 0.65;
+  margin-top: -4px;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.7;
 }
 
 .trend-figure {
@@ -4367,6 +4378,7 @@ button.recap-bar-col:active .recap-bar {
 
 .trend-recovery .span-dot {
   fill: #ff684f;
+  stroke: #141410;
 }
 
 .trend-card .span-dot.is-partial {

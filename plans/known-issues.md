@@ -1,10 +1,16 @@
 # Known issues
 
-Last updated: 2026-10-19
+Last updated: 2026-10-24
 
-Starter list when swapping agents. Baseline is **`main`** (clean tree). Everything described here is committed.
+Starter list when swapping agents. Baseline is **`app-v2-simplified-rules`** (`main` is an
+ancestor; fast-forward it when ready). Everything described here is committed on that branch.
 
 Work tracker: `plans/STATUS.md`. This file is the holes to check, not the roadmap.
+
+**Nothing on the branch has run in the built app.** The V2 rules model, History v4, the Voice
+page, the Settings polish and the schema v12 migration were proved by `cargo test`, `npm run
+check` and the browser mock only. The last live run was on Windows on 2026-10-18, before any of
+it. Expect first-run bugs on both OSes; the Windows live pass is item 2 in `plans/STATUS.md`.
 
 ---
 
@@ -52,7 +58,11 @@ rules apply from the next sample and never change a recorded session. See `plans
 
 ## UI
 
-**Session changes rebuild the Session tab.** Polling is every second, but the page is rebuilt only when what it shows changes (`viewKey`); the clock and status chip are painted in place (`paintLive`). History and Settings are never rebuilt by session changes. A rebuild restores scroll, focus, and caret, and every text field keeps its value in state or sits in an editor that blocks rebuilds. While an editor or the classify popup is open, or a text field or dropdown has focus, polling only paints the clock, chip, and state slab; the rebuild waits until it closes or loses focus. Measured with a fake backend: 0 rebuilds while nothing changes, one per real change.
+**Session changes rebuild the Session tab.** Polling is every second, but the page is rebuilt only when what it shows changes (`viewKey`); the clock and status chip are painted in place (`paintLive`). History and Settings are never rebuilt by session changes. A rebuild restores scroll, focus, and caret, and every text field keeps its value in state or sits in an editor that blocks rebuilds. While an editor or a popup is open, or a text field or dropdown has focus, polling only paints the clock, chip, and state slab; the rebuild waits until it closes or loses focus. Measured with a fake backend: 0 rebuilds while nothing changes, one per real change.
+
+**Rules are distractions only (V2).** There is no Relevant or Neutral and no classify step after a session. A site that is the work today is allowed with "Not today" (preflight chip or nudge popup) and the allowance ends with the session. Report rows show time only; the rule toggle on History rows is gone. Old reports keep the decisions recorded at the time; a rule change never changes them.
+
+**History v4, Voice v2 and the mock agree; the app has not been checked.** Every screen was rendered through `mock.html` with fixtures, not against a real database. Places most likely to differ from the mock: the month picker's `get_focus_days` on a sparse history, session rows' miniature timelines on long sessions, the voice page's status tiles when the worker is really down.
 
 **PDF export is unimplemented.** Its nonfunctional button and empty handler were removed.
 
@@ -78,7 +88,9 @@ and the deadpan Gen Z set needs a flat delivery. Listen before keeping those cli
 
 **Phones below the camera are invisible.** A laptop webcam frames the face and shoulders; a phone in the lap never appears. Head-down detection is a possible later signal.
 
-**Camera index is 0.** No setting yet for a second camera (audit leftover in progress).
+**Camera names come from Windows only.** The webcam select lists devices by name through Media Foundation, in the order OpenCV opens them. On macOS and Linux `camera_names()` returns an empty list and the select shows "Camera 0" to "Camera 3". The saved index is used on every OS.
+
+**Preview runs at 15 pictures a second, detection at 2.** Between detections the worker resends the last labels and boxes (`--preview-fps`). A `detected` flag marks the real frames; nothing in the app reads it yet.
 
 **`away_seconds` stays 0.** Camera Away is written as Away (`idle`) spans like input Away, so the column is unused.
 
@@ -88,7 +100,13 @@ and the deadpan Gen Z set needs a flat delivery. Listen before keeping those cli
 
 ## macOS (untested)
 
-Nothing Mac has been run. Checklist: `plans/mac-handoff.md` (original handoff; do not implement capture from it). Likely still true: RAM gate, Screen Recording titles, shell surfaces, signing/notarization, Continuity Camera.
+Nothing Mac has been run. Checklist and the list of Mac code that does not exist yet: `plans/mac-handoff.md`. The gaps, in the order they bite:
+
+- **No address-bar read.** `browser_macos.rs` returns "unavailable", so every browser is Other websites or a title match. Site rules cannot fire on a Mac until it reads `AXURL` through Accessibility.
+- **Workers can outlive the app.** `WorkerLifetime` (voice.rs) is a Windows job object; on macOS it is empty. Quit while a voice clip generates or a session has the webcam on and the Python process may stay behind. Needs a kill on exit or a process group.
+- **No camera names** (above). The select still works by index.
+- **`CREATE_NO_WINDOW` and the Win32 paths** are `#[cfg(windows)]`; the Mac spawns the worker plainly. Confirm no Terminal window opens.
+- Permissions (Screen Recording for titles, Accessibility for the address bar, Camera, Microphone), the RAM gate, shell surfaces, media presence, bundle-id identity, Continuity Camera, signing and notarization: all written, none run.
 
 Windows `active-win-pos-rs` is now macOS/Linux-only. Do not add it back on Windows.
 

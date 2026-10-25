@@ -1,8 +1,10 @@
 # V2: distractions only
 
-Branch `app-v2-simplified-rules`, cut from `main` at c7eb971. Last updated: 2026-10-22.
-Status: implemented on the branch (backend, frontend, mock, docs); 192 backend tests pass;
-every screen rendered through the mock harness. Not yet run in the built app.
+Branch `app-v2-simplified-rules`, cut from `main` at c7eb971. Last updated: 2026-10-24.
+Status: implemented on the branch (backend, frontend, mock, docs); 201 backend tests (197
+pass, 4 ignored); every screen rendered through the mock harness. Not yet run in the built
+app. After the V2 change the same branch went on to the History v4 and Voice v2 boards and
+the Settings polish; those are logged in `plans/STATUS.md`, not here.
 
 One sentence for the user: **tell Supervisor what distracts you; everything else
 counts as work.** Rules are a single list of distractions. Relevant, Neutral and
@@ -159,7 +161,8 @@ Changed:
   days shaded by focused time, the viewed week outlined; any past day picks
   its week. Bars in the hero and the Trends card scale so the biggest reaches
   the top of its track whatever the week held. Apps & sites is three
-  columns (Work, Distractions, Away) with totals; rows still toggle the rule.
+  columns (Work, Distractions, Away) with totals; rows are read-only since
+  2026-10-22 (the row toggle and its backend flags were removed).
   Day card: `SessionSummary` fields; `stripOnTask` is `state === "focused"`.
 
 ## Mock, landing page, docs

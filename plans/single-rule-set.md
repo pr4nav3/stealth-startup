@@ -1,6 +1,8 @@
 # Single rule set
 
-Last updated: 2026-10-22. Status: planned, not started.
+Last updated: 2026-10-22. Status: **superseded** on 2026-10-22 by
+`plans/v2-distractions-only.md`, which took the exceptions idea from here and dropped the
+three buckets entirely. Kept for the reasoning; do not implement from it.
 
 One set of rules, applied to every session, editable wherever the rule manager
 already appears (Settings, preflight, the live dialog). The per-session copy and

@@ -3,22 +3,121 @@
 Living log of what is done and what is left. Update this file when an item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-10-19 (`main` at `dcc2336`; tree clean)
+Last updated: 2026-10-24 (`app-v2-simplified-rules`; snapshot taken before the
+macOS pass starts on a separate machine)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
-ship target. There is no Mac on hand, so Windows is the development and
-acceptance machine. macOS must not be broken in code; it cannot be verified
-until a Mac is available.
+ship target. Every line of the app so far was written and run on Windows. The
+Mac code paths compile (checked with `cargo check --target aarch64-apple-darwin`
+on Windows) but nothing has executed on a Mac. The next pass is on a MacBook:
+start from `plans/mac-handoff.md`.
 
-**`main` is the baseline.** Everything below is committed there. New work
-branches from `main`; sessions started from the desktop app get their own
-worktree under `.claude/worktrees/` (git-ignored) and merge back with a plain
-merge. These local branches are fully inside `main` and must not be merged
-again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
-`feat/ui`, `feat/voice-runtime-hardening`, `feat/webcam-models`,
-`feat/win32-capture`, `test-features`.
+## Branches
 
-## On `main`
+**`app-v2-simplified-rules` is the baseline.** It was cut from `main` at
+`c7eb971` and carries the V2 rules model, the History and Voice rebuilds and
+the Settings polish below. `main` (`fd6b418`) is an ancestor of it: a plain
+fast-forward of `main` onto this branch is the intended merge, nothing to
+resolve. `origin/main` is still at `3e14095` (2026-10-19) and has none of this;
+push before another machine starts.
+
+Every other local branch is fully inside this one and must not be merged
+again: `feat/home-streak`, `feat/window-supervision`,
+`feat/durable-app-identity`, `feat/sqlite`, `feat/ui`,
+`feat/voice-runtime-hardening`, `feat/webcam-models`, `feat/win32-capture`,
+`test-features`. They can be deleted.
+
+Sessions started from the desktop app get their own worktree under
+`.claude/worktrees/` (git-ignored) and merge back with a plain merge.
+
+## Done on `app-v2-simplified-rules` (2026-10-21 to 2026-10-24)
+
+Not yet run in the built app: everything below was proved by `cargo test`,
+`npm run check` and the browser mock (`mock.html`, see Test gate). The last
+live run on Windows was 2026-10-18.
+
+### Rules: distractions only (V2, 2026-10-22)
+
+- [x] A rule *is* a distraction; everything else is work. Relevant, Neutral and
+      Unclassified are gone from the data, the engine, the reports and every
+      screen. One list, edited through the same rule manager in Settings, the
+      preflight and the live dialog. Starter rules: five common sites
+- [x] Per-session allowances instead of a per-session rule copy: a preflight
+      chip or the nudge popup's "Not today" allows a site for this session
+      only; "Never a distraction" drops the rule; "This is a distraction" in
+      the overlay's More settings adds one. Commands `flag_current_distracting`,
+      `allow_current_for_session`, `allow_current_always`
+- [x] Rules apply from the next sample and never rewrite recorded time (schema
+      v12 migrates neutral spans to focused, drops non-distraction rules,
+      recomputes every session once). No classify flow after a session; the
+      report is read-only. The old rescore path and the "Apply permanently"
+      button are gone
+- [x] Score is time not on a distraction divided by duration. Report rows are
+      grouped Distractions / Work / Away and carry time only (the row toggle
+      and its backend flags were removed on 2026-10-22)
+- [x] Full inventory, traced to code: `plans/v2-distractions-only.md`.
+      `plans/single-rule-set.md` was the earlier plan and is superseded
+
+### Home
+
+- [x] Streak calendar, daily note, and a day card (replaces the session card)
+      that copies its summary on click; weekly bars removed. The calendar pops
+      in when scrolled into view
+- [x] Start opens the preflight in its own layer so Home stays put; the
+      preflight readout is plain text; the rule editor keeps the name on the
+      address row
+- [x] Header chip shows today's focused time while idle and opens the Session tab
+- [x] Getting started card: clone a voice, webcam (optional), first session.
+      "Add rules" became a line in the intro (five distractions are preset)
+
+### History (v4 boards, 2026-10-22 to 2026-10-24)
+
+- [x] Week toolbar (previous / next with a This week / Last week tag, search
+      across every session by goal via `search_sessions`), yellow week hero
+      (focused hours, longest stretch, recovery, daily bars), Trends door
+      (change against last week through the same weekday, four-week bars),
+      Sessions / Apps & sites as two buttons over one panel
+- [x] Month picker behind the week label (`get_focus_days`), days shaded by
+      focused time, viewed week outlined; any past day picks its week
+- [x] Apps & sites: Work beside Distractions with totals, Away as a footer;
+      bars share a smart scale and fill the track on quiet weeks
+- [x] Each session row draws its real timeline in miniature, gaps included
+      (`get_history_week` carries the segments)
+- [x] Charts rise once, together; empty weeks and sparse trends explain
+      themselves; a finished session refreshes the week in place
+- [x] Trends: attention span (not "typical stretch"), recovery, focused hours;
+      bars from theme tokens; axis thins at six weeks
+
+### Voice (v2 boards, 2026-10-23)
+
+- [x] One voice speaks one tone (`set_voice_tone`, stored in profile.json);
+      nudges draw only from that tone, and a tone is selectable once every
+      line of it has a clip. Clips are made in place, one after another, with
+      Stop after this line and per-line Redo
+- [x] Status tiles for the voice model and memory turn red when they block and
+      open popups; the how-to leads the page; the RAM lock is a one-line strip
+      with Details. The model check never shows as a download, and matching
+      files are provably skipped
+- [x] A line opens one popup that edits, regenerates or deletes it; a Tones
+      popup renames, deletes and adds tones; no edit mode. Popups repaint in
+      place; a regenerate reopens its line when the clip lands
+- [x] Four bundled tones, five lines each: Gentle, Mom, Gen Z, Stern
+
+### Settings and copy
+
+- [x] Named cameras in the webcam select (Windows Media Foundation; macOS and
+      Linux fall back to "Camera N"), smooth preview at 15 pictures/s with
+      detection still at 2 fps (`--preview-fps`), strictness seconds in the
+      options, danger buttons everywhere, themed scrollbars, Defaults controls
+      as inner cards
+- [x] One vocabulary across app and landing page: distraction, nudge, longest
+      stretch, attention span, recovery; each stat and strictness explained
+      where it appears
+- [x] Browser mock harness (`mock.html`, `npm run dev:ui`, launch config
+      `ui-mock`) renders every screen without Tauri; `?empty=1` and `?big=1`
+      fixtures
+
+## Done on `main` before the branch (through 2026-10-21)
 
 ### Window supervision and history
 
@@ -33,41 +132,23 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
       sleep or a frozen poll loop as `unknown` ("Device asleep / unknown").
       A property test fuzzes random event sequences and fails on any hole
 - [x] Mute keeps recording and only silences nudges; Pause is the untracked break
-- [x] V2 rules (`app-v2-simplified-rules`): a rule is a distraction and
-      everything else is work. One list, edited in Settings, preflight and the
-      live dialog. Preflight and the nudge popup allow a distraction for the
-      session ("Not today"); the popup can also drop the rule. Rules apply from
-      the next sample and never rewrite history (schema v12). A report row's
-      toggle flags an app for the sessions to come. See
-      `plans/v2-distractions-only.md`
-- [x] Session report: timeline, Apps & sites grouped by recorded decision,
-      "now X" when today's rule differs. Weekly recap with daily bars,
-      attention span and Recovery (time back to work after a distraction). Trends
-      page (focused hours, attention span, recovery, 8 weeks; unlocks after two
-      full weeks). Monthly recap and category guesses removed
-- [x] Day headers in History show that day's focused time and session count
+- [x] Session report: timeline, Apps & sites, weekly recap, Trends (unlocks
+      after two full weeks). Monthly recap and category guesses removed
 - [x] Live-session polling repaints the clock and state in place; it never
       rebuilds under an open editor or a focused field
-- [x] Getting started card on the home page: rules, clone a voice, webcam
-      (optional), first 15-minute session; ticks itself off from real state,
-      folds to one line on Hide, retires when the required steps are done
 
 ### Voice
 
-- [x] Four phrase sets, five lines each: Gentle, Mom, Gen Z, Stern (`phraseBank`
-      in `src/main.ts`). Phrase editor: add, edit, move between sets, delete
-      (bundled phrases are hidden via `hidden_phrases`), new sets inline
-- [x] Clips are generated one at a time, listened to, then kept or retried.
-      Saving a recording is instant; clips come afterwards
+- [x] Phrase editor: add, edit, move between sets, delete (bundled phrases are
+      hidden via `hidden_phrases`), new sets inline
 - [x] Persistent `--serve` worker keeps the model loaded, releases after idle,
-      is killed on app exit, survives a per-request exception, and reports the
-      real reason when it dies at startup
+      is killed on app exit (Windows job object), survives a per-request
+      exception, and reports the real reason when it dies at startup
 - [x] RAM gate from a measured run: 4 GiB free, 7 GiB total
 - [x] Mic recording capped at 60 s; stop timeout and device-ready wait fixed
 - [x] Runtime zip reinstalls when the manifest version or checksum changes;
-      "Check for updates" checks off the UI thread, shows a Checking phase,
-      ends on "Up to date" when nothing is needed, and can be cancelled at any
-      point including mid-hash
+      size recorded at install; manifest fetch gives up and cancels fast;
+      "Check for updates" runs off the UI thread and can be cancelled mid-hash
 - [x] Voice nudges play the moment they are due, even with the window
       minimized (backend event, not the webview poll)
 
@@ -75,13 +156,12 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
 
 - [x] Runs during sessions when "Turn on webcam monitoring" is on (off by
       default). Phone in view is its own span, counts as distracted, nudges
-      after the strictness grace through the same cooldown as window nudges,
-      shows the popup; Muted records without nudging. Nobody in view for 60 s
-      is Away
+      after the strictness grace through the same cooldown as window nudges;
+      Muted records without nudging. Nobody in view for 60 s is Away
 - [x] Worker watches at 2 fps and bursts to 5 fps on the first phone-like frame;
-      skips face detection when a person is already found; hashes nothing on
-      the UI thread; restarts if it hangs or never starts; falls back to CPU
-      for the session when GPU mode fails; dies with the app (job object)
+      skips face detection when a person is already found; restarts if it
+      hangs or never starts; falls back to CPU for the session when GPU mode
+      fails; dies with the app (Windows job object); camera index is a setting
 
 ### Platform and reliability (audit of 2026-10-19)
 
@@ -91,21 +171,27 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
 - [x] Worker busy flag and download phase reset on panic; poisoned session
       lock recovers; cancel reaches every hash, zip extraction and download
 - [x] Dialogs always have an exit; a finished session does not open History
-      over an open dialog; ratings cannot double-fire
+      over an open dialog; ratings cannot double-fire; no overlapping polls;
+      week navigation cannot go stale
 
 ## Next
 
-1. **Live test pass on Windows** (nothing since 2026-10-18 has run outside the
-   test suite): Check for updates and Cancel, record a voice and generate a
-   clip, a session with the webcam on, quit and confirm no worker survives.
-2. **Generate the starter phrase clips** for `derek` and `elise` with the
-   worker's one-shot CLI (20 phrases each). Until then starter voices nudge
-   silently.
-3. **Audit leftovers** (session in progress): runtime size cached at install,
-   manifest fetch timeouts, overlapping polls, camera index setting, low items.
-4. **macOS**: website detection (`browser_macos.rs` is a stub), permissions,
-   sleep, media presence, bundle-id capture. Needs a Mac. Checklist:
-   `plans/mac-handoff.md`.
+1. **macOS pass** (MacBook, fresh agent): work through `plans/mac-handoff.md`
+   top to bottom. "Day one" covers the setup (two Python venvs, and
+   `webcam_bakeoff/models/yolo26s.onnx`, which is not in git and must be copied
+   from the Windows machine). Section 0 is the Mac-only code that does not exist
+   yet: address-bar read (`browser_macos.rs` is a stub), worker lifetime without
+   a job object, camera names, child pids; then frozen workers and signing.
+2. **Live test pass on Windows** of everything on this branch (nothing since
+   2026-10-18 has run outside the test suite and the mock): a V2 session with
+   "Not today" and "Never a distraction", the schema v12 migration on a real
+   database, History v4 with real weeks, a voice tone generated end to end,
+   Check for updates and Cancel, a session with the webcam on, quit and confirm
+   no worker survives.
+3. **Generate the starter phrase clips** for `derek` and `elise` with the
+   worker's one-shot CLI. Until then starter voices nudge silently.
+4. **Fast-forward `main`** to this branch and push; delete the merged feature
+   branches.
 5. **Ship**: see below.
 
 ## Open product decisions
@@ -115,6 +201,8 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
 - Observation coverage on the report (capture failures still count as Away).
 - Stored provenance per span (which rule decided it), so old reports can
   explain themselves after rules change.
+- A preflight allow-list typed ahead of time (today an allowance is a tap on an
+  existing chip or a reaction to the first nudge).
 
 ## Ship, after the app behavior is settled
 
@@ -128,10 +216,16 @@ again: `feat/window-supervision`, `feat/durable-app-identity`, `feat/sqlite`,
 
 ## Test gate
 
-Every shipped item has to work as intended on **Windows**, and must not break
-**macOS** code paths. Windows is the machine that can actually prove it.
+Every shipped item has to work as intended on **Windows** and on **macOS**.
+Until the Mac pass, Windows is the only machine that has proved anything.
 
-- `cargo test` in `src-tauri` (189 tests), `npm run check`
+- `cargo test` in `src-tauri`: 201 tests, 197 pass, 4 ignored (2026-10-24)
+- `npm run check` (tsc + vite build)
+- Browser mock: `npm run dev:ui`, open `http://127.0.0.1:1420/mock.html`
+  (`?empty=1` for a new user, `?big=1` for heavy weeks); render Home, Session
+  with the preflight, live card, dialog and popup, History, Voice and Settings
+  in both themes
 - Webcam worker: `webcam_bakeoff/test_labels.py`, `test_detectors.py`, and
   `run_tracker.py --self-test` on CPU and GPU
-- Keep macOS-only paths intact; re-smoke Mac when hardware exists
+- macOS: `cargo check --target aarch64-apple-darwin` from Windows keeps the
+  Mac paths compiling; the Mac itself runs `plans/mac-handoff.md`

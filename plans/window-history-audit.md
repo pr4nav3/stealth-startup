@@ -2,6 +2,8 @@
 
 Reviewed 2026-10-17 on the then-uncommitted window-supervision work; everything here is now on `main`.
 
+**Dated in one respect (2026-10-24):** the V2 rules change (`plans/v2-distractions-only.md`) removed classification, the classify popup and rescoring. Read "Relevant / Neutral / Unclassified" below as history; today a rule is a distraction, everything else is work, and recorded time is never rescored.
+
 ## Assessment
 
 The foundation is useful, but it is not ready to promise reliable Windows and

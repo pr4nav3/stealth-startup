@@ -1,9 +1,91 @@
-# Mac handoff: things to test and fix on a real Mac
+# Mac handoff: things to build and test on a real Mac
 
-**Original Mac checklist** from before website-identity supervision. Baseline now is `main`: Windows reads the address bar, titles are never stored, `browser_macos.rs` is a stub. Do not implement window capture or title persistence from this file. Build, signing, permissions, RAM, shell surfaces, and webcam packaging below can still be useful.
+Last updated: 2026-10-24. Baseline: branch `app-v2-simplified-rules` (`main` is an ancestor
+of it and will be fast-forwarded; `origin/main` is older than both, so pull the branch, not
+`main`). Tracker: `plans/STATUS.md`. Holes to expect: `plans/known-issues.md`.
 
-Nothing below has been compiled or run on macOS. All development so far was on Windows.
-Work through it on a Mac before any Mac release, and tick items off in this file.
+Nothing in this app has been compiled or run on macOS. All development so far was on Windows.
+The Mac paths were type-checked from Windows with `cargo check --target aarch64-apple-darwin`
+and `x86_64-apple-darwin`. Work through this file on a Mac, tick items off here, and keep
+`plans/STATUS.md` and `plans/known-issues.md` current as items move.
+
+Rules for the Mac pass: do not change the data model, the rule semantics (a rule is a
+distraction, everything else is work, history is never rewritten) or the screens; those were
+settled on Windows and are proved by the tests and the mock. Keep Windows compiling: anything
+Mac-only goes behind `#[cfg(target_os = "macos")]`, ideally in `src-tauri/src/macos.rs` or
+`browser_macos.rs`. Sections 5 (window capture with `active-win-pos-rs`) and 6 (shell surfaces)
+describe code that exists; do not re-implement title persistence from them: titles are a
+fallback and are never stored.
+
+## Day one on the Mac
+
+Before any of the sections below. Everything here is a one-time setup; none of it is
+Supervisor code.
+
+- [ ] **Pull the branch.** `git fetch && git checkout app-v2-simplified-rules`. `origin/main`
+      is older than the branch; do not start from it.
+- [ ] **Toolchain.** Xcode Command Line Tools, Rust stable (Tauri 2 needs it; `rustup` adds
+      the host target), Node 20+, Python 3.11 (Chatterbox is documented against it). Then
+      `npm install`, `npm run check`, and `cargo test` from `src-tauri`. On Windows the suite
+      is 201 tests (197 pass, 4 ignored); the Mac count differs because the Win32 probe tests
+      are `#[cfg(windows)]`. `system_resource_queries_return_real_values` must pass: it is the
+      first real run of the `macos.rs` memory and disk calls.
+- [ ] **Webcam worker venv.** `python3 -m venv .venv-webcam`, then with
+      `.venv-webcam/bin/python`: `pip install -r webcam_bakeoff/build-requirements.txt` and
+      `webcam_bakeoff/download_models.py`. Debug builds run the worker from this venv
+      (`webcam.rs`, `worker_command`). The pinned onnxruntime differs for Intel and Apple
+      Silicon (`webcam_bakeoff/requirements.txt`).
+- [ ] **`webcam_bakeoff/models/yolo26s.onnx` is not in git** and the worker will not start
+      without it. Copy it from the Windows machine (38 MB; `download_models.py` checks its
+      SHA-256 and rejects any other file, so a fresh export only works if it reproduces the
+      exact file). Then `run_tracker.py --self-test` on CPU and on GPU (CoreML).
+- [ ] **Voice worker venv.** Debug builds look for `.venv-voice-runtime-macos/bin/python` at
+      the repo root (`voice_runtime.rs`, `debug_worker_python`). Create it with Python 3.11 and
+      `pip install -r voice_worker/requirements.txt` (Chatterbox from a pinned git commit; the
+      first run downloads weights). The `resemble-perth` watermarker that failed on macOS in
+      the bakeoff is already patched to a no-op inside the worker.
+- [ ] **Voice runtime zip.** A frozen `macos-arm64` runtime already exists in a GitHub
+      release (SHA-256 in `plans/STATUS.md`; example manifest in
+      `voice_worker/release_manifest.macos-arm64.example.json`). There is no Intel build.
+      Rebuilding is `scripts/build_voice_runtime.py` from the voice venv, on the Mac.
+- [ ] **Run the app.** `npm run dev` (Tauri dev). `npm run dev:ui` plus
+      `http://127.0.0.1:1420/mock.html` renders every screen with fixtures and no backend.
+- [ ] **Seeing what the capture resolves to.** The `manual_foreground_probe` test in
+      `activity.rs` prints every sample for 30 s but is `#[cfg(target_os = "windows")]`. Lift
+      that gate (or add a Mac twin) first; it is the fastest way to check sections 5 and 6.
+- [ ] **Bundle targets.** `src-tauri/tauri.bundle.conf.json` lists `nsis`, `app` and `dmg`
+      together. Confirm Tauri skips `nsis` on a Mac, or split the targets per OS. The
+      day-to-day `tauri.conf.json` has `bundle.active` false and only the dev window.
+
+## 0. Mac code that does not exist yet
+
+In the order a user would hit it.
+
+- [ ] **Address-bar read: `src-tauri/src/browser_macos.rs`.** Today `read_browser` returns
+      `BrowserRead::default()` ("unavailable"), so every browser on a Mac shows as Other
+      websites, or as a verified title match, and no site rule can fire. Build it as the
+      file's header says: read the focused window's `AXURL` through the Accessibility API
+      for the sample's `process_id` (Safari, Chrome, Edge, Brave and Arc expose it on the web
+      area), and report `editing` when the address field has keyboard focus. The Windows
+      version (`browser_win32.rs`) is the reference for what the rest of the app expects
+      from a `BrowserRead`. Needs the Accessibility permission; check it next to the Screen
+      Recording check in `activity.rs` and say so in the UI when it is missing.
+- [ ] **Worker lifetime.** `voice::WorkerLifetime` is a Windows job object (the voice and
+      webcam workers die when the app does). On macOS the struct is empty, so a quit during
+      clip generation or a webcam session can leave `python` running. Kill the children on
+      exit (track the pids and `SIGTERM` them from the exit handler, or spawn them in their
+      own process group). `process_ram_one` has a Mac arm; `child_pids` does not (only
+      Windows and Linux are implemented, macOS returns an empty list), so the memory readout
+      of the worker's children is also blind there until it gets one (`proc_listchildpids`
+      or `sysctl KERN_PROC`).
+- [ ] **Camera names.** `webcam::camera_names()` is Windows Media Foundation; the
+      `#[cfg(not(windows))]` arm returns an empty list and Settings shows "Camera 0" to
+      "Camera 3". Add an AVFoundation arm (`AVCaptureDevice` is already a dependency in
+      `Cargo.toml`) in the order OpenCV opens devices, and confirm that order matches.
+- [ ] **No console window flag.** The worker spawn sets `CREATE_NO_WINDOW` on Windows only.
+      Confirm nothing visible opens on a Mac when a worker starts.
+- [ ] **Frozen workers and signing**: section 1. These are the only parts that need a Mac to
+      build at all; everything above only needs a Mac to run.
 
 ## 1. Build
 
