@@ -1,7 +1,8 @@
 //! Pure normalization and surface classification for activity samples (all platforms).
 
-/// Zero-width joiners and bidi marks: macOS app names carry a leading U+200E ("‎WhatsApp").
-const ZERO_WIDTH_CHARS: [char; 6] = ['\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{feff}'];
+/// Zero-width spaces and bidi marks: macOS app names carry a leading U+200E ("‎WhatsApp").
+/// The zero-width joiner stays: it holds emoji sequences together.
+const ZERO_WIDTH_CHARS: [char; 5] = ['\u{200b}', '\u{200c}', '\u{200e}', '\u{200f}', '\u{feff}'];
 
 const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
     (

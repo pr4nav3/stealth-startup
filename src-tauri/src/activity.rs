@@ -17,7 +17,7 @@ use activity_normalize::idle_elapsed_seconds;
 #[cfg(not(target_os = "windows"))]
 use activity_normalize::normalize_title_text;
 
-/// Zero-width and bidi marks out of a name (storage cleans old rows with it too).
+/// Zero-width and bidi marks out of a name.
 pub fn strip_invisible(value: &str) -> String {
     activity_normalize::strip_zero_width(value)
 }
@@ -94,6 +94,15 @@ pub enum PermissionState {
 }
 
 pub fn current_activity_sample() -> Result<ActivitySample, String> {
+    // The capture calls Cocoa every second from a plain thread; without a pool the objects it
+    // autoreleases are only freed when the thread exits, so memory would grow all session.
+    #[cfg(target_os = "macos")]
+    return objc2::rc::autoreleasepool(|_| capture_with_media());
+    #[cfg(not(target_os = "macos"))]
+    capture_with_media()
+}
+
+fn capture_with_media() -> Result<ActivitySample, String> {
     let mut sample = capture_foreground(capture_permissions(), idle_seconds())?;
     let input_stopped = sample
         .idle_seconds
@@ -120,8 +129,33 @@ fn capture_foreground(
         let captured_at = OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .map_err(|error| error.to_string())?;
-        let active_window =
-            get_active_window().map_err(|_| "could not read the active window".to_string())?;
+        #[cfg(target_os = "macos")]
+        if crate::macos::screen_locked() {
+            return Err("the screen is locked".to_string());
+        }
+
+        let active_window = match get_active_window() {
+            Ok(window) => window,
+            // macOS keeps an app in front with no window on screen: its last window closed,
+            // everything minimized, or the desktop clicked. Like the Windows desktop, that is
+            // shell UI: the window the user came from keeps the time.
+            #[cfg(target_os = "macos")]
+            Err(_) => match crate::macos::frontmost_app() {
+                Some((process_id, name, process_path)) => active_win_pos_rs::ActiveWindow {
+                    title: String::new(),
+                    process_path,
+                    app_name: name,
+                    window_id: format!("app-{process_id}"),
+                    process_id,
+                    position: active_win_pos_rs::WindowPosition { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+                },
+                None => return Err("could not read the active window".to_string()),
+            },
+            #[cfg(not(target_os = "macos"))]
+            Err(_) => return Err("could not read the active window".to_string()),
+        };
+        #[cfg(target_os = "macos")]
+        let windowless = active_window.window_id.starts_with("app-");
 
         #[allow(unused_mut)]
         let mut sample =
@@ -131,6 +165,16 @@ fn capture_foreground(
         {
             use activity_normalize::{classify_macos_surface, ForegroundDisposition};
 
+            if windowless {
+                sample.shell_surface = true;
+                return Ok(sample);
+            }
+            // Without Screen Recording the window list gives no titles; Accessibility does.
+            // Before classifying: a Finder folder is told from the desktop by its title.
+            if sample.window_title.is_none() {
+                sample.window_title = browser_macos::focused_window_title(sample.process_id)
+                    .and_then(|title| clean_title(&sample.app_name, &title));
+            }
             let core_services = crate::macos::core_services_dir()
                 .ok_or("macOS did not report its CoreServices folder")?;
             match classify_macos_surface(
@@ -144,12 +188,7 @@ fn capture_foreground(
                 ForegroundDisposition::ShellSurface => sample.shell_surface = true,
                 ForegroundDisposition::Sample => {}
             }
-            // Without Screen Recording the window list gives no titles; Accessibility does.
-            if sample.window_title.is_none() {
-                sample.window_title = browser_macos::focused_window_title(sample.process_id)
-                    .and_then(|title| clean_title(&sample.app_name, &title));
-            }
-            if crate::website::is_browser(&sample.app_name.to_lowercase()) {
+            if !sample.shell_surface && crate::website::is_browser(&sample.app_name.to_lowercase()) {
                 sample.browser = Some(browser_macos::read_browser(sample.process_id));
             }
         }

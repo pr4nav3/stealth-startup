@@ -21,6 +21,22 @@ pub const BROWSERS: &[&str] = &[
     "microsoft edge",
     "brave browser",
     "safari",
+    // The other builds macOS names by their own app names (on Windows they share an exe).
+    "google chrome beta",
+    "google chrome dev",
+    "google chrome canary",
+    "microsoft edge beta",
+    "microsoft edge dev",
+    "microsoft edge canary",
+    "brave browser beta",
+    "brave browser nightly",
+    "firefox developer edition",
+    "firefox nightly",
+    "safari technology preview",
+    "opera gx",
+    "zen browser",
+    "orion",
+    "duckduckgo",
 ];
 
 /// Browser New Tab titles, after the browser-name suffix is stripped. Safari calls it Start Page.
@@ -109,9 +125,15 @@ pub fn classify_address(text: &str) -> Address {
     }
     // Address bars often hide the scheme ("github.com/openai"). `localhost:3000` must not be
     // read as a "localhost" scheme, so only known schemes are taken as written.
-    let parsed = Url::parse(text)
-        .ok()
-        .filter(|url| is_known_scheme(url.scheme()));
+    let parsed = Url::parse(text).ok();
+    // A browser page with a scheme not listed ("favorites://", a new browser's own) is still
+    // the browser's own page, not a site.
+    if let Some(url) = parsed.as_ref().filter(|url| !is_known_scheme(url.scheme()) && text.contains("://")) {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Address::BrowserPage;
+        }
+    }
+    let parsed = parsed.filter(|url| is_known_scheme(url.scheme()));
     let (url, typed_without_scheme) = match parsed {
         Some(url) => (url, false),
         None => match Url::parse(&format!("https://{text}")) {
@@ -256,6 +278,17 @@ mod tests {
 
     fn site(text: &str) -> Address {
         Address::Website(text.to_string())
+    }
+
+    #[test]
+    fn a_browser_scheme_not_listed_is_the_browser_itself() {
+        assert_eq!(classify_address("favorites://"), Address::BrowserPage);
+        assert_eq!(classify_address("orion://settings"), Address::BrowserPage);
+        // Not a scheme: a host with a port stays a site.
+        assert_eq!(classify_address("localhost:3000"), site(LOCAL_NETWORK));
+        assert!(is_browser("google chrome canary"));
+        assert!(is_browser("safari technology preview"));
+        assert!(!is_browser("zen"));
     }
 
     #[test]

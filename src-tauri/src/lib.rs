@@ -33,13 +33,46 @@ const OVERLAY_WIDTH: f64 = 312.0;
 const OVERLAY_HEIGHT: f64 = 286.0;
 const OVERLAY_MARGIN: i32 = 18;
 
+/// Session time: a monotonic clock that keeps running while the computer sleeps, so a closed
+/// lid shows up as a gap (lost time, an expired timer) instead of vanishing. `Instant` does
+/// that on Windows but not on macOS, where it stops during sleep.
+#[derive(Clone, Copy)]
+struct SessionClock {
+    start: Duration,
+}
+
+impl SessionClock {
+    fn now() -> Self {
+        Self { start: Self::read() }
+    }
+
+    fn elapsed(&self) -> Duration {
+        Self::read().saturating_sub(self.start)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn read() -> Duration {
+        // On Darwin CLOCK_MONOTONIC counts sleep (mach_continuous_time); CLOCK_UPTIME_RAW,
+        // which `Instant` uses, does not.
+        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+        Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn read() -> Duration {
+        static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        ORIGIN.get_or_init(Instant::now).elapsed()
+    }
+}
+
 struct AppState {
     sessions: Mutex<SessionManager>,
     voice_download: Arc<Mutex<voice::VoiceDownloadState>>,
     voice_recording: Mutex<voice::VoiceRecordingState>,
     voice_worker: voice::VoiceWorker,
     webcam: webcam::WebcamPreview,
-    started_at: Instant,
+    started_at: SessionClock,
     identity: SupervisorIdentity,
 }
 
@@ -206,9 +239,10 @@ fn open_accessibility_settings() -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Ok(());
     }
+    // `open` returns at once; waiting for it leaves no zombie process per click.
     std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn()
+        .status()
         .map(drop)
         .map_err(|error| error.to_string())
 }
@@ -347,6 +381,12 @@ async fn start_voice_model_download(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<voice::VoiceDownloadSnapshot, String> {
+    // A check can install a new runtime; a worker still running the old one would load half
+    // its files from the new version (a running program's folder can be swapped on a Mac).
+    if state.voice_worker.is_busy() {
+        return Err("A clip is generating. Wait for it or cancel it first.".to_string());
+    }
+    voice::release_worker(&state.voice_worker);
     voice::start_model_download(app, Arc::clone(&state.voice_download))
 }
 
@@ -572,10 +612,22 @@ pub fn run() {
                 voice_recording: Mutex::new(voice::VoiceRecordingState::default()),
                 voice_worker: voice::VoiceWorker::new(),
                 webcam: webcam::WebcamPreview::default(),
-                started_at: Instant::now(),
+                started_at: SessionClock::now(),
                 identity: supervisor_identity(),
             });
 
+            // A focus tracker works while it is out of sight. Without this, App Nap slows the
+            // 1 s ticker and the hidden page that plays nudges once Supervisor is covered.
+            #[cfg(target_os = "macos")]
+            {
+                use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+                let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+                    NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+                    &NSString::from_str("Tracking a focus session"),
+                );
+                // Held for the life of the app.
+                std::mem::forget(activity);
+            }
             setup_status_window(app)?;
             if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 size_page_exactly(&main);
@@ -653,16 +705,38 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("failed to run Supervisor")
-        .run(|app, event| {
+        .run(|app, event| match event {
+            // Closing the main window hides it, as on any Mac app: the session keeps running,
+            // nudges keep playing (the page plays them), and the tray or Dock brings it back.
+            // Destroying it would leave nothing for "Show Supervisor" to show.
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == MAIN_WINDOW_LABEL => {
+                api.prevent_close();
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                    let _ = window.hide();
+                }
+                // A Settings camera preview has no reason to run with nothing showing it.
+                let state = app.state::<AppState>();
+                if state.webcam.is_preview() {
+                    webcam::stop_preview(&state.webcam);
+                }
+            }
+            // A Dock click (or a second launch, which macOS turns into this) shows the window.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(app),
             // Managed state is never dropped (the ticker threads hold AppHandles), so stop the
             // voice worker here; outside Windows nothing else kills it when the app exits.
-            if let tauri::RunEvent::Exit = event {
+            tauri::RunEvent::Exit => {
                 let state = app.state::<AppState>();
                 // Cancel first: a release alone waits for a running clip to finish.
                 voice::cancel_generation(&state.voice_worker);
                 voice::release_worker(&state.voice_worker);
                 webcam::stop_preview(&state.webcam);
             }
+            _ => {}
         });
 }
 
@@ -684,7 +758,22 @@ fn setup_status_window(app: &mut tauri::App) -> tauri::Result<()> {
     .accept_first_mouse(true)
     .focused(false)
     .visible(false)
+    // A distraction in a full-screen app or on another desktop must show its card there.
+    .visible_on_all_workspaces(true)
     .build()?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+        use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+        if let Ok(pointer) = window.ns_window() {
+            let ns_window: &NSWindow = unsafe { &*pointer.cast::<NSWindow>() };
+            ns_window.setCollectionBehavior(
+                ns_window.collectionBehavior()
+                    | NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+        }
+    }
 
     Ok(())
 }
@@ -1173,6 +1262,7 @@ fn start_session_ticker(app: AppHandle) {
             let state = app.state::<AppState>();
             let now = state.started_at.elapsed();
             let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            last_loop = now;
             sessions.record_capture_gap(now);
             let had_current = sessions.has_current();
             let snapshot = sessions.tick(now);
@@ -1189,6 +1279,8 @@ fn start_session_ticker(app: AppHandle) {
             let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let was_polling = sessions.should_poll_activity();
             let snapshot = sessions.record_sample(sample, now, &identity);
+            // A slow capture (a hung Accessibility read) is not the machine sleeping.
+            last_loop = now;
             if new_nudge(&mut nudges_seen, &snapshot) {
                 let _ = app.emit(NUDGE_EVENT, ());
             }

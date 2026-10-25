@@ -27,6 +27,8 @@ const TREE_BUILD_GRACE: Duration = Duration::from_secs(15);
 /// Toolbars come before page content; a browser window reaches its web area well within this.
 const MAX_VISITED: usize = 400;
 const MAX_DEPTH: usize = 12;
+/// A search that runs this long gives up for this tick rather than delay the 1 s tick.
+const SEARCH_BUDGET: Duration = Duration::from_millis(150);
 
 type AXError = i32;
 const AX_SUCCESS: AXError = 0;
@@ -37,6 +39,7 @@ extern "C" {
     fn AXIsProcessTrusted() -> u8;
     fn AXIsProcessTrustedWithOptions(options: *const CFDictionary) -> u8;
     fn AXUIElementCreateApplication(pid: i32) -> *mut CFType;
+    fn AXUIElementCreateSystemWide() -> *mut CFType;
     fn AXUIElementCopyAttributeValue(
         element: *const CFType,
         attribute: *const CFString,
@@ -75,7 +78,9 @@ pub fn request_accessibility() -> bool {
 struct Reader {
     /// Child-index path from a browser's window to its web area, by process id.
     paths: HashMap<u64, Vec<usize>>,
-    failed: HashMap<u64, Instant>,
+    /// Keyed by browser and window, so one unreadable window (a settings page, a Start Page
+    /// with no web area) does not blank every other window of that browser.
+    failed: HashMap<(u64, usize), Instant>,
     /// Browsers already told to build their accessibility tree (Chromium needs asking).
     enabled: HashMap<u64, Instant>,
 }
@@ -107,9 +112,6 @@ pub fn focused_window_title(process_id: u64) -> Option<String> {
 
 impl Reader {
     fn read(&mut self, pid: u64) -> BrowserRead {
-        if self.failed.get(&pid).is_some_and(|at| at.elapsed() < RETRY_AFTER) {
-            return BrowserRead::default();
-        }
         let Some(app) = application(pid) else {
             return BrowserRead::default();
         };
@@ -124,6 +126,13 @@ impl Reader {
         let Some(window) = attr(&app, "AXFocusedWindow") else {
             return BrowserRead::default();
         };
+        let window_key = (pid, objc2_core_foundation::CFHash(Some(&window)) as usize);
+        if self.failed.get(&window_key).is_some_and(|at| at.elapsed() < RETRY_AFTER) {
+            return BrowserRead::default();
+        }
+        if self.failed.len() > 64 {
+            self.failed.retain(|_, at| at.elapsed() < RETRY_AFTER);
+        }
         let web_area = self
             .paths
             .get(&pid)
@@ -139,7 +148,7 @@ impl Reader {
             // A tree still being built is not a failure; search again next tick.
             let building = self.enabled.get(&pid).is_some_and(|at| at.elapsed() < TREE_BUILD_GRACE);
             if !building {
-                self.failed.insert(pid, Instant::now());
+                self.failed.insert(window_key, Instant::now());
             }
             return BrowserRead::default();
         };
@@ -148,6 +157,15 @@ impl Reader {
 }
 
 fn application(pid: u64) -> Option<CFRetained<CFType>> {
+    // Set on the system-wide element, the timeout covers every element of every app (windows
+    // and children too), not just the application element.
+    static SYSTEM_WIDE: std::sync::Once = std::sync::Once::new();
+    SYSTEM_WIDE.call_once(|| {
+        if let Some(system) = NonNull::new(unsafe { AXUIElementCreateSystemWide() }) {
+            let system = unsafe { CFRetained::from_raw(system) };
+            unsafe { AXUIElementSetMessagingTimeout(&*system, TIMEOUT_SECONDS) };
+        }
+    });
     let pid = i32::try_from(pid).ok()?;
     let app = NonNull::new(unsafe { AXUIElementCreateApplication(pid) })?;
     let app = unsafe { CFRetained::from_raw(app) };
@@ -195,18 +213,35 @@ pub fn describe_focused_window(process_id: u64, depth: usize) -> String {
 /// Breadth-first, so the web area nearest the window wins: the page in front, not a
 /// find-in-page or extension popup.
 fn find_web_area(window: &CFType) -> Option<(CFRetained<CFType>, Vec<usize>)> {
+    /// Controls never hold the page; skipping them keeps a crowded tab strip or bookmarks bar
+    /// from using up the search before it reaches the page.
+    const LEAVES: &[&str] = &[
+        "AXButton", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXCheckBox", "AXTextField",
+        "AXStaticText", "AXImage", "AXToolbar", "AXMenuBar", "AXScrollBar",
+    ];
+    let started = Instant::now();
     let mut queue: VecDeque<(CFRetained<CFType>, Vec<usize>)> =
         VecDeque::from([(window.retain(), Vec::new())]);
     let mut visited = 0;
+    // A side panel or docked DevTools can be a web area too; the page is the http(s) one.
+    let mut fallback = None;
     while let Some((element, path)) = queue.pop_front() {
         visited += 1;
-        if visited > MAX_VISITED {
-            return None;
+        if visited > MAX_VISITED || started.elapsed() > SEARCH_BUDGET {
+            break;
         }
-        if string_attr(&element, "AXRole").as_deref() == Some("AXWebArea") {
-            return Some((element, path));
+        let role = string_attr(&element, "AXRole");
+        if role.as_deref() == Some("AXWebArea") {
+            let address = string_attr(&element, "AXURL").unwrap_or_default();
+            if address.starts_with("http://") || address.starts_with("https://") {
+                return Some((element, path));
+            }
+            if fallback.is_none() {
+                fallback = Some((element, path));
+            }
+            continue;
         }
-        if path.len() >= MAX_DEPTH {
+        if path.len() >= MAX_DEPTH || role.as_deref().is_some_and(|role| LEAVES.contains(&role)) {
             continue;
         }
         for (index, child) in children(&element).into_iter().enumerate() {
@@ -215,7 +250,7 @@ fn find_web_area(window: &CFType) -> Option<(CFRetained<CFType>, Vec<usize>)> {
             queue.push_back((child, child_path));
         }
     }
-    None
+    fallback
 }
 
 /// Follow a remembered path; `None` once anything along it moved.

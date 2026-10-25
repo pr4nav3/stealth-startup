@@ -8,6 +8,8 @@ const click = (d, sel) => { const el = d.querySelector(sel); if (!el) throw new 
 const tab = (d, name) => click(d, `[data-tab="${name}"]`);
 const STATES = [
   ["home", M, null],
+  ["home-mac", M + "?mac=1", null],
+  ["onboarding-mac", M + "?mac=1", (d) => click(d, '[data-action="onboard-show"]')],
   ["home-empty", M + "?empty=1", null],
   ["home-first", M + "?first=1", null],
   ["onboarding", M, (d) => click(d, '[data-action="onboard-show"]')],
@@ -56,7 +58,7 @@ for (const [name, url, setup, w, h] of STATES) {
     if (setup) await setup(d);
     await sleep(900);
     const sizes = {};
-    for (const sel of [".app-shell", ".home-grid", ".modal-panel", ".preflight-panel", ".state-slab", ".interrupt-alert", ".settings-page", ".voice-page", ".webcam-page", ".history-page", ".report-panel", ".overlay-shell", ".cal-grid", ".quote-card", ".onboard-panel", ".history-item", ".voice-card", ".clips-panel", ".trend-card"]) {
+    for (const sel of [".app-shell", ".home-grid", ".modal-panel", ".preflight-panel", ".state-slab", ".interrupt-alert", ".settings-page", ".voice-page", ".webcam-page", ".history-page", ".report-stage", ".overlay-shell", ".cal-grid", ".quote-card", ".onboard-panel", ".history-item", ".voice-card", ".phrase-panel", ".trend-card"]) {
       const el = d.querySelector(sel); if (el) { const r = el.getBoundingClientRect(); sizes[sel] = [Math.round(r.width), Math.round(r.height)]; }
     }
     const w2 = frame.contentWindow;

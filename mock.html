@@ -68,6 +68,9 @@
       const summary = (p) => ({...p, clip_count: p.clips.length, clips: p.clips.map(c => ({...c}))});
       const handlers = {
         get_settings: () => settings,
+        // ?mac=1: a Mac without the Accessibility grant (the Getting started step shows).
+        get_capture_access: () => ({platform: q.get("mac") === "1" ? "macos" : "windows", permissions: {screen_recording: "granted", accessibility: q.get("mac") === "1" ? "missing" : "not_required"}}),
+        open_accessibility_settings: () => null,
         get_history: () => hist,
         get_rules: () => rules.map(r => ({...r})),
         resolve_rule_input: a => { const t = a.text.trim(); if (!t) throw "Enter a website or an app name"; const m = t.match(/^(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})/i); if (m) { const parts = m[1].toLowerCase().split("."); return {target:"website", value: parts.slice(-2).join(".")}; } return {target:"app", value:t}; },

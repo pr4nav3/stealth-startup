@@ -20,3 +20,11 @@ webcam_bakeoff/eval/youtube/**
 Ultralytics/
 *.pt
 .claude/worktrees/
+
+# Signing material: never commit (plans/distribution.md keeps the backup outside the repo).
+*.p12
+*.p12.base64
+p12-password.txt
+supervisor-signing/
+*.keychain-db
+*.pem

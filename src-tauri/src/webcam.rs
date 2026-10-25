@@ -371,23 +371,20 @@ pub fn camera_names() -> Vec<String> {
 /// then external ones), so index N here is the worker's camera N.
 #[cfg(target_os = "macos")]
 pub fn camera_names() -> Vec<String> {
-    use objc2_av_foundation::{
-        AVCaptureDeviceDiscoverySession, AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
-        AVCaptureDeviceTypeExternal, AVMediaTypeVideo,
-    };
-    use objc2_foundation::NSArray;
-
+    // OpenCV's AVFoundation backend (cap_avfoundation_mac.mm) numbers cameras as: every video
+    // device, then every muxed one, sorted by uniqueID. The index the worker opens is the
+    // index here, so the list must be built the same way.
+    #[allow(deprecated)]
     unsafe {
-        let types = NSArray::from_slice(&[
-            AVCaptureDeviceTypeBuiltInWideAngleCamera,
-            AVCaptureDeviceTypeExternal,
-        ]);
-        let session = AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
-            &types,
-            AVMediaTypeVideo,
-            AVCaptureDevicePosition::Unspecified,
-        );
-        session.devices().iter().map(|device| device.localizedName().to_string()).collect()
+        use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeMuxed, AVMediaTypeVideo};
+        let mut devices: Vec<(String, String)> = Vec::new();
+        for kind in [AVMediaTypeVideo, AVMediaTypeMuxed].into_iter().flatten() {
+            for device in AVCaptureDevice::devicesWithMediaType(kind).iter() {
+                devices.push((device.uniqueID().to_string(), device.localizedName().to_string()));
+            }
+        }
+        devices.sort_by(|a, b| a.0.cmp(&b.0));
+        devices.into_iter().map(|(_, name)| name).collect()
     }
 }
 

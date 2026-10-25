@@ -371,6 +371,10 @@ impl VoiceWorker {
         };
         if dead {
             *live = None;
+            // Its pid may be reused by an unrelated process group; never kill by it again.
+            if let Ok(mut slot) = self.inner.killer.lock() {
+                *slot = None;
+            }
             let spawn_started = Instant::now();
             let (worker, killer) = spawn_serve_worker(root)?;
             if let Ok(mut slot) = self.inner.killer.lock() {
@@ -1041,6 +1045,10 @@ pub fn start_recording(
     app: &AppHandle,
     state: &Mutex<VoiceRecordingState>,
 ) -> Result<VoiceRecordingSnapshot, String> {
+    // Ask first, so the prompt names Supervisor and a "no" is said, not recorded as silence.
+    // Before the lock: the user may take a while to answer, and status reads must not wait.
+    #[cfg(target_os = "macos")]
+    crate::macos::microphone_access()?;
     let root = voice_root(app)?;
     fs::create_dir_all(recordings_dir(&root)).map_err(|error| error.to_string())?;
     let mut recording = state
@@ -1052,9 +1060,6 @@ pub fn start_recording(
     if let Some(previous) = recording.last.take() {
         let _ = fs::remove_file(previous.path);
     }
-    // Ask first, so the prompt names Supervisor and a "no" is said, not recorded as silence.
-    #[cfg(target_os = "macos")]
-    crate::macos::microphone_access()?;
 
     let (command_tx, command_rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::channel();
@@ -2295,7 +2300,9 @@ fn macos_pressure_allows() -> bool {
     {
         // 0 normal, 1 warning, 2 urgent, 3 critical.
         match crate::macos::memory_pressure_level() {
-            Some(level) if level >= 2 => false,
+            // 1 normal, 2 warning, 4 critical. Loading the model can itself raise a warning
+            // on an 8 GB Mac, so only critical blocks.
+            Some(level) if level >= 4 => false,
             _ => true,
         }
     }
@@ -2328,7 +2335,7 @@ fn ensure_generation_ram(worker_loaded: bool) -> Result<(), String> {
     match ram_allows_job(available, total, worker_loaded) {
         Some(true) => Ok(()),
         Some(false) => Err(format!(
-            "Not enough available RAM to clone a voice. Need about {}, this PC has {} available. Close other apps and try again.",
+            "Not enough available RAM to clone a voice. Need about {}, this computer has {} available. Close other apps and try again.",
             format_bytes(need),
             available
                 .map(format_bytes)

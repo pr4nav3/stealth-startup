@@ -17,7 +17,10 @@ cd "$REPO"
 case "$(uname -m)" in
   arm64) arch=aarch64 ;;
   x86_64) arch=x86_64 ;;
+  *) echo "unsupported processor $(uname -m)" >&2; exit 1 ;;
 esac
+# The certificate every release must carry; anything else silently drops users' permissions.
+REQUIREMENT='identifier "app.supervisor.desktop" and certificate leaf = H"f6705448be2a29c5de7579461d408f1e05ef3df1"'
 out="build/release"
 zip="$out/Supervisor-macos-$arch.zip"
 
@@ -28,7 +31,8 @@ sh scripts/sign_webcam_runtime.sh "$IDENTITY"
 APPLE_SIGNING_IDENTITY="$IDENTITY" npx tauri build --bundles app --config src-tauri/tauri.bundle.conf.json
 
 app="src-tauri/target/release/bundle/macos/Supervisor.app"
-codesign --verify --deep --strict "$app"
+codesign --verify --deep --strict -R="$REQUIREMENT" "$app" \
+  || { echo "the app is not signed with Supervisor's certificate (plans/distribution.md)" >&2; exit 1; }
 
 mkdir -p "$out"
 rm -f "$zip" "$zip.sha256"

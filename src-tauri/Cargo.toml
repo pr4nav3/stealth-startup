@@ -61,9 +61,9 @@ block2 = "0.6"
 libc = "0.2"
 mach2 = "0.4"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSImage", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFDictionary", "CFNumber", "CFString", "CFURL"] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation", "CGWindow"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation", "CGSession", "CGWindow"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebView", "WKSnapshotConfiguration"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSPathUtilities", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSPathUtilities", "NSProcessInfo", "NSURL", "NSValue"] }

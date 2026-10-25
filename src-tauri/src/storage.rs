@@ -86,8 +86,9 @@ pub fn open_or_reset(
     };
     let reason = match SessionStorage::open(&path) {
         Ok(opened) => return (Some(opened), None),
-        Err(reason) if path.exists() && matches!(reason.as_str(),
-            "file is not a database" | "database disk image is malformed") => reason,
+        Err(reason) if path.exists() && (matches!(reason.as_str(),
+            "file is not a database" | "database disk image is malformed")
+            || reason.starts_with("database is damaged")) => reason,
         Err(reason) => return (None, Some(StorageNotice::Off { reason })),
     };
     let moved_to = match move_aside(&path) {
@@ -771,8 +772,17 @@ impl SessionStorage {
             // macOS names some apps with an invisible left-to-right mark ("\u{200e}WhatsApp").
             // Until 2026-10-25 it went into app keys and labels, so a rule typed as "whatsapp"
             // never matched and History showed a stray mark. Capture strips it now; this cleans
-            // what was stored before. A clean key that already exists keeps the older rows apart.
+            // what was stored before. A mark whose clean key already belongs to another app is
+            // left alone everywhere, so no row moves to the wrong app.
             let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            let taken: std::collections::HashSet<String> = {
+                let mut stmt = self.conn
+                    .prepare("SELECT key FROM app_identity UNION SELECT key FROM app_name")
+                    .map_err(|error| error.to_string())?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?;
+                rows.collect::<Result<_, _>>().map_err(|error| error.to_string())?
+            };
+            // User-typed names (app_name.name) are not touched: they may hold joiners on purpose.
             for (table, column) in [
                 ("app_identity", "key"),
                 ("app_identity", "label"),
@@ -781,9 +791,8 @@ impl SessionStorage {
                 ("span", "label"),
                 ("rule", "value"),
                 ("app_name", "key"),
-                ("app_name", "name"),
             ] {
-                self.strip_invisible_marks(table, column)?;
+                self.strip_direction_marks(table, column, &taken)?;
             }
             tx.execute_batch("PRAGMA user_version = 13;").map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
@@ -791,7 +800,13 @@ impl SessionStorage {
         Ok(())
     }
 
-    fn strip_invisible_marks(&self, table: &str, column: &str) -> Result<(), String> {
+    fn strip_direction_marks(
+        &self,
+        table: &str,
+        column: &str,
+        taken: &std::collections::HashSet<String>,
+    ) -> Result<(), String> {
+        const MARKS: [char; 4] = ['\u{200b}', '\u{200e}', '\u{200f}', '\u{feff}'];
         let values: Vec<String> = {
             let mut stmt = self
                 .conn
@@ -803,15 +818,17 @@ impl SessionStorage {
             rows.collect::<Result<_, _>>().map_err(|error| error.to_string())?
         };
         for value in values {
-            let clean = crate::activity::strip_invisible(&value).trim().to_string();
-            if clean != value && !clean.is_empty() {
-                self.conn
-                    .execute(
-                        &format!("UPDATE OR IGNORE {table} SET {column} = ?2 WHERE {column} = ?1"),
-                        params![value, clean],
-                    )
-                    .map_err(|error| error.to_string())?;
+            let clean: String = value.chars().filter(|ch| !MARKS.contains(ch)).collect();
+            let clean = clean.trim().to_string();
+            if clean == value || clean.is_empty() || taken.contains(&clean) {
+                continue;
             }
+            self.conn
+                .execute(
+                    &format!("UPDATE OR IGNORE {table} SET {column} = ?2 WHERE {column} = ?1"),
+                    params![value, clean],
+                )
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -1233,6 +1250,12 @@ impl SessionStorage {
         seconds: u64,
     ) -> Result<(), String> {
         if seconds == 0 {
+            // A span closed where it began (Away dated back to its start) holds no time, but an
+            // earlier checkpoint may have saved it with some; that row must go.
+            self.conn.execute(
+                "DELETE FROM span WHERE session_id = ?1 AND started_offset_seconds = ?2",
+                params![session_id, started_offset_seconds],
+            ).map_err(|error| error.to_string())?;
             return Ok(());
         }
         let changed = self.conn.execute(
@@ -2155,7 +2178,19 @@ pub fn capture_local_offset() {
 }
 
 /// Per-instant offset where the platform allows it (DST-correct); otherwise the startup one.
+/// On macOS `time` refuses once threads exist, so the offset comes from `localtime_r`, which is
+/// thread-safe and follows daylight saving and time-zone changes.
 fn local_offset_at(instant: time::OffsetDateTime) -> time::UtcOffset {
+    #[cfg(target_os = "macos")]
+    {
+        let seconds = instant.unix_timestamp() as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if !unsafe { libc::localtime_r(&seconds, &mut tm) }.is_null() {
+            if let Ok(offset) = time::UtcOffset::from_whole_seconds(tm.tm_gmtoff as i32) {
+                return offset;
+            }
+        }
+    }
     time::UtcOffset::local_offset_at(instant)
         .ok()
         .or_else(|| STARTUP_OFFSET.get().copied())
@@ -2604,6 +2639,32 @@ mod tests {
             rows.collect::<Result<_, _>>().unwrap()
         };
         assert!(!columns.iter().any(|column| column == "neutral_seconds" || column == "unrated_seconds"));
+    }
+
+    #[test]
+    fn version_thirteen_leaves_a_mark_alone_when_the_clean_key_is_another_app() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Old", Strictness::Normal, "2026-10-24T12:00:00Z", 60).unwrap();
+        storage.insert_span(id, &app("\u{200e}Notes"), "focused", 0, 60).unwrap();
+        storage.close_session(id, "2026-10-24T12:01:00Z", "stopped", 60).unwrap();
+        storage.conn.execute_batch(
+            "INSERT INTO app_identity (identity, key, label) VALUES
+               ('bundle:com.apple.notes', 'notes', 'Notes'),
+               ('bundle:com.other.notes', '\u{200e}notes', '\u{200e}Notes');
+             INSERT INTO app_name (key, name) VALUES ('notes', '👨\u{200d}💻 Work');
+             PRAGMA user_version = 12;",
+        ).unwrap();
+        let reopened = SessionStorage::from_connection(storage.conn).unwrap();
+        let other: String = reopened.conn.query_row(
+            "SELECT key FROM app_identity WHERE identity = 'bundle:com.other.notes'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(other, "\u{200e}notes");
+        let span_key: String = reopened.conn.query_row(
+            "SELECT activity_key FROM span WHERE session_id = ?1", [id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(span_key, "\u{200e}notes", "the other app's history must not move to notes");
+        let name: String = reopened.conn.query_row("SELECT name FROM app_name WHERE key = 'notes'", [], |row| row.get(0)).unwrap();
+        assert_eq!(name, "👨\u{200d}💻 Work");
     }
 
     #[test]

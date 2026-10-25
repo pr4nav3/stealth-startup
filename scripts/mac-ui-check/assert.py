@@ -3,6 +3,8 @@ taller than its window, or a state that did not render."""
 import json, sys
 
 states = json.load(open(sys.argv[1]))
+if not states:
+    sys.exit("no states were laid out")
 problems = []
 for s in states:
     name = s.get("name")

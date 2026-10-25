@@ -69,6 +69,29 @@
   box-sizing: border-box;
 }
 
+/* No rubber-band bounce on a Mac trackpad: the window is the app, not a page. */
+html,
+body {
+  overscroll-behavior: none;
+}
+
+/* One focus ring on every OS: WebKit otherwise draws the blue macOS accent ring on fields. */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--sv-ink);
+  outline-offset: 2px;
+}
+
+/* A search field drawn like the other fields, without WebKit's own search styling. */
+input[type="search"] {
+  appearance: none;
+}
+
+input[type="search"]::-webkit-search-decoration {
+  appearance: none;
+}
+
 body {
   margin: 0;
   min-width: 280px;

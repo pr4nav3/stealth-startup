@@ -14,8 +14,10 @@ STARTED=0
 if ! curl -sf -o /dev/null http://127.0.0.1:1420/mock.html; then
   (cd "$ROOT" && npx vite --host 127.0.0.1 --port 1420 --strictPort >"$OUT/vite.log" 2>&1 &)
   STARTED=1
-  for i in $(seq 1 50); do curl -sf -o /dev/null http://127.0.0.1:1420/mock.html && break; sleep 0.2; done
+  for i in $(seq 1 150); do curl -sf -o /dev/null http://127.0.0.1:1420/mock.html && break; sleep 0.2; done
 fi
-"$OUT/webkit-eval" "http://127.0.0.1:1420/mock.html" 920 760 "$HERE/states.js" | tail -1 > "$OUT/states.json"
+"$OUT/webkit-eval" "http://127.0.0.1:1420/mock.html" 920 760 "$HERE/states.js" > "$OUT/raw.txt" \
+  || { cat "$OUT/raw.txt" >&2; exit 1; }
+tail -1 "$OUT/raw.txt" > "$OUT/states.json"
 [ "$STARTED" = 1 ] && pkill -f "vite --host 127.0.0.1 --port 1420" || true
 python3 "$HERE/assert.py" "$OUT/states.json"

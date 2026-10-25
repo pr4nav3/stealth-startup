@@ -69,16 +69,62 @@ pub fn keeps_display_awake(pid: u64) -> bool {
 }
 
 /// The bundle identifier ("com.microsoft.VSCode") of the app bundle at `path`. It survives
-/// renames and updates, unlike the app's display name.
+/// renames and updates, unlike the app's display name. Read once per path: it runs every tick.
 pub fn bundle_identifier(path: &str) -> Option<String> {
     use objc2_foundation::{NSBundle, NSString};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     if path.is_empty() {
         return None;
     }
-    let bundle = NSBundle::bundleWithPath(&NSString::from_str(path))?;
-    let id = bundle.bundleIdentifier()?.to_string();
-    Some(id.trim().to_string()).filter(|id| !id.is_empty())
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(id) = cache.get(path) {
+        return id.clone();
+    }
+    let id = NSBundle::bundleWithPath(&NSString::from_str(path))
+        .and_then(|bundle| bundle.bundleIdentifier())
+        .map(|id| id.to_string().trim().to_string())
+        .filter(|id| !id.is_empty());
+    if cache.len() >= 256 {
+        cache.clear();
+    }
+    cache.insert(path.to_string(), id.clone());
+    id
+}
+
+/// The app macOS considers in front, even when it has no window on screen (its last window
+/// closed, all minimized, or the desktop clicked): pid, name, bundle path.
+pub fn frontmost_app() -> Option<(u64, String, std::path::PathBuf)> {
+    use objc2_app_kit::NSWorkspace;
+
+    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    let pid = u64::try_from(app.processIdentifier()).ok()?;
+    let name = app.localizedName().map(|name| name.to_string()).unwrap_or_default();
+    let path = app
+        .bundleURL()
+        .and_then(|url| url.path())
+        .map(|path| std::path::PathBuf::from(path.to_string()))
+        .unwrap_or_default();
+    Some((pid, name, path))
+}
+
+/// The login screen or the lock screen is up. Like the Windows lock screen, it records nothing.
+pub fn screen_locked() -> bool {
+    use objc2_core_foundation::{CFBoolean, CFString};
+
+    let Some(session) = objc2_core_graphics::CGSessionCopyCurrentDictionary() else {
+        return false;
+    };
+    let key = CFString::from_static_str("CGSSessionScreenIsLocked");
+    // SAFETY: a CFDictionary from CoreGraphics; the key and value are CF types.
+    let session: &objc2_core_foundation::CFDictionary<CFString, objc2_core_foundation::CFType> =
+        unsafe { &*(&*session as *const objc2_core_foundation::CFDictionary).cast() };
+    session
+        .get(&key)
+        .and_then(|value| value.downcast_ref::<CFBoolean>().map(CFBoolean::value))
+        .unwrap_or(false)
 }
 
 /// `/System/Library/CoreServices` as macOS reports it: home of the Dock, Spotlight,
@@ -105,7 +151,7 @@ pub fn total_ram_bytes() -> Option<u64> {
     sysctl_u64("hw.memsize")
 }
 
-/// 0 normal, 1 warning, 2 urgent, 3 critical. None if the kernel does not report it.
+/// The kernel's dispatch levels: 1 normal, 2 warning, 4 critical. None if it does not report it.
 pub fn memory_pressure_level() -> Option<u32> {
     sysctl_u32("kern.memorystatus_vm_pressure_level")
 }
@@ -231,7 +277,8 @@ fn media_access(kind: &objc2_av_foundation::AVMediaType, denied: &str) -> Result
         let _ = sender.send(granted.as_bool());
     });
     unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(kind, &handler) };
-    match receiver.recv() {
+    // A prompt left unanswered must not hang the command forever.
+    match receiver.recv_timeout(std::time::Duration::from_secs(120)) {
         Ok(true) => Ok(()),
         _ => Err(denied.to_string()),
     }

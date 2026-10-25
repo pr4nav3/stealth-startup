@@ -129,6 +129,8 @@ interface CurrentSession {
   metrics: SessionMetrics;
   evidence: EvidenceEvent[];
   focus: FocusSnapshot | null;
+  /** Supervisor's own window is in front; `focus` still holds the window before it. */
+  on_supervisor?: boolean;
   /** Distractions allowed for this session. */
   exceptions: AppRule[];
   camera: CameraStatus;
@@ -1026,6 +1028,7 @@ function sessionViewKey(current: CurrentSession | null): string {
     focus?.matched_rule?.value ?? "",
     sample?.app_name ?? "",
     focus?.activity.key ?? "",
+    current.on_supervisor ? 1 : 0,
     current.metrics.nudges,
     current.camera.phone ? 1 : 0,
     current.camera.phone_distracted ? 1 : 0,
@@ -1293,6 +1296,9 @@ function nowReading(current: CurrentSession): { name: string; detail: string } {
     return { name: "Phone", detail: "In view of the camera" };
   }
   const focus = current.focus;
+  if (current.on_supervisor) {
+    return { name: "Supervisor", detail: "Work" };
+  }
   if (!focus) {
     return { name: "Looking…", detail: "Reading the window in front" };
   }
@@ -2284,7 +2290,7 @@ function bindPhraseEditor(root: ParentNode): void {
   });
   // Enter submits, as the old single-line field did; a line is one sentence, never two rows.
   text?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter" && !event.shiftKey && !composing(event)) {
       event.preventDefault();
       phraseForm?.requestSubmit();
     }
@@ -4162,7 +4168,7 @@ function bindEvents(): void {
     }
   });
   renameInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
+    if (event.key === "Enter" && !composing(event)) {
       event.preventDefault();
       void saveHistoryRename();
     }
@@ -6167,7 +6173,7 @@ function webcamTitle(frame: WebcamFrame | null, alerting: boolean): string {
     return "Out of frame";
   }
   if (frame.gaze === "at_pc") {
-    return "At the PC";
+    return "At the screen";
   }
   if (frame.gaze === "away_from_pc") {
     return "Looking away";
@@ -6192,7 +6198,7 @@ function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
     return "Head toward the screen.";
   }
   if (frame.phone_in_frame) {
-    return "Phone is visible. Looking at the PC, so this is not a phone hit yet.";
+    return "Phone is visible. Looking at the screen, so this is not a phone hit yet.";
   }
   return "Looking away. No phone in the camera.";
 }
@@ -6843,7 +6849,7 @@ function ramLockMessage(): string {
   const system = voiceBackend?.system;
   const need = system?.min_free_ram_bytes ? formatBytes(system.min_free_ram_bytes) : "enough";
   const free = system?.available_ram_bytes != null ? formatBytes(system.available_ram_bytes) : "unknown";
-  return `Clone locked. Need about ${need} available RAM, this PC has ${free} available.`;
+  return `Clone locked. Need about ${need} available RAM, this computer has ${free} available.`;
 }
 
 function canGenerateClip(voice: VoiceOption): boolean {
@@ -7747,6 +7753,12 @@ const STRIP_GREEN = "#a8eb37";
 const STRIP_RED = "#ff684f";
 
 /** Draws the card to a canvas and puts the PNG on the clipboard, in the current theme's colours. */
+/** The Enter that confirms Japanese or Chinese input is not a submit. WebKit reports it
+ *  with isComposing false, so keyCode 229 (an IME key) is checked too. */
+function composing(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229;
+}
+
 async function copyCard(): Promise<void> {
   if (!dayCard) {
     return;
@@ -7873,13 +7885,13 @@ async function copyCard(): Promise<void> {
     ctx.fillText(value, x + 16, tileY + 40 + (34 - valueSize));
   });
 
-  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-  if (!blob) {
-    showFeedback("Could not draw the card");
-    return;
-  }
+  // The write starts now, with the PNG still being encoded: WebKit (the Mac webview) allows
+  // a clipboard write only during the click itself, not after an await.
+  const png = new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not draw the card"))), "image/png"),
+  );
   try {
-    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
     showFeedback("Card copied");
   } catch (error) {
     showFeedback(`Could not copy: ${errorText(error)}`);

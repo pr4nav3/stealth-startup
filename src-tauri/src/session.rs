@@ -884,7 +884,9 @@ impl Session {
         // A phone span stays a phone span; the decision applies once it is put down.
         let on_phone = self.phone_active();
         let recorded_activity = self.open_span.as_ref().map(|span| span.activity.clone());
-        if !on_phone {
+        // While paused the open span is the pause itself; closing it here would store the rest
+        // of the pause as whatever comes next.
+        if !on_phone && self.is_recording() {
             self.close_open_span(now, storage);
         }
         self.engine.replace_rules(self.rules.clone());
@@ -1077,6 +1079,7 @@ impl Session {
             metrics: self.metrics.clone(),
             evidence: self.evidence.clone(),
             focus: self.latest_focus.clone(),
+            on_supervisor: self.supervisor_state.is_some(),
             exceptions: self.exceptions.clone(),
             camera: self.camera_status(now),
         }
@@ -1477,6 +1480,8 @@ pub struct CurrentSession {
     pub metrics: SessionMetrics,
     pub evidence: Vec<EvidenceEvent>,
     pub focus: Option<FocusSnapshot>,
+    /// Supervisor's own window is in front (`focus` still holds the window before it).
+    pub on_supervisor: bool,
     /// Distractions allowed for this session.
     pub exceptions: Vec<AppRule>,
     pub camera: CameraStatus,

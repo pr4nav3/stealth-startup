@@ -548,6 +548,13 @@ fn extract_zip(archive_path: &Path, out_dir: &Path, cancel: &AtomicBool) -> Resu
                 entry.name()
             ));
         };
+        // A link extracted earlier must not become a way out: nothing is written through one.
+        if passes_through_link(out_dir, &relative) {
+            return Err(format!(
+                "voice runtime archive writes through a link: {}",
+                entry.name()
+            ));
+        }
         let out_path = out_dir.join(&relative);
         if entry.is_dir() {
             fs::create_dir_all(&out_path).map_err(|error| error.to_string())?;
@@ -606,6 +613,20 @@ fn safe_relative_path(value: &str) -> Option<PathBuf> {
 
 /// Whether a link at `link` (relative to the runtime root) pointing at `target` resolves
 /// inside the root, judged on the path text alone: relative, and never climbing above it.
+/// Whether any folder on the way to `relative` under `root` is a symlink (the entry itself
+/// may be one; only its parents matter).
+fn passes_through_link(root: &Path, relative: &Path) -> bool {
+    let mut path = root.to_path_buf();
+    let parts: Vec<_> = relative.components().collect();
+    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+        path.push(part);
+        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn symlink_stays_inside(link: &Path, target: &str) -> bool {
     let target = Path::new(target);
     if target.is_absolute() || target.as_os_str().is_empty() {
@@ -639,6 +660,10 @@ fn make_executable(_path: &Path) -> Result<(), String> {
 }
 
 fn dev_worker_launch() -> Option<WorkerLaunch> {
+    // An installed copy runs only the verified runtime; the environment cannot swap it.
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     if let Some(worker) = std::env::var_os("SUPERVISOR_VOICE_WORKER").map(PathBuf::from) {
         let python = std::env::var_os("SUPERVISOR_VOICE_PYTHON").map(PathBuf::from);
         return worker_launch_from_paths(worker, python);
@@ -880,6 +905,17 @@ mod tests {
         assert!(!symlink_stays_inside(link, "../../etc/passwd"));
         assert!(!symlink_stays_inside(link, "/usr/lib/libSystem.B.dylib"));
         assert!(!symlink_stays_inside(link, ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_written_through_an_extracted_link() {
+        let root = test_dir("through-link");
+        fs::create_dir_all(root.join("d")).unwrap();
+        std::os::unix::fs::symlink("..", root.join("d/up")).unwrap();
+        assert!(passes_through_link(&root, Path::new("d/up/escape")));
+        assert!(!passes_through_link(&root, Path::new("d/up")));
+        assert!(!passes_through_link(&root, Path::new("d/file")));
     }
 
     /// Install a real runtime zip through the app's own install path and print the worker it

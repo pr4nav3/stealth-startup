@@ -12,14 +12,30 @@ let app = NSApplication.shared
 let web = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: height))
 let win = NSWindow(contentRect: web.frame, styleMask: [.titled], backing: .buffered, defer: false)
 win.contentView = web
+// On screen, not just created: a window WebKit thinks is hidden pauses requestAnimationFrame.
+win.orderFront(nil)
+
+// Never hang a CI job: give up after two minutes, and on any failed page load.
+DispatchQueue.main.asyncAfter(deadline: .now() + 120) {
+    print("timeout: no result in 120 s"); fflush(stdout)
+    exit(1)
+}
 
 class Delegate: NSObject, WKNavigationDelegate {
+    func webView(_ w: WKWebView, didFail n: WKNavigation!, withError error: Error) {
+        print("load failed: \(error)"); fflush(stdout)
+        exit(1)
+    }
+    func webView(_ w: WKWebView, didFailProvisionalNavigation n: WKNavigation!, withError error: Error) {
+        print("load failed: \(error)"); fflush(stdout)
+        exit(1)
+    }
     func webView(_ w: WKWebView, didFinish n: WKNavigation!) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             w.callAsyncJavaScript(script, arguments: [:], in: nil, in: .page) { result in
                 switch result {
                 case .success(let value): print(value); fflush(stdout)
-                case .failure(let error): print("JS error: \(error)"); fflush(stdout)
+                case .failure(let error): print("JS error: \(error)"); fflush(stdout); exit(1)
                 }
                 exit(0)
             }
