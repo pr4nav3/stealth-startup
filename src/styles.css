@@ -183,13 +183,18 @@ p {
   display: flex;
   flex-direction: column;
   width: min(100%, 1120px);
-  /* A definite height, not min-height. WebKit sizes a flex child's grid against the shell's
-     min-height as if nothing else were in the column (Home overflowed by 110px), and with a
-     zero-height grid it stops stretching the rows (a gap under the cards). With a definite
-     shell both engines fill Home exactly; a short window still scrolls the page. */
-  height: 100vh;
+  min-height: 100vh;
   margin: 0 auto;
   padding: 14px 24px 24px;
+}
+
+/* Home alone gets a definite height. WebKit sizes a flex child's grid against the shell's
+   min-height as if nothing else were in the column (Home overflowed by 110px), and with a
+   zero-height grid it stops stretching the rows (a gap under the cards); with a definite
+   shell both engines fill Home exactly. Pages that scroll keep min-height, so their bottom
+   padding survives. */
+.app-shell:has(> .home-ready) {
+  height: 100vh;
 }
 
 .topbar {
