@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://asset.localhost https://asset.localhost; img-src 'self' data: blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost asset: http://asset.localhost https://asset.localhost; img-src 'self' data: blob:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPDATA/voice/**"]

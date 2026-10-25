@@ -3176,7 +3176,8 @@ function renderWeekPicker(weekStart: string, oldestMonday: string | null): strin
   const cells = Array.from({ length: PICKER_GRID_DAYS }, (_, index) => {
     const day = addDaysKey(gridStart, index);
     const inMonth = day.slice(0, 7) === month.slice(0, 7);
-    const future = day > today;
+    // Nothing before the first recorded week, same bound as the ‹ arrow.
+    const future = day > today || (oldestMonday !== null && mondayKey(day) < oldestMonday);
     const focus = pickerDays[day]?.focus_seconds ?? 0;
     const level = focus <= 0 ? "" : focus >= 90 * 60 ? "l3" : focus >= 25 * 60 ? "l2" : "l1";
     const classes = [
@@ -4445,7 +4446,8 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "pick-week") {
     const day = source?.dataset.day;
     closeWeekPicker();
-    if (day && day <= dayKey(new Date())) {
+    const oldestMonday = historyWeek?.oldest_day ? mondayKey(historyWeek.oldest_day) : null;
+    if (day && day <= dayKey(new Date()) && (oldestMonday === null || mondayKey(day) >= oldestMonday)) {
       historyWeekStart = mondayKey(day);
     }
     await refreshHistoryWeek();
