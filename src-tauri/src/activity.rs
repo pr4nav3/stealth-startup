@@ -74,6 +74,8 @@ pub struct Bounds {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct CapturePermissions {
     pub screen_recording: PermissionState,
+    /// macOS: window titles and browser addresses are read through Accessibility.
+    pub accessibility: PermissionState,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -137,6 +139,11 @@ fn capture_foreground(
                 ForegroundDisposition::ShellSurface => sample.shell_surface = true,
                 ForegroundDisposition::Sample => {}
             }
+            // Without Screen Recording the window list gives no titles; Accessibility does.
+            if sample.window_title.is_none() {
+                sample.window_title = browser_macos::focused_window_title(sample.process_id)
+                    .and_then(|title| normalize_title_text(&title));
+            }
             if crate::website::is_browser(&sample.app_name.to_lowercase()) {
                 sample.browser = Some(browser_macos::read_browser(sample.process_id));
             }
@@ -183,13 +190,14 @@ fn sample_from_active_window(
     permissions: CapturePermissions,
     idle_seconds: Option<f64>,
 ) -> ActivitySample {
+    let app_name = activity_normalize::strip_zero_width(&active_window.app_name).trim().to_string();
     ActivitySample {
         captured_at,
         platform: platform(),
-        app_label: activity_normalize::app_label(&active_window.app_name, None),
-        app_identity: app_identity(&active_window.process_path.to_string_lossy(), &active_window.app_name),
+        app_label: activity_normalize::app_label(&app_name, None),
+        app_identity: app_identity(&active_window.process_path.to_string_lossy(), &app_name),
         app_key: None,
-        app_name: active_window.app_name,
+        app_name,
         process_path: active_window.process_path.to_string_lossy().into_owned(),
         process_id: active_window.process_id,
         window_title: non_empty(active_window.title),
@@ -236,10 +244,77 @@ fn platform() -> &'static str {
     }
 }
 
-fn capture_permissions() -> CapturePermissions {
+/// The Mac twin of `manual_foreground_probe`, run from the bundled app so it has the app's
+/// permissions: `SUPERVISOR_PROBE=/tmp/probe.txt open -a Supervisor.app`, in a debug build.
+/// Switch between browsers, tabs, and apps while it runs.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+pub fn probe_to_file(path: &str) {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let Ok(mut file) = std::fs::File::create(path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "accessibility={} screen_recording={}",
+        browser_macos::accessibility_granted(),
+        crate::macos::screen_recording_granted()
+    );
+    let started = Instant::now();
+    let mut resolver = crate::attribution::Resolver::default();
+    let mut described = std::collections::HashSet::new();
+    for _ in 0..40 {
+        let before = Instant::now();
+        match current_activity_sample() {
+            Ok(sample) => {
+                let activity = resolver.resolve(&sample, started.elapsed());
+                let _ = writeln!(
+                    file,
+                    "{:>5}ms  {:<20} {:<40} title={:?} browser={:?} -> {:?} {} [{:?}]",
+                    before.elapsed().as_millis(),
+                    sample.app_label,
+                    sample.process_path,
+                    sample.window_title,
+                    sample.browser,
+                    activity.kind,
+                    activity.label,
+                    activity.source,
+                );
+                if sample.browser.as_ref().is_some_and(|read| read.address.is_none())
+                    && described.insert(sample.process_id)
+                {
+                    let _ = writeln!(file, "{}", browser_macos::describe_focused_window(sample.process_id, 4));
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(file, "ERR: {error}");
+            }
+        }
+        let _ = file.flush();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+pub fn capture_permissions() -> CapturePermissions {
     CapturePermissions {
         screen_recording: screen_recording_permission(),
+        accessibility: accessibility_permission(),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn accessibility_permission() -> PermissionState {
+    if browser_macos::request_accessibility() {
+        PermissionState::Granted
+    } else {
+        PermissionState::Missing
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn accessibility_permission() -> PermissionState {
+    PermissionState::NotRequired
 }
 
 #[cfg(target_os = "macos")]
@@ -299,6 +374,7 @@ mod tests {
             "2026-08-12T00:00:00Z".to_string(),
             CapturePermissions {
                 screen_recording: PermissionState::Missing,
+                accessibility: PermissionState::NotRequired,
             },
             Some(1.24),
         );
@@ -319,6 +395,7 @@ mod tests {
             "2026-08-12T00:00:00Z".to_string(),
             CapturePermissions {
                 screen_recording: PermissionState::Granted,
+                accessibility: PermissionState::NotRequired,
             },
             None,
         );

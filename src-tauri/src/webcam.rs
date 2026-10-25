@@ -362,7 +362,31 @@ pub fn camera_names() -> Vec<String> {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: the same discovery session OpenCV's AVFoundation backend uses (built-in cameras,
+/// then external ones), so index N here is the worker's camera N.
+#[cfg(target_os = "macos")]
+pub fn camera_names() -> Vec<String> {
+    use objc2_av_foundation::{
+        AVCaptureDeviceDiscoverySession, AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
+        AVCaptureDeviceTypeExternal, AVMediaTypeVideo,
+    };
+    use objc2_foundation::NSArray;
+
+    unsafe {
+        let types = NSArray::from_slice(&[
+            AVCaptureDeviceTypeBuiltInWideAngleCamera,
+            AVCaptureDeviceTypeExternal,
+        ]);
+        let session = AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
+            &types,
+            AVMediaTypeVideo,
+            AVCaptureDevicePosition::Unspecified,
+        );
+        session.devices().iter().map(|device| device.localizedName().to_string()).collect()
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn camera_names() -> Vec<String> {
     Vec::new()
 }
@@ -497,6 +521,15 @@ use crate::macos::camera_access;
 #[cfg(test)]
 mod tests {
     use super::WebcamFrame;
+
+    /// `cargo test manual_camera_names -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual: lists the cameras the OS reports, in worker index order"]
+    fn manual_camera_names() {
+        for (index, name) in super::camera_names().iter().enumerate() {
+            println!("camera {index}: {name}");
+        }
+    }
 
     #[test]
     fn parses_worker_json_line() {

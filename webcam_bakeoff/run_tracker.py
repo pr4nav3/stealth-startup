@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -180,6 +181,10 @@ def main() -> int:
     try:
         while True:
             started = time.monotonic()
+            # macOS and Linux have no job object: an orphan is re-parented to pid 1, so stop
+            # there instead of holding the camera after the app has gone.
+            if os.getppid() == 1:
+                return 0
             ok, frame = cap.read()
             if not ok:
                 return fail(args.device, "The camera stopped sending frames.")

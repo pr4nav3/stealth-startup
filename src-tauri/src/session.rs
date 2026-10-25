@@ -2996,6 +2996,7 @@ mod tests {
             idle_seconds: Some(idle_seconds),
             permissions: CapturePermissions {
                 screen_recording: PermissionState::Granted,
+                accessibility: PermissionState::NotRequired,
             },
             shell_surface: false,
             browser: None,

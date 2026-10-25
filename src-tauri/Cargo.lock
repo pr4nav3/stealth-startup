@@ -4263,6 +4263,7 @@ dependencies = [
  "mach2",
  "objc2",
  "objc2-av-foundation",
+ "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
  "psl",

@@ -183,7 +183,10 @@ p {
   display: flex;
   flex-direction: column;
   width: min(100%, 1120px);
-  min-height: 100vh;
+  /* A definite height, not min-height: WebKit otherwise stretches the Home grid to the whole
+     viewport as if the top bar, tabs and Start button took no room, and Home overflows the
+     window by 110px. A short window still scrolls; the content just overflows the shell. */
+  height: 100vh;
   margin: 0 auto;
   padding: 14px 24px 24px;
 }

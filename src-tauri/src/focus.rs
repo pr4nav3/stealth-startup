@@ -619,7 +619,7 @@ mod tests {
             window_id: "window-1".to_string(),
             bounds: Bounds { x: 0.0, y: 0.0, width: 1440.0, height: 900.0 },
             idle_seconds: Some(idle_seconds),
-            permissions: CapturePermissions { screen_recording: PermissionState::Granted },
+            permissions: CapturePermissions { screen_recording: PermissionState::Granted, accessibility: PermissionState::NotRequired },
             shell_surface: false,
             browser: None,
             media_playing,

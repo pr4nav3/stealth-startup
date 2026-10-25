@@ -2564,7 +2564,21 @@ fn child_pids(pid: u32) -> Vec<u32> {
         .collect()
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn child_pids(pid: u32) -> Vec<u32> {
+    // Ask for the count first, then for that many; a worker spawns a handful of helpers at most.
+    let count = unsafe { libc::proc_listchildpids(pid as libc::pid_t, std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0 as libc::pid_t; count as usize + 8];
+    let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let filled = unsafe { libc::proc_listchildpids(pid as libc::pid_t, pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate(filled.max(0) as usize);
+    pids.into_iter().filter(|&child| child > 0).map(|child| child as u32).collect()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn child_pids(_pid: u32) -> Vec<u32> {
     Vec::new()
 }
@@ -2863,6 +2877,16 @@ fn dir_size(path: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn child_pids_lists_a_spawned_child() {
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let children = child_pids(std::process::id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(children.contains(&child.id()), "{children:?}");
+    }
 
     #[test]
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

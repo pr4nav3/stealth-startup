@@ -185,6 +185,34 @@ fn get_settings(state: State<'_, AppState>) -> Result<SessionSettings, String> {
     Ok(lock_sessions(&state)?.settings())
 }
 
+#[derive(serde::Serialize)]
+struct CaptureAccess {
+    platform: &'static str,
+    permissions: activity::CapturePermissions,
+}
+
+/// What the OS lets Supervisor see, for the Getting started card. On macOS the first call
+/// shows the system's Accessibility prompt.
+#[tauri::command]
+fn get_capture_access() -> CaptureAccess {
+    CaptureAccess {
+        platform: std::env::consts::OS,
+        permissions: activity::capture_permissions(),
+    }
+}
+
+#[tauri::command]
+fn open_accessibility_settings() -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn()
+        .map(drop)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn get_rules(state: State<'_, AppState>) -> Result<Vec<focus::AppRule>, String> {
     Ok(lock_sessions(&state)?.rules())
@@ -524,6 +552,11 @@ fn database_path(app: &tauri::App) -> Result<PathBuf, String> {
 }
 
 pub fn run() {
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    if let Ok(path) = std::env::var("SUPERVISOR_PROBE") {
+        activity::probe_to_file(&path);
+        std::process::exit(0);
+    }
     // Before Tauri starts any thread; see `capture_local_offset`.
     storage::capture_local_offset();
     tauri::Builder::default()
@@ -571,6 +604,8 @@ pub fn run() {
             get_history_size,
             dismiss_storage_notice,
             get_settings,
+            get_capture_access,
+            open_accessibility_settings,
             get_rules,
             resolve_rule_input,
             get_site_names,

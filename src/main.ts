@@ -39,6 +39,7 @@ interface Bounds {
 
 interface CapturePermissions {
   screen_recording: PermissionState;
+  accessibility: PermissionState;
 }
 
 interface ActivitySample {
@@ -655,6 +656,8 @@ let modelInfoOpen = false;
 let memoryInfoOpen = false;
 let modelDeleteOpen = false;
 let voiceBackend: VoiceBackendStatus | null = null;
+/** What the OS lets Supervisor see; null until the backend answers. */
+let captureAccess: { platform: string; permissions: CapturePermissions } | null = null;
 let voiceDownload: VoiceDownloadSnapshot | null = null;
 let voiceBusy: VoiceBusy = null;
 let voiceDeleteTargetId: string | null = null;
@@ -728,6 +731,9 @@ async function init(): Promise<void> {
       loadedPhraseLibrary.phrase_overrides.map((phrase) => [phrase.id, phrase]),
     );
     history.forEach((item) => knownHistoryIds.add(item.id));
+    void refreshCaptureAccess();
+    // Coming back from System Settings is when a permission changes.
+    window.addEventListener("focus", () => void refreshCaptureAccess());
     draft.strictness = loadedSettings.default_strictness;
     draft.voiceId = normalizeStoredVoiceId(loadedSettings.voice_profile);
   } catch (error) {
@@ -1535,9 +1541,46 @@ function renderOverlayProgress(current: CurrentSession): string {
 /** The Getting started steps, open as a popup over Home. */
 let onboardingOpen = false;
 
+async function refreshCaptureAccess(): Promise<void> {
+  try {
+    const access = await invoke<{ platform: string; permissions: CapturePermissions }>("get_capture_access");
+    const changed = JSON.stringify(access) !== JSON.stringify(captureAccess);
+    captureAccess = access;
+    if (changed) {
+      render();
+    }
+  } catch {
+    // Without an answer the step is simply not listed.
+  }
+}
+
+interface OnboardingStep {
+  id: string;
+  title: string;
+  copy: string;
+  done: boolean;
+  label: string;
+  optional?: boolean;
+}
+
 /** What a new user has to set up, each read from real state so it ticks itself off. */
-function onboardingSteps() {
+function onboardingSteps(): OnboardingStep[] {
+  // macOS reads window titles and browser addresses through Accessibility; without it every
+  // browser counts as Other websites. Windows needs nothing.
+  const accessibility =
+    captureAccess?.platform === "macos"
+      ? [
+          {
+            id: "accessibility",
+            title: "Allow Accessibility",
+            copy: "macOS needs it to tell websites apart. Only the address is read, never the page.",
+            done: captureAccess.permissions.accessibility !== "missing",
+            label: "Open settings",
+          },
+        ]
+      : [];
   return [
+    ...accessibility,
     {
       id: "voice",
       title: "Clone a voice",
@@ -4271,6 +4314,16 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "onboard-accessibility") {
+    try {
+      await invoke("open_accessibility_settings");
+    } catch (error) {
+      lastError = errorText(error);
+      render();
+    }
+    return;
+  }
+
   if (action === "onboard-voice" || action === "onboard-webcam") {
     onboardingOpen = false;
     activeTab = "settings";
@@ -6108,11 +6161,9 @@ function playWebcamAlarm(): void {
   oscillator.stop(context.currentTime + 0.28);
 }
 
-function permissionNotice(current: CurrentSession | null): string {
-  const sample = current?.focus?.sample;
-  if (sample?.platform === "macos" && sample.permissions.screen_recording === "missing") {
-    return `<section class="notice">Screen Recording permission is missing. Supervisor will fall back to app-name rules until macOS exposes window titles.</section>`;
-  }
+function permissionNotice(_current: CurrentSession | null): string {
+  // macOS Accessibility is a Getting started step instead: a banner here would push Home past
+  // the window, which is sized to fit it exactly.
   return "";
 }
 

@@ -3,14 +3,36 @@
 Living log of what is done and what is left. Update this file when an item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-10-24 (`app-v2-simplified-rules`; snapshot taken before the
-macOS pass starts on a separate machine)
+Last updated: 2026-10-25 (`app-v2-simplified-rules`; first macOS pass, uncommitted
+in the working tree)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
-ship target. Every line of the app so far was written and run on Windows. The
-Mac code paths compile (checked with `cargo check --target aarch64-apple-darwin`
-on Windows) but nothing has executed on a Mac. The next pass is on a MacBook:
-start from `plans/mac-handoff.md`.
+ship target. Everything through 2026-10-24 was written and run on Windows. On
+2026-10-25 the app was built and run on a MacBook for the first time:
+`plans/mac-handoff.md` says what was seen and what is still open.
+
+## macOS pass (2026-10-25, working tree)
+
+- [x] Builds on macOS: `cargo test` 198 pass, 2 manual ignored; `npm run check`;
+      debug `Supervisor.app` bundle runs the V2 UI
+- [x] Browser address read (`browser_macos.rs`): web area `AXURL` through
+      Accessibility; verified on Safari and Chrome, 3-10 ms a read. Window
+      titles also come from Accessibility, so Screen Recording is not needed
+- [x] `CapturePermissions.accessibility`; Home's Getting started card has an
+      "Allow Accessibility" step with Open settings (`get_capture_access`,
+      `open_accessibility_settings`). The old Screen Recording banner is gone:
+      it pushed Home past the window
+- [x] WebKit layout: `.app-shell` has a definite `height: 100vh`; Home fits
+      920x760 exactly in both engines
+- [x] Workers cannot outlive the app (webcam worker exits when orphaned);
+      `child_pids` on macOS; camera names from AVFoundation; bidi marks
+      stripped from app names
+- [x] `SUPERVISOR_PROBE` runs the capture probe inside the debug bundle
+- [x] Dev signing: `scripts/make_mac_dev_cert.sh` once per Mac, then
+      `npm run bundle:mac-dev`; permission grants survive rebuilds
+- [ ] Not yet: Python venvs, webcam and voice workers on the Mac, frozen
+      workers, Developer ID signing and notarization, shell surfaces, media
+      presence, other browsers
 
 ## Branches
 
@@ -105,8 +127,9 @@ live run on Windows was 2026-10-18.
 
 ### Settings and copy
 
-- [x] Named cameras in the webcam select (Windows Media Foundation; macOS and
-      Linux fall back to "Camera N"), smooth preview at 15 pictures/s with
+- [x] Named cameras in the webcam select (Windows Media Foundation; macOS
+      AVFoundation since 2026-10-25; Linux falls back to "Camera N"), smooth
+      preview at 15 pictures/s with
       detection still at 2 fps (`--preview-fps`), strictness seconds in the
       options, danger buttons everywhere, themed scrollbars, Defaults controls
       as inner cards
@@ -176,12 +199,12 @@ live run on Windows was 2026-10-18.
 
 ## Next
 
-1. **macOS pass** (MacBook, fresh agent): work through `plans/mac-handoff.md`
-   top to bottom. "Day one" covers the setup (two Python venvs, and
-   `webcam_bakeoff/models/yolo26s.onnx`, which is not in git and must be copied
-   from the Windows machine). Section 0 is the Mac-only code that does not exist
-   yet: address-bar read (`browser_macos.rs` is a stub), worker lifetime without
-   a job object, camera names, child pids; then frozen workers and signing.
+1. **macOS pass, continued**: section 0 of `plans/mac-handoff.md` is built and
+   the address read is verified. Left: the two Python venvs and
+   `webcam_bakeoff/models/yolo26s.onnx` (not in git, copy from the Windows
+   machine), a webcam session and a voice clip on the Mac, the remaining
+   checklist sections, then frozen workers and signing (a dev certificate
+   first, so rebuilds keep the Accessibility grant).
 2. **Live test pass on Windows** of everything on this branch (nothing since
    2026-10-18 has run outside the test suite and the mock): a V2 session with
    "Not today" and "Never a distraction", the schema v12 migration on a real
@@ -219,7 +242,8 @@ live run on Windows was 2026-10-18.
 Every shipped item has to work as intended on **Windows** and on **macOS**.
 Until the Mac pass, Windows is the only machine that has proved anything.
 
-- `cargo test` in `src-tauri`: 201 tests, 197 pass, 4 ignored (2026-10-24)
+- `cargo test` in `src-tauri`: Windows 201 tests, 197 pass, 4 ignored
+  (2026-10-24); macOS 200 tests, 198 pass, 2 ignored (2026-10-25)
 - `npm run check` (tsc + vite build)
 - Browser mock: `npm run dev:ui`, open `http://127.0.0.1:1420/mock.html`
   (`?empty=1` for a new user, `?big=1` for heavy weeks); render Home, Session
@@ -228,4 +252,5 @@ Until the Mac pass, Windows is the only machine that has proved anything.
 - Webcam worker: `webcam_bakeoff/test_labels.py`, `test_detectors.py`, and
   `run_tracker.py --self-test` on CPU and GPU
 - macOS: `cargo check --target aarch64-apple-darwin` from Windows keeps the
-  Mac paths compiling; the Mac itself runs `plans/mac-handoff.md`
+  Mac paths compiling; on the Mac, the debug bundle plus `SUPERVISOR_PROBE`
+  (`plans/mac-handoff.md`) shows what the capture resolves to

@@ -1,6 +1,6 @@
 # Known issues
 
-Last updated: 2026-10-24
+Last updated: 2026-10-25
 
 Starter list when swapping agents. Baseline is **`app-v2-simplified-rules`** (`main` is an
 ancestor; fast-forward it when ready). Everything described here is committed on that branch.
@@ -16,7 +16,7 @@ it. Expect first-run bugs on both OSes; the Windows live pass is item 2 in `plan
 
 ## Window supervision / history
 
-**macOS has no address-bar read.** `src-tauri/src/browser_macos.rs` is a stub. Mac browsers fall back to titles. Titles are never stored. A Mac is not on hand.
+**macOS reads the address through Accessibility** (`browser_macos.rs`, 2026-10-25): verified for Safari and Chrome, not yet seen on Firefox, Edge, Brave or Arc. Chrome's first second or two after Supervisor first sees it reads by title while Chrome builds its accessibility tree. Without the Accessibility grant every browser is Other websites; see "macOS" below for the rebuild trap.
 
 **Marking New Tab or "Other websites" as relevant/distracting is refused.** No rule would mean only that page. Expected for now; easy to mistake for a bug.
 
@@ -88,7 +88,7 @@ and the deadpan Gen Z set needs a flat delivery. Listen before keeping those cli
 
 **Phones below the camera are invisible.** A laptop webcam frames the face and shoulders; a phone in the lap never appears. Head-down detection is a possible later signal.
 
-**Camera names come from Windows only.** The webcam select lists devices by name through Media Foundation, in the order OpenCV opens them. On macOS and Linux `camera_names()` returns an empty list and the select shows "Camera 0" to "Camera 3". The saved index is used on every OS.
+**Camera names come from Windows and macOS.** The webcam select lists devices by name (Media Foundation on Windows, an AVFoundation discovery session on macOS), in the order OpenCV opens them. Linux still shows "Camera 0" to "Camera 3". The saved index is used on every OS. Continuity Camera is not in the macOS list (OpenCV does not open it either); unconfirmed with a second camera attached.
 
 **Preview runs at 15 pictures a second, detection at 2.** Between detections the worker resends the last labels and boxes (`--preview-fps`). A `detected` flag marks the real frames; nothing in the app reads it yet.
 
@@ -98,15 +98,14 @@ and the deadpan Gen Z set needs a flat delivery. Listen before keeping those cli
 
 ---
 
-## macOS (untested)
+## macOS (first pass 2026-10-25)
 
-Nothing Mac has been run. Checklist and the list of Mac code that does not exist yet: `plans/mac-handoff.md`. The gaps, in the order they bite:
+Checklist with what was seen: `plans/mac-handoff.md`. The app builds, tests pass, the debug bundle runs, and the address read works for Safari and Chrome. What still bites:
 
-- **No address-bar read.** `browser_macos.rs` returns "unavailable", so every browser is Other websites or a title match. Site rules cannot fire on a Mac until it reads `AXURL` through Accessibility.
-- **Workers can outlive the app.** `WorkerLifetime` (voice.rs) is a Windows job object; on macOS it is empty. Quit while a voice clip generates or a session has the webcam on and the Python process may stay behind. Needs a kill on exit or a process group.
-- **No camera names** (above). The select still works by index.
-- **`CREATE_NO_WINDOW` and the Win32 paths** are `#[cfg(windows)]`; the Mac spawns the worker plainly. Confirm no Terminal window opens.
-- Permissions (Screen Recording for titles, Accessibility for the address bar, Camera, Microphone), the RAM gate, shell surfaces, media presence, bundle-id identity, Continuity Camera, signing and notarization: all written, none run.
+- **An unsigned rebuild silently drops the Accessibility grant.** An ad-hoc debug bundle carries a per-build identifier, and macOS keys the grant to it: System Settings keeps showing Supervisor on, but `AXIsProcessTrusted` is false, every browser is Other websites and the Getting started step reads as not done. Build with `npm run bundle:mac-dev` after `scripts/make_mac_dev_cert.sh` (once per Mac) and the grant follows the certificate instead. There is no Developer ID certificate on any machine yet; a release needs one.
+- **Only Safari and Chrome are verified.** Firefox, Edge, Brave and Arc are expected to work (`AXURL` on the web area) but have not been seen.
+- **Chrome's profile suffix** (" – Name (email)", en dash) is not stripped by the title cleanup, so a Chrome New Tab is found by its address (`chrome://newtab/`), never by its title. Fine while the address reads.
+- Camera and microphone prompts, the RAM gate under load, shell surfaces (Cmd-Tab, Spotlight, Dock, desktop), media presence, Continuity Camera, the two Python venvs, frozen workers, signing and notarization: written, not yet run on the Mac.
 
 Windows `active-win-pos-rs` is now macOS/Linux-only. Do not add it back on Windows.
 

@@ -261,7 +261,7 @@ mod tests {
             window_id: window.to_string(),
             bounds: Bounds { x: 0.0, y: 0.0, width: 800.0, height: 600.0 },
             idle_seconds: Some(0.0),
-            permissions: CapturePermissions { screen_recording: PermissionState::NotRequired },
+            permissions: CapturePermissions { screen_recording: PermissionState::NotRequired, accessibility: PermissionState::NotRequired },
             shell_surface: false,
             browser: Some(BrowserRead {
                 address: address.map(str::to_string),

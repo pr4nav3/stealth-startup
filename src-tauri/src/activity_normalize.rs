@@ -1,6 +1,7 @@
 //! Pure normalization and surface classification for activity samples (all platforms).
 
-const ZERO_WIDTH_CHARS: [char; 3] = ['\u{200b}', '\u{200c}', '\u{feff}'];
+/// Zero-width joiners and bidi marks: macOS app names carry a leading U+200E ("‎WhatsApp").
+const ZERO_WIDTH_CHARS: [char; 6] = ['\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{feff}'];
 
 const BROWSER_EXE_SUFFIXES: &[(&str, &[&str])] = &[
     (
@@ -275,7 +276,7 @@ fn exe_stem_lower(exe_name: &str) -> String {
     stem.to_ascii_lowercase()
 }
 
-fn strip_zero_width(value: &str) -> String {
+pub fn strip_zero_width(value: &str) -> String {
     value
         .chars()
         .filter(|ch| !ZERO_WIDTH_CHARS.contains(ch))
