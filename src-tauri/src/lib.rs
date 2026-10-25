@@ -647,7 +647,8 @@ pub fn run() {
             list_cameras,
             automation_result,
             automation_tray,
-            automation_input
+            automation_input,
+            automation_media
         ])
         .build(tauri::generate_context!())
         .expect("failed to run Supervisor")
@@ -831,6 +832,24 @@ fn automation_input(
     #[allow(unreachable_code)]
     {
         let _ = (key, cmd, ctrl, alt, x, y, hold_ms);
+        Err("only on macOS".to_string())
+    }
+}
+
+/// Debug builds only, for the automation hook: whether `pid` keeps the display awake (what
+/// media presence reads on macOS), so the check can be driven against a playing video.
+#[tauri::command]
+fn automation_media(pid: u64) -> Result<bool, String> {
+    if !cfg!(debug_assertions) || std::env::var_os("SUPERVISOR_AUTOMATION").is_none() {
+        return Err("automation is off".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(macos::keeps_display_awake(pid));
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
         Err("only on macOS".to_string())
     }
 }

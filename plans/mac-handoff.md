@@ -252,6 +252,11 @@ compile). Nothing below has executed on a Mac.
 - [x] The premise holds: while a YouTube video plays in Chrome, `pmset -g assertions` shows
       Chrome's own pid holding `NoDisplaySleepAssertion "Video Wake Lock"`, which is what
       `keeps_display_awake` looks for. The 3-minute idle path itself was not sat through.
+- [x] `keeps_display_awake(chrome pid)` driven from the debug hook (`automation_media`)
+      while a long YouTube video played, paused with the `k` key and resumed: true, false,
+      true. And a session with no input for 3+ minutes and no video recorded an `idle`
+      span. The two halves are verified apart; the one combined 8-minute run was muddied
+      by a 19-second test video and YouTube autoplay, so it is not counted.
 - [ ] Media keeps an idle user present (`keeps_display_awake` in `macos.rs`, IOKit
       `IOPMCopyAssertionsByProcess`). With no input for 3+ minutes, the session must stay on
       the site (not Away) while: a YouTube video plays in Chrome, in Safari, and in Firefox,
