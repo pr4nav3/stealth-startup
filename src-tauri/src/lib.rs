@@ -858,7 +858,7 @@ fn automation_media(pid: u64) -> Result<bool, String> {
 /// Debug builds only, for the automation hook: the window's page rendered by its own
 /// webview to a TIFF at `path` (no Screen Recording grant needed). `sips` turns it into PNG.
 #[tauri::command]
-fn automation_snapshot(label: String, path: String, app: AppHandle) -> Result<(), String> {
+fn automation_snapshot(label: String, path: String, height: Option<f64>, app: AppHandle) -> Result<(), String> {
     if !cfg!(debug_assertions) || std::env::var_os("SUPERVISOR_AUTOMATION").is_none() {
         return Err("automation is off".to_string());
     }
@@ -871,6 +871,15 @@ fn automation_snapshot(label: String, path: String, app: AppHandle) -> Result<()
                 use objc2_foundation::{NSError, NSString};
                 use objc2_web_kit::WKWebView;
                 let web_view: &WKWebView = &*webview.inner().cast::<WKWebView>();
+                // Only the page the user sees: the view's bounds run on under the title bar.
+                let configuration = objc2_web_kit::WKSnapshotConfiguration::new();
+                if let Some(height) = height {
+                    let bounds = web_view.bounds();
+                    configuration.setRect(objc2_foundation::CGRect::new(
+                        objc2_foundation::CGPoint::new(0.0, 0.0),
+                        objc2_foundation::CGSize::new(bounds.size.width, height),
+                    ));
+                }
                 let handler = block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
                     if let Some(image) = image.as_ref() {
                         if let Some(tiff) = image.TIFFRepresentation() {
@@ -878,7 +887,7 @@ fn automation_snapshot(label: String, path: String, app: AppHandle) -> Result<()
                         }
                     }
                 });
-                web_view.takeSnapshotWithConfiguration_completionHandler(None, &handler);
+                web_view.takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &handler);
             }
             #[cfg(not(target_os = "macos"))]
             {
