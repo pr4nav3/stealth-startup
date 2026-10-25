@@ -190,6 +190,45 @@ Still to see on this Mac (each needs the desktop, so only with the user's go-ahe
 microphone prompt and a recorded sample, Brave and Edge reading the address within the first
 seconds after launch, and the Now line naming each app the way the Dock does.
 
+## Whole-codebase Mac review (2026-10-25)
+
+Five reviewers read every file for macOS failures; every finding below was checked against the
+code and fixed (207 tests, 36-state WebKit check):
+
+- Session time used `Instant`, which stops while a Mac sleeps: a lid close stretched the timer
+  instead of recording lost time. Now `SessionClock` (CLOCK_MONOTONIC, counts sleep).
+- A front app with no window (last window closed, minimized, desktop clicked) failed capture
+  and became "Device asleep" after 15 s. Now shell UI: the previous window keeps the time.
+- Finder folders counted as the desktop without Screen Recording (title read after classifying).
+- Closing the main window destroyed it for good; it now hides, and a Dock click reopens it.
+- Status window now joins every Space and shows over full-screen apps.
+- App Nap could throttle the 1 s ticker and nudges; the app holds a user-initiated activity.
+- Capture runs in an autorelease pool (memory grew all session); lock screen records nothing.
+- Browser reads: failures keyed per window, AX timeout set system-wide, search time-boxed,
+  controls skipped, the http(s) web area preferred over side panels and DevTools.
+- Other Mac browser builds recognized (Chrome Beta/Dev/Canary, Edge channels, Firefox Dev/Nightly,
+  Safari Technology Preview, Opera GX, Zen, Orion, DuckDuckGo); unknown browser schemes are the
+  browser's own page.
+- Camera list built exactly as OpenCV numbers devices (video + muxed, sorted by uniqueID).
+- Day bucketing uses the per-instant offset (`localtime_r`), so daylight saving does not move
+  sessions between days.
+- v13 migration: only direction marks, never user-typed names, never onto another app's key.
+- Flagging while paused no longer closes the pause span; empty spans delete stale checkpoints;
+  a database failing its integrity check is moved aside like a corrupt one.
+- Voice: worker pid forgotten when it dies, released before a runtime update, memory pressure
+  blocks only at critical (1/2/4 levels), permission wait times out, release builds ignore the
+  worker override variables, runtime archives cannot write through extracted links.
+- Frontend: card copy works under WebKit's clipboard rules, IME Enter does not submit, one
+  focus ring, no trackpad bounce, plain search field, "computer" not "PC".
+- Installer: atomic replace, certificate pinned, Apple Silicon by sysctl, waits for the old app,
+  whole script in main(). Release and signing scripts fail on a wrong certificate or any
+  unsigned binary. CI: 45-minute cap, WebKit check with a watchdog.
+
+Still open (needs a person or a decision): the native `<audio controls>` player and the
+monospace font look different from Windows (bundling one mono font fixes the second); Chrome
+and Safari web-app shims count as apps; Python GUI apps show as "Python"; mixed-DPI status
+window placement; Intel Macs.
+
 ## 0. Mac code that did not exist (built 2026-10-25)
 
 In the order a user would hit it.
