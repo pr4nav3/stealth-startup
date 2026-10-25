@@ -10,6 +10,9 @@
 # The certificate lives in its own keychain (supervisor-dev) with a known password, so
 # codesign never asks for the login password: a frozen worker has hundreds of files to sign.
 #
+# Releases are signed with this same certificate, so it exists once, ever: on a new Mac,
+# import the backup instead (plans/distribution.md). Running this there mints a different one.
+#
 #   sh scripts/make_mac_dev_cert.sh          # creates "Supervisor Dev"
 #   npm run bundle:mac-dev                   # debug Supervisor.app signed with it
 set -eu
