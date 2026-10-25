@@ -2682,7 +2682,9 @@ function renderModelInfoModal(): string {
           <div><span>Runtime</span><strong>${escapeHtml(runtime?.installed ? runtime.version ?? "installed" : "missing")}</strong></div>
         </div>
         <p>${
-          installed
+          installed && voiceDownload?.phase === "complete" && voiceDownload.up_to_date
+            ? "Up to date: every file matches the pack, nothing to download. Loaded only while a clip is being made."
+            : installed
             ? "Loaded only while a clip is being made. Check for updates downloads only what is missing from the pack."
             : `A one-time download of about ${escapeHtml(formatBytes(model?.required_bytes ?? 0))}. Saved clips play without it; making new ones needs it.`
         }</p>

@@ -180,9 +180,11 @@ In the order a user would hit it.
       builds) the first time it is seen. Verified: Safari and Chrome. Not yet seen: Firefox,
       Edge, Brave, Arc (all expose `AXURL` on the web area, so they should just work).
       `CapturePermissions.accessibility` carries the grant; Home's Getting started card asks.
-      Firefox verified on 2026-10-25 (its first-run `about:` page read by address as the
-      browser's own page). Brave and Edge were installed but their first-run windows never
-      presented a page in an unattended run; both are Chromium and take Chrome's path.
+      Firefox, Brave and Edge verified on 2026-10-25 (`open -a <browser> --args
+      --no-first-run --no-default-browser-check <url>` gets a Chromium browser past its
+      setup screens unattended): Firefox's first-run `about:` page read as the browser's own
+      page, Brave on github.com → GitHub, Edge on reddit.com → Reddit, all by address. Arc
+      not installed.
 - [x] **Worker lifetime.** The voice worker already exits when its stdin closes.
       `run_tracker.py` now exits as soon as it is orphaned (`os.getppid() == 1`), so a crash
       of the app releases the camera within a frame. A normal quit still kills both from
@@ -341,4 +343,8 @@ is ignored when it does not (the desktop). The login window gives no sample. Uti
       no write permission shows the "history off" notice.
 - [ ] Tray (menu bar) icon and its menu work. The status window stays on top when pinned.
 - [ ] Microphone and camera permission prompts show the texts in `src-tauri/Info.plist`.
-- [ ] Voice model download and clip generation work (voice runtime paths are per-OS).
+- [x] Voice model: with the pack present, Check for updates re-hashes all 1.9 GB
+      (10–50 s) and ends `complete` with `up_to_date`; the popup now says so in place, since
+      the 1.4 s toast was the only confirmation and read as nothing having happened. Clip
+      generation works (section 4). A fresh download through the UI was not run here: the
+      pack was fetched by hand first; the same code path serves Check for updates.
