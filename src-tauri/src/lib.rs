@@ -646,7 +646,8 @@ pub fn run() {
             stop_webcam_preview,
             list_cameras,
             automation_result,
-            automation_tray
+            automation_tray,
+            automation_input
         ])
         .build(tauri::generate_context!())
         .expect("failed to run Supervisor")
@@ -774,6 +775,64 @@ fn automation_tray(id: String, app: AppHandle) -> Result<(), String> {
     }
     tray_action(&app, &id);
     Ok(())
+}
+
+/// Debug builds only, for the automation hook: a keystroke or click as the user would make
+/// it, posted by this process (which holds the Accessibility grant). Lets the Mac pass drive
+/// Spotlight, Cmd-Tab and Mission Control without a person at the keyboard.
+#[tauri::command]
+fn automation_input(
+    kind: String,
+    key: Option<u16>,
+    cmd: Option<bool>,
+    ctrl: Option<bool>,
+    alt: Option<bool>,
+    x: Option<f64>,
+    y: Option<f64>,
+    hold_ms: Option<u64>,
+) -> Result<(), String> {
+    if !cfg!(debug_assertions) || std::env::var_os("SUPERVISOR_AUTOMATION").is_none() {
+        return Err("automation is off".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_core_graphics::{CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton};
+        let hold = Duration::from_millis(hold_ms.unwrap_or(60));
+        let post = |event: Option<objc2_core_foundation::CFRetained<CGEvent>>| {
+            CGEvent::post(CGEventTapLocation::HIDEventTap, event.as_deref());
+        };
+        match kind.as_str() {
+            "key" => {
+                let key = key.ok_or("key needed")?;
+                let mut flags = CGEventFlags::empty();
+                if cmd.unwrap_or(false) { flags |= CGEventFlags(1 << 20); }
+                if ctrl.unwrap_or(false) { flags |= CGEventFlags::MaskControl; }
+                if alt.unwrap_or(false) { flags |= CGEventFlags::MaskAlternate; }
+                let down = CGEvent::new_keyboard_event(None, key, true);
+                CGEvent::set_flags(down.as_deref(), flags);
+                post(down);
+                std::thread::sleep(hold);
+                let up = CGEvent::new_keyboard_event(None, key, false);
+                CGEvent::set_flags(up.as_deref(), flags);
+                post(up);
+            }
+            "click" => {
+                let point = objc2_core_foundation::CGPoint::new(x.ok_or("x needed")?, y.ok_or("y needed")?);
+                post(CGEvent::new_mouse_event(None, CGEventType::MouseMoved, point, CGMouseButton::Left));
+                std::thread::sleep(Duration::from_millis(80));
+                post(CGEvent::new_mouse_event(None, CGEventType::LeftMouseDown, point, CGMouseButton::Left));
+                std::thread::sleep(hold);
+                post(CGEvent::new_mouse_event(None, CGEventType::LeftMouseUp, point, CGMouseButton::Left));
+            }
+            other => return Err(format!("unknown input kind {other}")),
+        }
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = (key, cmd, ctrl, alt, x, y, hold_ms);
+        Err("only on macOS".to_string())
+    }
 }
 
 fn show_main_window(app: &tauri::AppHandle) {

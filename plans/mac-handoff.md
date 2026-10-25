@@ -180,6 +180,9 @@ In the order a user would hit it.
       builds) the first time it is seen. Verified: Safari and Chrome. Not yet seen: Firefox,
       Edge, Brave, Arc (all expose `AXURL` on the web area, so they should just work).
       `CapturePermissions.accessibility` carries the grant; Home's Getting started card asks.
+      Firefox verified on 2026-10-25 (its first-run `about:` page read by address as the
+      browser's own page). Brave and Edge were installed but their first-run windows never
+      presented a page in an unattended run; both are Chromium and take Chrome's path.
 - [x] **Worker lifetime.** The voice worker already exits when its stdin closes.
       `run_tracker.py` now exits as soon as it is orphaned (`os.getppid() == 1`), so a crash
       of the app releases the camera within a frame. A normal quit still kills both from
@@ -298,8 +301,11 @@ whatever Apple adds there later). Finder counts when its window has a title (a f
 is ignored when it does not (the desktop). The login window gives no sample. Utilities in
 `CoreServices/Applications` (Screen Sharing) still count. The rule is tested on Windows.
 
-- [ ] Cmd-Tab, Spotlight, Mission Control, Launchpad, Notification Center, Control Center,
-      and the Dock must keep the previous window counting. (Needs keystrokes; not driven.)
+- [x] Spotlight, a held Cmd-Tab and Mission Control keep the previous window counting:
+      posted as real keystrokes by the app itself (`automation_input` in the debug hook,
+      CGEvent, since the app holds the Accessibility grant) during a live session, the
+      capture went on crediting Chrome/YouTube and no shell window became a sample.
+      Launchpad, Notification Center, Control Center and the Dock not driven.
 - [x] Opening a Finder folder counts as Finder: probe with `~/Downloads` in front resolved
       `App Finder [App]` with the folder as the title. Clicking the desktop not driven.
 - [ ] Without Screen Recording permission, window titles are missing, so a Finder folder
