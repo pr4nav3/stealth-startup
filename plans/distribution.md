@@ -82,9 +82,15 @@ runtime and the worker could not start at all. The zip now stores links, and the
 recreates them, refusing any that point outside the runtime. Any runtime zip built before
 2026-10-25 (including the old August one in `plans/STATUS.md`) has this bug on macOS.
 
-Not yet: the release itself (needs uploading), a Windows runtime in the manifest (a Windows
-copy gets "no voice runtime is published for windows-x64" until then), and the download step
-over real HTTPS from GitHub, which can only be tried once the release exists.
+The Windows x64 runtime was rebuilt with the current worker on 2026-10-25 on the Windows
+machine (`.venv-voice-build`, 311 MB, sha256 `de5ae5fc…`, in `build/voice-runtime/` there
+with its `.asset.json`), installed through `manual_install_real_runtime_zip` and made a clip
+cold in 39 s. To publish both: upload both zips to the `voice-runtime` release, put each
+release URL in its `.asset.json`, and build the manifest from both asset files without
+`--partial`.
+
+Not yet: the release itself (needs uploading) and the download step over real HTTPS from
+GitHub, which can only be tried once the release exists.
 
 ### Making a release
 

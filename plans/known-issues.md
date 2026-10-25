@@ -82,7 +82,7 @@ they regenerate it.
 **"Beta" and the Gen Z lines depend on the read.** The TTS may say "beta" as the Greek letter,
 and the deadpan Gen Z set needs a flat delivery. Listen before keeping those clips.
 
-**Prod voice path is unproven end to end.** The manifest address is compiled in (`DEFAULT_MANIFEST_URL`), but the `voice-runtime` GitHub Release does not exist yet, so an installed copy's "Check for updates" fails until it is published. The macOS arm64 runtime is built and tested; the Windows x64 runtime has not been rebuilt with the current worker.
+**Prod voice path is unproven end to end.** The manifest address is compiled in (`DEFAULT_MANIFEST_URL`), but the `voice-runtime` GitHub Release does not exist yet, so an installed copy's "Check for updates" fails until it is published. Both runtimes are built and tested (macOS arm64 on the Mac, Windows x64 on the Windows machine, 2026-10-25); neither is uploaded.
 
 **A voice worker that fails says why on the Voice page** (fixed 2026-10-25). The failed line's reason shows under Generate instead of only in a tooltip, and a failed queue no longer keeps Generate and the voice picker disabled.
 
