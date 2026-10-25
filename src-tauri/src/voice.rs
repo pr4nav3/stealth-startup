@@ -2825,20 +2825,61 @@ fn is_starter_profile(id: &str) -> bool {
     STARTER_PROFILES.iter().any(|(starter, _, _)| *starter == id)
 }
 
-fn starter_wav_src(file: &str, app: Option<&AppHandle>) -> Option<PathBuf> {
-    let crate_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// A starter voice's bundled file or folder: the source tree in dev, the install's resources otherwise.
+fn starter_resource(relative: &str, app: Option<&AppHandle>) -> Option<PathBuf> {
+    let crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("voices")
-        .join(file);
-    if crate_file.is_file() {
-        return Some(crate_file);
+        .join(relative);
+    if crate_path.exists() {
+        return Some(crate_path);
     }
-    let bundled = app?.path().resource_dir().ok()?.join("voices").join(file);
-    bundled.is_file().then_some(bundled)
+    let bundled = app?.path().resource_dir().ok()?.join("voices").join(relative);
+    bundled.exists().then_some(bundled)
+}
+
+/// Written once a starter voice's bundled clips are in, so a clip the user deletes or
+/// regenerates stays their choice instead of coming back on the next listing.
+const STARTER_CLIPS_MARKER: &str = "starter-clips-seeded";
+
+/// The bundled phrase clips (`voices/<id>/<phrase_id>.wav`), so a first session with a starter
+/// voice already speaks. A clip the profile already has for a phrase is kept.
+fn seed_starter_clips(dir: &Path, id: &str, app: Option<&AppHandle>) {
+    let marker = dir.join(STARTER_CLIPS_MARKER);
+    if marker.exists() {
+        return;
+    }
+    let Some(entries) = starter_resource(id, app).and_then(|src| fs::read_dir(src).ok()) else {
+        return;
+    };
+    let clips = dir.join("clips");
+    if fs::create_dir_all(&clips).is_err() {
+        return;
+    }
+    let existing: Vec<PathBuf> = fs::read_dir(&clips)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let (Some("wav"), Some(phrase), Some(name)) = (
+            path.extension().and_then(|value| value.to_str()),
+            path.file_stem().and_then(|value| value.to_str()),
+            path.file_name(),
+        ) else {
+            continue;
+        };
+        if existing.iter().any(|clip| clip_path_matches(clip, phrase)) {
+            continue;
+        }
+        if fs::copy(&path, clips.join(name)).is_err() {
+            // Try again next time rather than mark a half-done copy as finished.
+            return;
+        }
+    }
+    let _ = fs::write(marker, b"");
 }
 
 fn seed_starter_profiles(root: &Path, app: Option<&AppHandle>) {
     for (id, name, file) in STARTER_PROFILES {
-        let Some(src) = starter_wav_src(file, app) else {
+        let Some(src) = starter_resource(file, app) else {
             continue;
         };
         let dir = profile_dir(root, id);
@@ -2849,6 +2890,7 @@ fn seed_starter_profiles(root: &Path, app: Option<&AppHandle>) {
         if !dest.exists() && fs::copy(src, &dest).is_err() {
             continue;
         }
+        seed_starter_clips(&dir, id, app);
         let _ = write_json(
             &dir.join("profile.json"),
             &VoiceProfileMetadata {
@@ -2930,7 +2972,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_silent_recording_is_refused() {
         assert!(is_silent(&[0; 48_000]));
@@ -3283,6 +3324,30 @@ mod tests {
         let first = derek.metadata().unwrap().len();
         seed_starter_profiles(&root, None);
         assert_eq!(derek.metadata().unwrap().len(), first);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn starter_clips_are_seeded_once_and_never_replace_the_users() {
+        let root = test_dir("starter-clips");
+        let dir = profile_dir(&root, "derek");
+        let clips = dir.join("clips");
+        fs::create_dir_all(&clips).unwrap();
+        // The user already regenerated one bundled line before this version.
+        fs::write(clips.join("03_gentle_back_to_it.wav"), vec![9u8; 100]).unwrap();
+        seed_starter_profiles(&root, None);
+
+        let bundled = fs::read_dir(starter_resource("derek", None).unwrap()).unwrap().count();
+        assert!(bundled >= 20, "the starter voice ships its phrase clips ({bundled})");
+        let found = clip_summaries(&clips).unwrap();
+        assert_eq!(found.len(), bundled, "one clip per bundled line, the user's kept");
+        assert!(!clips.join("gentle_back_to_it.wav").exists());
+        assert_eq!(fs::read(clips.join("03_gentle_back_to_it.wav")).unwrap(), vec![9u8; 100]);
+
+        // A clip deleted afterwards stays deleted.
+        fs::remove_file(clips.join("stern_close_it_now.wav")).unwrap();
+        seed_starter_profiles(&root, None);
+        assert!(!clips.join("stern_close_it_now.wav").exists());
         let _ = fs::remove_dir_all(root);
     }
 
