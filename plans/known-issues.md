@@ -58,6 +58,8 @@ rules apply from the next sample and never change a recorded session. See `plans
 
 ## UI
 
+**The empty Home (no sessions yet) scrolls by 17px at 920x760**, in Chromium and WebKit alike: with no day card the quote card sizes itself off its own stretched height (`fitQuote` fills 60% of the card). Not a Mac difference; `scripts/mac-ui-check` tolerates up to 24px on Home for this.
+
 **Session changes rebuild the Session tab.** Polling is every second, but the page is rebuilt only when what it shows changes (`viewKey`); the clock and status chip are painted in place (`paintLive`). History and Settings are never rebuilt by session changes. A rebuild restores scroll, focus, and caret, and every text field keeps its value in state or sits in an editor that blocks rebuilds. While an editor or a popup is open, or a text field or dropdown has focus, polling only paints the clock, chip, and state slab; the rebuild waits until it closes or loses focus. Measured with a fake backend: 0 rebuilds while nothing changes, one per real change.
 
 **Rules are distractions only (V2).** There is no Relevant or Neutral and no classify step after a session. A site that is the work today is allowed with "Not today" (preflight chip or nudge popup) and the allowance ends with the session. Report rows show time only; the rule toggle on History rows is gone. Old reports keep the decisions recorded at the time; a rule change never changes them.

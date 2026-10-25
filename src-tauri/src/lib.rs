@@ -648,7 +648,8 @@ pub fn run() {
             automation_result,
             automation_tray,
             automation_input,
-            automation_media
+            automation_media,
+            automation_snapshot
         ])
         .build(tauri::generate_context!())
         .expect("failed to run Supervisor")
@@ -852,6 +853,39 @@ fn automation_media(pid: u64) -> Result<bool, String> {
         let _ = pid;
         Err("only on macOS".to_string())
     }
+}
+
+/// Debug builds only, for the automation hook: the window's page rendered by its own
+/// webview to a TIFF at `path` (no Screen Recording grant needed). `sips` turns it into PNG.
+#[tauri::command]
+fn automation_snapshot(label: String, path: String, app: AppHandle) -> Result<(), String> {
+    if !cfg!(debug_assertions) || std::env::var_os("SUPERVISOR_AUTOMATION").is_none() {
+        return Err("automation is off".to_string());
+    }
+    let window = app.get_webview_window(&label).ok_or("no such window")?;
+    window
+        .with_webview(move |webview| {
+            #[cfg(target_os = "macos")]
+            unsafe {
+                use objc2_app_kit::NSImage;
+                use objc2_foundation::{NSError, NSString};
+                use objc2_web_kit::WKWebView;
+                let web_view: &WKWebView = &*webview.inner().cast::<WKWebView>();
+                let handler = block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
+                    if let Some(image) = image.as_ref() {
+                        if let Some(tiff) = image.TIFFRepresentation() {
+                            let _ = tiff.writeToFile_atomically(&NSString::from_str(&path), true);
+                        }
+                    }
+                });
+                web_view.takeSnapshotWithConfiguration_completionHandler(None, &handler);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (webview, path);
+            }
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn show_main_window(app: &tauri::AppHandle) {

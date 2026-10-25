@@ -183,7 +183,11 @@ p {
   display: flex;
   flex-direction: column;
   width: min(100%, 1120px);
-  min-height: 100vh;
+  /* A definite height, not min-height. WebKit sizes a flex child's grid against the shell's
+     min-height as if nothing else were in the column (Home overflowed by 110px), and with a
+     zero-height grid it stops stretching the rows (a gap under the cards). With a definite
+     shell both engines fill Home exactly; a short window still scrolls the page. */
+  height: 100vh;
   margin: 0 auto;
   padding: 14px 24px 24px;
 }
@@ -504,10 +508,6 @@ h1 {
 .home-grid {
   display: grid;
   flex: 1 1 auto;
-  /* WebKit (the macOS webview) sizes a grid that is a flex item against the shell's 100vh
-     instead of the room left under the top bar and tabs, so Home overflowed by 110px there.
-     A zero height with flex growth makes both engines give it exactly the leftover room. */
-  height: 0;
   min-height: 0;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   align-items: stretch;
