@@ -1,9 +1,15 @@
 # Mac handoff: things to build and test on a real Mac
 
 Last updated: 2026-10-25 (first Mac pass, MacBook Pro M-series, macOS 14.5). Baseline:
-branch `app-v2-simplified-rules` (`main` is an ancestor of it and will be fast-forwarded;
-`origin/main` is older than both, so pull the branch, not `main`). Tracker:
+branch `app-v2-simplified-rules`; `origin/main` was fast-forwarded to it the same day. Tracker:
 `plans/STATUS.md`. Holes to expect: `plans/known-issues.md`.
+
+**After the pass (2026-10-25, Windows):** `plans/review-2026-10-25.md` reviewed every Mac
+commit and fixed, on `fix/post-mac-review`: bundled starter clips (`src-tauri/voices/<id>/`),
+the silent Voice page on a failed clip, clip time estimates, and the empty Home scroll
+(`scripts/mac-ui-check/assert.py` now allows Home no scroll at all, so rerun the WebKit check on
+the Mac). A Mac agent should pull that branch, rerun `cargo test` and `check.sh`, and hear one
+starter clip play in a session.
 
 **First Mac pass (2026-10-25).** The app compiles, `cargo test` passes (198, 2 manual
 ignored), `npm run check` passes, and a debug `Supervisor.app` runs with the V2 UI. Section 0

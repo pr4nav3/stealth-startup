@@ -3,15 +3,36 @@
 Living log of what is done and what is left. Update this file when an item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-10-25 (`app-v2-simplified-rules`; first macOS pass, uncommitted
-in the working tree)
+Last updated: 2026-10-25 evening (`fix/post-mac-review`, branched from
+`app-v2-simplified-rules` at `aa9a92a`)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
 ship target. Everything through 2026-10-24 was written and run on Windows. On
 2026-10-25 the app was built and run on a MacBook for the first time:
-`plans/mac-handoff.md` says what was seen and what is still open.
+`plans/mac-handoff.md` says what was seen and what is still open, and
+`plans/mac-handoff-2026-10-25.md` is that day's summary. The review of that
+pass from Windows, and what is left for a release, is
+`plans/review-2026-10-25.md`.
 
-## macOS pass (2026-10-25, working tree)
+## Post-Mac review (2026-10-25, Windows, `fix/post-mac-review`)
+
+- [x] Every Mac commit read and checked on Windows: 210 tests, 204 pass, 6
+      manual ignored; `npm run check`; CI green on macOS and Windows
+- [x] Starter voices ship their 20 phrase clips each (`src-tauri/voices/<id>/`),
+      copied into the starter profiles once; a deleted clip stays deleted and an
+      existing one is kept. Chosen from four seeded takes by length against the
+      text. **Not yet listened to**
+- [x] Voice page shows why a clip failed, under Generate; a failed queue no
+      longer disables Generate, the voice picker and page rebuilds
+- [x] Clip estimates: ~90 s for the first clip (model load), ~15 s for each
+      after (3-6 s measured), instead of ~90 s for every clip
+- [x] Empty Home no longer scrolls at 920x760 (quote card size containment, and
+      the quote re-fits after the webfont loads and on resize); the WebKit check
+      now allows Home zero scroll
+- [x] Four Windows compiler warnings from the Mac pass; the silent-recording
+      test runs on every OS
+
+## macOS pass (2026-10-25)
 
 - [x] Builds on macOS: `cargo test` 198 pass, 2 manual ignored; `npm run check`;
       debug `Supervisor.app` bundle runs the V2 UI
@@ -59,34 +80,37 @@ ship target. Everything through 2026-10-24 was written and run on Windows. On
 - [x] `scripts/mac-ui-check/check.sh`: every mock state laid out in WebKit,
       fails on overflow, a modal or overlay card taller than its window, or
       a scrolling Home; runs in CI on the macOS job
-- [ ] Not yet on the Mac: recording a new voice (microphone prompt), the tray
-      menu, Cmd-Tab/Spotlight/Dock surfaces, the 3-minute Away path, other
-      browsers (none installed), an Intel build, Developer ID signing and
-      notarization
+- [x] Later the same day (`plans/mac-handoff-2026-10-25.md`): Firefox, Brave
+      and Edge by address; tray actions; shell surfaces; media presence and Away;
+      Dock app names; browser profile suffixes; mic permission and silence check;
+      sleep-aware session clock; hide on close; status window on all Spaces; App
+      Nap off; one-line installer and signed release zip; schema v13
+- [ ] Still open on the Mac: the unticked items in `plans/mac-handoff.md`
+      (notably a voice clone through the installed app, Continuity Camera, the
+      corrupt-database card, Arc) and an Intel build
 
 ## Branches
 
-**`app-v2-simplified-rules` is the baseline.** It was cut from `main` at
-`c7eb971` and carries the V2 rules model, the History and Voice rebuilds and
-the Settings polish below. `main` (`fd6b418`) is an ancestor of it: a plain
-fast-forward of `main` onto this branch is the intended merge, nothing to
-resolve. `origin/main` is still at `3e14095` (2026-10-19) and has none of this;
-push before another machine starts.
+**`app-v2-simplified-rules` is the baseline**, and `origin/main` points at the
+same commit (`aa9a92a`, fast-forwarded by the Mac pass). Work after the Mac
+pass is on **`fix/post-mac-review`**, to be merged into the baseline with a
+plain merge.
 
-Every other local branch is fully inside this one and must not be merged
-again: `feat/home-streak`, `feat/window-supervision`,
-`feat/durable-app-identity`, `feat/sqlite`, `feat/ui`,
-`feat/voice-runtime-hardening`, `feat/webcam-models`, `feat/win32-capture`,
-`test-features`. They can be deleted.
+On 2026-10-25 the remote history was rewritten once to replace a Mac hostname
+author address with the gmail one; no tree or message changed. Every older
+local branch (`feat/*`, `test-features`) belongs to the pre-rewrite history and
+is fully contained in the baseline by content: never merge one again. The old
+local tips are kept as `backup/pre-email-rewrite` and
+`backup/pre-email-rewrite-main`; all of these can be deleted.
 
 Sessions started from the desktop app get their own worktree under
 `.claude/worktrees/` (git-ignored) and merge back with a plain merge.
 
 ## Done on `app-v2-simplified-rules` (2026-10-21 to 2026-10-24)
 
-Not yet run in the built app: everything below was proved by `cargo test`,
-`npm run check` and the browser mock (`mock.html`, see Test gate). The last
-live run on Windows was 2026-10-18.
+First run in the built app on the Mac on 2026-10-25 (`plans/mac-handoff.md`);
+on Windows only `cargo test`, `npm run check`, the browser mock and CI so far.
+The last live run on Windows was 2026-10-18.
 
 ### Rules: distractions only (V2, 2026-10-22)
 
@@ -229,23 +253,29 @@ live run on Windows was 2026-10-18.
 
 ## Next
 
-1. **macOS pass, continued**: everything that runs without a person at the
-   Mac is done (`plans/mac-handoff.md`). Left: a webcam session and a voice
-   clip through the app's UI on the Mac, the unverified checklist sections
-   (shell surfaces, media presence, other browsers), then the Apple Developer
-   Program for a Developer ID certificate and notarization, and an Intel Mac
-   for the x86_64 frozen worker.
-2. **Live test pass on Windows** of everything on this branch (nothing since
-   2026-10-18 has run outside the test suite and the mock): a V2 session with
-   "Not today" and "Never a distraction", the schema v12 migration on a real
-   database, History v4 with real weeks, a voice tone generated end to end,
-   Check for updates and Cancel, a session with the webcam on, quit and confirm
-   no worker survives.
-3. **Generate the starter phrase clips** for `derek` and `elise` with the
-   worker's one-shot CLI. Until then starter voices nudge silently.
-4. **Fast-forward `main`** to this branch and push; delete the merged feature
+Needs a person (details in `plans/review-2026-10-25.md`):
+
+1. **Listen to the 40 starter clips** and regenerate any that sound wrong.
+2. **Publish the two GitHub Releases** (app `v0.1.0`, `voice-runtime`
+   pre-release); `plans/distribution.md` has the steps.
+3. **Decide Windows distribution** (direct download with SmartScreen, or the
+   Microsoft Store), then build its installer.
+4. **Live test pass on Windows** with the running copy closed: a V2 session
+   with "Not today" and "Never a distraction", History with real weeks, a voice
+   tone end to end, a webcam session, quit and confirm no worker survives, and
+   closing the window (it now hides).
+5. **Back up the Mac signing certificate** into a password manager.
+6. **Decide whether the repository should stay public.**
+
+Agent work, no sign-off needed:
+
+7. Merge `fix/post-mac-review` into `app-v2-simplified-rules` once reviewed,
+   fast-forward `main`, delete the `feat/*`, `test-features` and `backup/*`
    branches.
-5. **Ship**: see below.
+8. Freeze the Windows webcam worker (`.venv-webcam` needs PyInstaller from
+   `webcam_bakeoff/build-requirements.txt`) and build the NSIS installer with
+   `tauri.bundle.conf.json`, so the Windows decision only has to pick a channel.
+9. Remaining Mac checklist items that a Mac agent can drive alone.
 
 ## Open product decisions
 
@@ -274,10 +304,10 @@ live run on Windows was 2026-10-18.
 ## Test gate
 
 Every shipped item has to work as intended on **Windows** and on **macOS**.
-Until the Mac pass, Windows is the only machine that has proved anything.
 
-- `cargo test` in `src-tauri`: Windows 201 tests, 197 pass, 4 ignored
-  (2026-10-24); macOS 200 tests, 198 pass, 2 ignored (2026-10-25)
+- `cargo test` in `src-tauri`: Windows 210 tests, 204 pass, 6 ignored
+  (2026-10-25, `fix/post-mac-review`); macOS 207 pass at `aa9a92a`
+  (Mac handoff). CI (`.github/workflows/ci.yml`) runs both on every push
 - `npm run check` (tsc + vite build)
 - Browser mock: `npm run dev:ui`, open `http://127.0.0.1:1420/mock.html`
   (`?empty=1` for a new user, `?big=1` for heavy weeks); render Home, Session
@@ -285,6 +315,9 @@ Until the Mac pass, Windows is the only machine that has proved anything.
   in both themes
 - Webcam worker: `webcam_bakeoff/test_labels.py`, `test_detectors.py`, and
   `run_tracker.py --self-test` on CPU and GPU
-- macOS: `cargo check --target aarch64-apple-darwin` from Windows keeps the
-  Mac paths compiling; on the Mac, the debug bundle plus `SUPERVISOR_PROBE`
-  (`plans/mac-handoff.md`) shows what the capture resolves to
+- macOS: the CI macOS job compiles, tests, bundles and runs
+  `scripts/mac-ui-check` (WebKit layout of every mock state). Cross-checking
+  from Windows (`cargo check --target aarch64-apple-darwin`) no longer works
+  since `objc2-exception-helper` needs Apple's compiler. On the Mac, the debug
+  bundle plus `SUPERVISOR_PROBE` (`plans/mac-handoff.md`) shows what the
+  capture resolves to
