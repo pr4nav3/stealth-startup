@@ -20,9 +20,8 @@ for s in states:
     shell = s["sizes"].get(".overlay-shell")
     if shell and shell[1] > h:
         problems.append(f"{name}: overlay card {shell[1]}px taller than the {h}px window")
-    # The empty and first-week Home scroll by 17px in Chromium too (the quote card sizes
-    # itself off its own height with no day card to anchor it): a shared bug, not a Mac one.
-    if name.startswith("home") and s["docH"] > h + 24:
+    # Home is sized to fit its window exactly; any scroll is a layout bug.
+    if name.startswith("home") and s["docH"] > h:
         problems.append(f"{name}: Home scrolls ({s['docH']}px in {h}px)")
 print(f"{len(states)} states laid out in WebKit")
 if problems:

@@ -612,6 +612,10 @@ h1 {
   color: var(--sv-colored-ink);
   min-height: 150px;
   padding: 14px 18px 16px;
+  /* The card takes the room the column leaves; its own text never asks for more. Without this,
+     fitQuote's larger font grew the card, and with it the column, past the window. */
+  contain: size;
+  overflow: hidden;
 }
 
 .quote-card blockquote {
@@ -2655,7 +2659,8 @@ button.line-open:disabled {
   color: inherit;
 }
 
-.line-state.is-bad {
+.line-state.is-bad,
+.clips-hint.is-bad {
   color: var(--sv-coral);
 }
 

@@ -987,7 +987,7 @@ function editorIsOpen(): boolean {
     historyConfirm !== null ||
     voiceDeleteTargetId !== null ||
     voiceInfoId !== null ||
-    clipQueue !== null ||
+    clipQueue?.phase === "working" ||
     voiceHelpOpen ||
     modelInfoOpen ||
     memoryInfoOpen ||
@@ -1204,8 +1204,9 @@ function render(): void {
     void document.fonts.ready.then(() => {
       if (document.querySelector(".voice-card")) {
         fitVoiceCardNames();
-        fitQuote();
       }
+      // The webfont changes the other cards' heights, and so the room the quote has.
+      fitQuote();
       fitShareStats();
     });
   }
@@ -2110,7 +2111,12 @@ function renderVoiceSettings(): string {
 
 /** The biggest quote that still fits its card: short quotes grow, long ones shrink. */
 /** A stat value never wraps or clips: it steps down (to a floor) until it fits its tile. */
-window.addEventListener("resize", () => requestAnimationFrame(fitShareStats));
+window.addEventListener("resize", () =>
+  requestAnimationFrame(() => {
+    fitShareStats();
+    fitQuote();
+  }),
+);
 
 /** Stat values never wrap or ellipsize: shrink the font until the value fits its tile. The
  *  report tiles use the system monospace, which is wider on a Mac (SF Mono) than on Windows,
@@ -2207,8 +2213,19 @@ function voiceCardMark(voice: VoiceOption): string {
   return `<canvas class="voice-card-wave" width="88" height="32" data-wave-path="${attr(path)}" data-wave-bars="11"></canvas>`;
 }
 
-/** About 90 seconds per clip on a typical laptop; the estimates and the hint quote it. */
-const CLIP_SECONDS = 90;
+/** The first clip waits for the worker to load the model and the voice (about 90 s on a typical
+ *  laptop); the worker stays loaded, so each later clip takes seconds (3-6 s measured on a Mac
+ *  and a Windows laptop). Both rounded up, so the estimate is never the slow surprise. */
+const FIRST_CLIP_SECONDS = 90;
+const NEXT_CLIP_SECONDS = 15;
+
+/** How long `count` clips take when `started` of the queue are already done. */
+function clipQueueSeconds(count: number, started = 0): number {
+  if (count <= 0) {
+    return 0;
+  }
+  return started === 0 ? FIRST_CLIP_SECONDS + (count - 1) * NEXT_CLIP_SECONDS : count * NEXT_CLIP_SECONDS;
+}
 
 /** Redraws the Clips panel alone. Picking a tone or toggling editing changes nothing outside it,
  * so the voices, the tiles and the page scroll stay put and the swap takes a few milliseconds. */
@@ -2385,7 +2402,7 @@ function renderVoiceClipsPanel(): string {
         <div class="clips-for">
           <p class="eyebrow">Clips</p>
           <span class="clips-for-word">for</span>
-          <select id="voice-clips-voice" aria-label="Voice to make clips for" ${clipQueue ? "disabled" : ""}>${voiceOptions(voice.id, true)}</select>
+          <select id="voice-clips-voice" aria-label="Voice to make clips for" ${clipQueue?.phase === "working" ? "disabled" : ""}>${voiceOptions(voice.id, true)}</select>
           <span class="clips-summary">${escapeHtml(summary)}</span>
         </div>
       </div>
@@ -2463,7 +2480,7 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
   const position = job ? job.phraseIds.indexOf(phrase.id) : -1;
   const busy = Boolean(job && position === job.index && job.phase === "working");
   const failed = Boolean(job && position === job.index && job.phase === "error");
-  const queued = Boolean(job && position > job.index);
+  const queued = Boolean(job && job.phase === "working" && position > job.index);
   const openable = !busy && canEditPhrases();
   const dot = `<span class="line-dot ${clip ? "is-ready" : ""}" aria-hidden="true"></span>`;
   const text = `<button class="line-open" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${openable ? "" : "disabled"} title="Edit, regenerate or delete this line">${escapeHtml(phrase.text)}</button>`;
@@ -2492,7 +2509,8 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
 
 function clipElapsedText(): string {
   const seconds = clipQueue ? Math.max(0, Math.round((performance.now() - clipQueue.startedAt) / 1000)) : 0;
-  return `Making · ${seconds} s of ~${CLIP_SECONDS} s`;
+  const expected = clipQueue && clipQueue.index > 0 ? NEXT_CLIP_SECONDS : FIRST_CLIP_SECONDS;
+  return `Making · ${seconds} s of ~${expected} s`;
 }
 
 function paintClipQueue(): void {
@@ -2518,7 +2536,7 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
   const job = clipQueue && clipQueue.voiceId === voice.id ? clipQueue : null;
   if (job && job.phase === "working") {
     const total = job.phraseIds.length;
-    const left = Math.max(1, total - job.index) * CLIP_SECONDS;
+    const left = clipQueueSeconds(Math.max(1, total - job.index), job.index);
     return `
       <div class="clips-foot">
         <button class="small-button danger" type="button" data-action="stop-clip-queue" ${job.stopAfter ? "disabled" : ""}>${job.stopAfter ? "Stopping after this line" : "Stop after this line"}</button>
@@ -2547,15 +2565,21 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
   }
   const lock = clipGenerateLockTitle(voice);
   const tileBad = !modelInstalled() || ramGenerationLocked();
-  const hint = tileBad ? "Fix the red card above first." : lock || `About ${CLIP_SECONDS} s a clip. Sounds off? Open the line and regenerate it alone.`;
+  // A failed line says why here, where the eye already is; the row only says "Failed".
+  const failed = job?.phase === "error" ? job.error || "The clip could not be made." : "";
+  const hint = tileBad
+    ? "Fix the red card above first."
+    : failed
+      ? `Last line failed: ${failed}`
+      : lock || `The first clip takes about ${FIRST_CLIP_SECONDS} s while the model loads, then about ${NEXT_CLIP_SECONDS} s each. Sounds off? Open the line and regenerate it alone.`;
   return `
     <div class="clips-foot">
       <div class="clips-foot-actions">
-        <button class="primary small-button clips-generate" type="button" data-action="generate-missing" ${lock || clipQueue ? "disabled" : ""}>Generate ${missing.length} missing · ~${escapeHtml(formatQueueTime(missing.length * CLIP_SECONDS))}</button>
+        <button class="primary small-button clips-generate" type="button" data-action="generate-missing" ${lock || clipQueue?.phase === "working" ? "disabled" : ""}>Generate ${missing.length} missing · ~${escapeHtml(formatQueueTime(clipQueueSeconds(missing.length)))}</button>
         ${useTone}
         ${addLine}
       </div>
-      <span class="clips-hint">${escapeHtml(hint)}</span>
+      <span class="clips-hint ${failed && !tileBad ? "is-bad" : ""}" role="${failed ? "alert" : "status"}">${escapeHtml(hint)}</span>
     </div>
   `;
 }
@@ -2572,7 +2596,7 @@ function renderLinePopup(): string {
   const clip = existing ? clipForPhrase(voice, existing) : null;
   const text = editor.text.trim();
   const changed = existing ? text !== existing.text : text.length > 0;
-  const lock = clipQueue ? "Wait for the current line to finish" : clipGenerateLockTitle(voice);
+  const lock = clipQueue?.phase === "working" ? "Wait for the current line to finish" : clipGenerateLockTitle(voice);
   const primary = !existing ? "Add and generate" : changed ? "Save and regenerate" : clip ? "Regenerate" : "Generate";
   const primaryDisabled = Boolean(lock) || !text || voiceBusy !== null;
   const status = clip
@@ -2607,7 +2631,7 @@ function renderLinePopup(): string {
             <button class="primary" type="submit" ${primaryDisabled ? "disabled" : ""} title="${attr(lock)}">${primary}</button>
           </div>
         </form>
-        <p class="quiet">${escapeHtml(lock ? lock : `About ${CLIP_SECONDS} seconds. A changed line keeps its old clip until a new one is made.`)}</p>
+        <p class="quiet">${escapeHtml(lock ? lock : `Up to ${FIRST_CLIP_SECONDS} seconds while the model loads, a few seconds once it has. A changed line keeps its old clip until a new one is made.`)}</p>
       </section>
     </div>
   `;
@@ -2696,7 +2720,7 @@ function renderVoiceHelpModal(): string {
         <p>Supervisor nudges you in short spoken clips. Record anyone for about twenty seconds, make their clips once, and from then on those clips play instantly, offline, without the model.</p>
         <ol class="voice-help-steps">
           <li><strong>Record a voice.</strong> Press + New voice and read the prompt aloud. The starter voices come ready.</li>
-          <li><strong>Make its clips.</strong> Under Clips, pick the voice and a tone, then press Generate. Each clip takes about ${CLIP_SECONDS} seconds and needs the voice model installed and some free memory.</li>
+          <li><strong>Make its clips.</strong> Under Clips, pick the voice and a tone, then press Generate. The first takes about ${FIRST_CLIP_SECONDS} seconds while the model loads, the rest about ${NEXT_CLIP_SECONDS} seconds each. It needs the voice model installed and some free memory.</li>
           <li><strong>Select it.</strong> A voice speaks one tone. Once every line in that tone has a clip, Select it under Voices.</li>
         </ol>
         <p class="quiet">Listen to each clip. If a line sounds off, press Redo on that line alone.</p>
@@ -2758,7 +2782,7 @@ function renderMemoryInfoModal(): string {
           </div>
           <button class="small-button" type="button" data-action="close-memory-info">Close</button>
         </div>
-        <p>Making a clip loads the voice model for about ${CLIP_SECONDS} seconds and needs:</p>
+        <p>Making clips loads the voice model (about ${FIRST_CLIP_SECONDS} seconds the first time) and needs:</p>
         <div class="voice-kv">
           <div><span>Needs free</span><strong>${escapeHtml(need ? formatBytes(need) : "—")}</strong></div>
           <div><span>Free now</span><strong class="${locked ? "is-bad" : ""}" data-ram-free>${escapeHtml(free === null ? "—" : formatBytes(free))}</strong></div>
