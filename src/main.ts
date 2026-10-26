@@ -7715,6 +7715,13 @@ function summarizeDay(card: { day: string; reports: SessionReport[] }): DaySumma
   };
 }
 
+/** The card's strip is the day's latest session alone, filling the strip; the stats stay the
+ *  whole day's. */
+function lastSessionSegments(summary: DaySummary): DaySummary["segments"] {
+  const last = summary.segments[summary.segments.length - 1];
+  return last ? [{ ...last, start: 0, width: 1 }] : [];
+}
+
 /** "Today", "Yesterday", else the weekday. The date itself is said once, in the corner. */
 function dayTitle(day: string): string {
   const today = dayKey(new Date());
@@ -7805,7 +7812,7 @@ function renderDayCard(todayStreakDays: number): string {
   }
   const summary = summarizeDay(dayCard);
   const streakText = streakLabel(streakInfo(summary.day).days);
-  const strip = stripRuns(summary.segments)
+  const strip = stripRuns(lastSessionSegments(summary))
     .map((run) => `<i class="${run.on ? "strip-on" : "strip-off"}" style="left: ${(run.left * 100).toFixed(2)}%; width: ${(run.width * 100).toFixed(2)}%"></i>`)
     .join("");
   return `
@@ -7938,7 +7945,7 @@ async function copyCard(): Promise<void> {
   ctx.clip();
   ctx.fillStyle = palette.track;
   ctx.fillRect(stripX, stripY, stripW, stripH);
-  for (const run of stripRuns(summary.segments)) {
+  for (const run of stripRuns(lastSessionSegments(summary))) {
     ctx.fillStyle = run.on ? STRIP_GREEN : STRIP_RED;
     ctx.fillRect(stripX + run.left * stripW, stripY, run.width * stripW, stripH);
   }
