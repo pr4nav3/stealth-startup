@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type PermissionState = "granted" | "missing" | "not_required";
@@ -78,8 +78,17 @@ interface FocusSnapshot {
   distracting: boolean;
   matched_rule: AppRule | null;
   seconds_on_current_window: number;
+  /** The distraction card is up: past the strictness's nudge time. Its first nudge plays with it. */
+  interrupt?: boolean;
   should_nudge: boolean;
   next_nudge_in_seconds: number | null;
+}
+
+/** What the main window, which plays every nudge, tells the distraction card. */
+interface NudgeVoice {
+  speaking: boolean;
+  voice: string;
+  line: string;
 }
 
 interface SessionSettings {
@@ -626,7 +635,7 @@ let distractionLatchLabel = "";
 let overlayPlacement = "corner";
 let lastOverlayFit = "";
 const OVERLAY_CORNER_WIDTH = 228;
-const OVERLAY_INTERRUPT_WIDTH = 520;
+const OVERLAY_INTERRUPT_WIDTH = 420;
 let ruleEditor: RuleEditor | null = null;
 let rulePreviewTimer: number | null = null;
 let siteNames: Record<string, string> = {};
@@ -686,6 +695,12 @@ let snapshotInFlight = false;
 let downloadPollId: number | null = null;
 let downloadPollInFlight = false;
 let nudgeAudio: HTMLAudioElement | null = null;
+/** The voice and line of the nudge playing or last played (main window). */
+let lastNudgeVoice: Omit<NudgeVoice, "speaking"> | null = null;
+/** The card's copy of it (overlay window), stamped when it arrived. */
+let overlayVoice: (NudgeVoice & { at: number }) | null = null;
+/** When the current distraction card first showed. */
+let distractionLatchedAt = 0;
 const webcamSettings = {
   phoneUse: false,
   strict: false,
@@ -751,6 +766,26 @@ async function init(): Promise<void> {
     await listen("session-nudge", async () => {
       await refreshSnapshot();
       void playNudge(snapshot?.current ?? null);
+    });
+    // The card's orb: stop the line, or hear it again.
+    await listen<string>("nudge-control", (event) => {
+      if (!nudgeAudio) {
+        return;
+      }
+      if (event.payload === "stop") {
+        nudgeAudio.pause();
+      } else {
+        nudgeAudio.currentTime = 0;
+        void nudgeAudio.play().then(() => announceNudge(true)).catch(() => announceNudge(false));
+      }
+    });
+  }
+  if (appView === "overlay") {
+    await listen<NudgeVoice>("nudge-voice", (event) => {
+      overlayVoice = { ...event.payload, at: Date.now() };
+      if (distractionIsActive()) {
+        render();
+      }
     });
   }
   await refreshSnapshot();
@@ -1025,6 +1060,7 @@ function sessionViewKey(current: CurrentSession | null): string {
     focus?.state ?? "",
     focus?.distracting ? 1 : 0,
     focus?.should_nudge ? 1 : 0,
+    focus?.interrupt ? 1 : 0,
     focus?.matched_rule?.value ?? "",
     sample?.app_name ?? "",
     focus?.activity.key ?? "",
@@ -1096,7 +1132,7 @@ function paintLive(current: CurrentSession | null): void {
     overlayTime.textContent = `${label} left`;
   }
   document
-    .querySelectorAll<HTMLElement>(".active-progress > span, .overlay-progress .progress > span, .interrupt-facts .progress > span")
+    .querySelectorAll<HTMLElement>(".active-progress > span, .overlay-progress .progress > span")
     .forEach((node) => {
       node.style.width = `${percent}%`;
     });
@@ -1433,43 +1469,50 @@ function renderOverlay(current: CurrentSession | null): string {
 }
 
 function renderDistractionOverlay(current: CurrentSession): string {
-  const percent = current.duration_seconds
-    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
-    : 0;
   const phone = distractionLatchKey === PHONE_LATCH;
-  const alert = phone
-    ? `
-        <p class="interrupt-kicker">The webcam sees your phone</p>
-        <h2>Phone detected.</h2>
-        <p>Put it down. The timer is still running.</p>
-      `
-    : `
-        <p class="interrupt-kicker">You opened ${escapeHtml(distractionLatchLabel || distractionLabel(current))}</p>
-        <h2>Distraction detected.</h2>
-        <p>${escapeHtml(distractionLatchLabel || distractionLabel(current))} is on your distractions list.</p>
-      `;
+  const name = distractionLatchLabel || distractionLabel(current);
   return `
     <main class="overlay-shell overlay-interrupt">
       <section class="state-slab interrupt-alert">
-        ${alert}
-      </section>
-      <div class="interrupt-facts">
-        <article class="panel">
-          <p class="eyebrow">Your task</p>
+        <p class="interrupt-kicker">${phone ? "Phone in view" : "Distraction"}</p>
+        <h2>${phone ? "Your phone is out." : `You opened ${escapeHtml(name)}.`}</h2>
+        ${renderInterruptVoice()}
+        <div class="interrupt-task">
           <strong>${escapeHtml(current.goal)}</strong>
-        </article>
-        <article class="panel">
-          <p class="eyebrow">Remaining</p>
-          <strong class="interrupt-time">${formatDuration(current.remaining_seconds)}</strong>
-          <div class="progress" aria-label="Session progress"><span style="width: ${percent}%"></span></div>
-        </article>
-      </div>
+          <span><span class="interrupt-time">${formatDuration(current.remaining_seconds)}</span> left</span>
+        </div>
+      </section>
       <div class="interrupt-actions">
         <button class="primary" type="button" data-action="dismiss-distraction">Back to my task</button>
         ${phone ? "" : `<button type="button" data-action="allow-session" title="Allowed until this session ends">Allow once</button>
         <button type="button" data-action="allow-always" title="Takes it off your distractions list">Always allow</button>`}
       </div>
     </main>
+  `;
+}
+
+/** The voice that spoke for this card: an orb that is the play button, with bars while it
+ *  speaks, and the line under the speaker's name. Nothing when no voice spoke for this card
+ *  (no voice picked, or no line generated yet). A line can land a moment before the card. */
+function renderInterruptVoice(): string {
+  const voice = overlayVoice;
+  if (!voice || voice.at < distractionLatchedAt - 5000) {
+    return "";
+  }
+  const speaking = voice.speaking;
+  return `
+    <div class="interrupt-voice ${speaking ? "is-speaking" : ""}">
+      <button class="voice-orb" type="button" data-action="${speaking ? "nudge-stop" : "nudge-replay"}" aria-label="${speaking ? "Stop" : "Play the line again"}">
+        <span class="voice-orb-core">
+          <svg class="voice-orb-play" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 1v10L11 6z" fill="currentColor"/></svg>
+          <span class="voice-orb-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        </span>
+      </button>
+      <div class="interrupt-voice-text">
+        <p class="interrupt-voice-who">${escapeHtml(voice.voice)} ${speaking ? "is speaking" : "said"}</p>
+        <p class="interrupt-voice-line">“${escapeHtml(voice.line)}”</p>
+      </div>
+    </div>
   `;
 }
 
@@ -1502,6 +1545,9 @@ function updateDistractionLatch(current: CurrentSession | null): void {
   if (current.camera.phone) {
     // Shown once past the strictness grace; a dismissal lasts until the phone is put down.
     if (current.camera.phone_distracted && distractionDismissedFor !== key) {
+      if (distractionLatchKey !== key) {
+        distractionLatchedAt = Date.now();
+      }
       distractionLatchKey = key;
       distractionLatchLabel = "Your phone";
     }
@@ -1516,8 +1562,11 @@ function updateDistractionLatch(current: CurrentSession | null): void {
   if (!focus) {
     return;
   }
-  if (focus.state === "distracted") {
+  if (focus.interrupt) {
     if (distractionDismissedFor !== key) {
+      if (distractionLatchKey !== key) {
+        distractionLatchedAt = Date.now();
+      }
       distractionLatchKey = key;
       distractionLatchLabel = distractionLabel(current);
     }
@@ -1842,7 +1891,7 @@ function renderSettings(): string {
           <p class="eyebrow">Webcam</p>
           <div class="voice-summary">
             <strong>Live camera check</strong>
-            <span class="explain">Spots a phone in your hand. Runs only on this computer.</span>
+            <span class="explain">Vision models spot a phone in your hand. They run only on this computer.</span>
             <button type="button" data-action="open-webcam-settings">Open</button>
           </div>
         </section>
@@ -1901,9 +1950,9 @@ function renderWebcamSettings(): string {
               </span>
             </label>
             <label class="setting-row toggle-row">
-              <span>Use the graphics card</span>
+              <span>Run on GPU</span>
               <span class="toggle-field">
-                <input id="webcam-gpu" class="toggle-input" type="checkbox" ${settings.webcam_gpu ? "checked" : ""} aria-label="Use the graphics card for the camera check" />
+                <input id="webcam-gpu" class="toggle-input" type="checkbox" ${settings.webcam_gpu ? "checked" : ""} aria-label="Run on GPU" />
                 <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
               </span>
             </label>
@@ -1915,7 +1964,7 @@ function renderWebcamSettings(): string {
           <section class="panel webcam-test-panel">
             <p class="eyebrow">Camera test</p>
             ${renderWebcamMetrics(frame)}
-            <p class="quiet">No images are saved and nothing leaves this computer. A phone in view counts as a distraction and gets a nudge; leaving your desk counts as Away.</p>
+            <p class="quiet">No images saved. Vision models run locally while a session runs. A phone in view counts as a distraction and gets a nudge; leaving your desk counts as Away.</p>
           </section>
         </div>
       </section>
@@ -2199,7 +2248,7 @@ function renderVoiceCard(voice: VoiceOption): string {
             ? ""
             : `<button class="voice-info" type="button" data-action="voice-info" data-voice-id="${escapeHtml(voice.id)}">Info</button>`
         }
-        <button class="voice-select" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" ${disabled ? "disabled" : ""}>${selected ? "Selected" : needsGeneration ? "Make its lines" : "Select"}</button>
+        <button class="voice-select" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" ${disabled ? "disabled" : ""}>${selected ? "Selected" : needsGeneration ? "Generate its lines" : "Select"}</button>
       </div>
     </article>
   `;
@@ -2483,7 +2532,7 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
   const queued = Boolean(job && job.phase === "working" && position > job.index);
   const openable = !busy && canEditPhrases();
   const dot = `<span class="line-dot ${clip ? "is-ready" : ""}" aria-hidden="true"></span>`;
-  const text = `<button class="line-open" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${openable ? "" : "disabled"} title="Edit, remake or delete this line">${escapeHtml(phrase.text)}</button>`;
+  const text = `<button class="line-open" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${openable ? "" : "disabled"} title="Edit, regenerate or delete this line">${escapeHtml(phrase.text)}</button>`;
   const hint = openable ? `<span class="line-edit-hint" aria-hidden="true">Edit ›</span>` : "";
   let trail: string;
   if (busy) {
@@ -2502,7 +2551,7 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
       </span>
     `;
   } else {
-    trail = `<span class="line-actions"><span class="line-state">Not made</span>${hint}</span>`;
+    trail = `<span class="line-actions"><span class="line-state">Not generated</span>${hint}</span>`;
   }
   return `<div class="line-row ${clip ? "" : "is-missing"} ${busy ? "is-busy" : ""} ${openable ? "is-openable" : ""}">${dot}${text}${trail}</div>`;
 }
@@ -2566,16 +2615,16 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
   const lock = clipGenerateLockTitle(voice);
   const tileBad = !modelInstalled() || ramGenerationLocked();
   // A failed line says why here, where the eye already is; the row only says "Failed".
-  const failed = job?.phase === "error" ? job.error || "This line could not be made." : "";
+  const failed = job?.phase === "error" ? job.error || "This line could not be generated." : "";
   const hint = tileBad
     ? "Fix the red card above first."
     : failed
       ? `Last line failed: ${failed}`
-      : lock || `The first line takes about ${FIRST_CLIP_SECONDS} s while the voice engine warms up, then about ${NEXT_CLIP_SECONDS} s each. Sounds off? Open the line and make it again.`;
+      : lock || `The first line takes about ${FIRST_CLIP_SECONDS} s while the voice engine warms up, then about ${NEXT_CLIP_SECONDS} s each. Sounds off? Open the line and regenerate it.`;
   return `
     <div class="clips-foot">
       <div class="clips-foot-actions">
-        <button class="primary small-button clips-generate" type="button" data-action="generate-missing" ${lock || clipQueue?.phase === "working" ? "disabled" : ""}>Make ${missing.length} ${missing.length === 1 ? "line" : "lines"} · ~${escapeHtml(formatQueueTime(clipQueueSeconds(missing.length)))}</button>
+        <button class="primary small-button clips-generate" type="button" data-action="generate-missing" ${lock || clipQueue?.phase === "working" ? "disabled" : ""}>Generate ${missing.length} ${missing.length === 1 ? "line" : "lines"} · ~${escapeHtml(formatQueueTime(clipQueueSeconds(missing.length)))}</button>
         ${useTone}
         ${addLine}
       </div>
@@ -2597,14 +2646,14 @@ function renderLinePopup(): string {
   const text = editor.text.trim();
   const changed = existing ? text !== existing.text : text.length > 0;
   const lock = clipQueue?.phase === "working" ? "Wait for the current line to finish" : clipGenerateLockTitle(voice);
-  const primary = !existing ? "Add and make" : changed ? "Save and make again" : clip ? "Make again" : "Make it";
+  const primary = !existing ? "Add and generate" : changed ? "Save and regenerate" : clip ? "Regenerate" : "Generate";
   const primaryDisabled = Boolean(lock) || !text || voiceBusy !== null;
   const status = clip
     ? `<span class="line-clip-status is-ready">Ready</span>
        <button class="small-button line-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}">
          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>Play
        </button>`
-    : `<span class="line-clip-status">Not made yet</span>`;
+    : `<span class="line-clip-status">Not generated yet</span>`;
   return `
     <div class="modal-backdrop" role="presentation">
       <section class="modal-panel voice-popup line-popup" role="dialog" aria-modal="true" aria-labelledby="line-popup-title">
@@ -2631,7 +2680,7 @@ function renderLinePopup(): string {
             <button class="primary" type="submit" ${primaryDisabled ? "disabled" : ""} title="${attr(lock)}">${primary}</button>
           </div>
         </form>
-        <p class="quiet">${escapeHtml(lock ? lock : `Up to ${FIRST_CLIP_SECONDS} seconds while the voice engine warms up, a few seconds after. A changed line keeps its old audio until you make it again.`)}</p>
+        <p class="quiet">${escapeHtml(lock ? lock : `Up to ${FIRST_CLIP_SECONDS} seconds while the voice engine warms up, a few seconds after. A changed line keeps its old audio until you regenerate it.`)}</p>
       </section>
     </div>
   `;
@@ -2717,13 +2766,13 @@ function renderVoiceHelpModal(): string {
           </div>
           <button class="small-button" type="button" data-action="close-voice-help">Close</button>
         </div>
-        <p>Supervisor nudges you with short spoken lines. Record anyone for about twenty seconds, make their lines once, and from then on they play instantly, offline.</p>
+        <p>Supervisor nudges you with short spoken lines. Record anyone for about twenty seconds, generate their lines once, and from then on they play instantly, offline.</p>
         <ol class="voice-help-steps">
           <li><strong>Record a voice.</strong> Press + New voice and read the prompt aloud. The starter voices come ready.</li>
-          <li><strong>Make its lines.</strong> Under Lines, pick the voice and a tone, then press Make. The first takes about ${FIRST_CLIP_SECONDS} seconds while the voice engine warms up, the rest about ${NEXT_CLIP_SECONDS} seconds each. It needs the voice engine installed and some free memory.</li>
-          <li><strong>Select it.</strong> A voice speaks one tone. Once every line in that tone is made, select it under Voices.</li>
+          <li><strong>Generate its lines.</strong> Under Lines, pick the voice and a tone, then press Generate. The first takes about ${FIRST_CLIP_SECONDS} seconds while the voice engine warms up, the rest about ${NEXT_CLIP_SECONDS} seconds each. It needs the voice engine installed and some free memory.</li>
+          <li><strong>Select it.</strong> A voice speaks one tone. Once every line in that tone is generated, select it under Voices.</li>
         </ol>
-        <p class="quiet">Listen to each line. If one sounds off, open it and make it again.</p>
+        <p class="quiet">Listen to each line. If one sounds off, open it and regenerate it.</p>
       </section>
     </div>
   `;
@@ -2752,10 +2801,10 @@ function renderModelInfoModal(): string {
         </div>
         <p>${
           installed && voiceDownload?.phase === "complete" && voiceDownload.up_to_date
-            ? "Up to date: nothing to download. It only runs while lines are being made."
+            ? "Up to date: nothing to download. It only runs while lines are being generated."
             : installed
-            ? "It only runs while lines are being made. Check for updates downloads only what is missing."
-            : `A one-time download of about ${escapeHtml(formatBytes(model?.required_bytes ?? 0))}. Lines you've made play without it; making new ones needs it.`
+            ? "It only runs while lines are being generated. Check for updates downloads only what is missing."
+            : `A one-time download of about ${escapeHtml(formatBytes(model?.required_bytes ?? 0))}. Generated lines play without it; generating new ones needs it.`
         }</p>
         <div class="modal-actions">
           ${installed ? `<button class="danger" type="button" data-action="ask-delete-model" ${busy ? "disabled" : ""}>Delete voice engine</button>` : ""}
@@ -2782,14 +2831,14 @@ function renderMemoryInfoModal(): string {
           </div>
           <button class="small-button" type="button" data-action="close-memory-info">Close</button>
         </div>
-        <p>Making lines starts the voice engine (about ${FIRST_CLIP_SECONDS} seconds the first time) and needs:</p>
+        <p>Generating lines starts the voice engine (about ${FIRST_CLIP_SECONDS} seconds the first time) and needs:</p>
         <div class="voice-kv">
           <div><span>Needs free</span><strong>${escapeHtml(need ? formatBytes(need) : "—")}</strong></div>
           <div><span>Free now</span><strong class="${locked ? "is-bad" : ""}" data-ram-free>${escapeHtml(free === null ? "—" : formatBytes(free))}</strong></div>
           <div><span>In this machine</span><strong data-ram-machine>${escapeHtml(system?.total_ram_bytes ? formatBytes(system.total_ram_bytes) : "—")}</strong></div>
         </div>
         <p data-ram-copy>${escapeHtml(ramLockCopy(locked, peak))}</p>
-        <p class="quiet">Lines you already made keep playing. They never need the voice engine or this memory.</p>
+        <p class="quiet">Lines already generated keep playing. They never need the voice engine or this memory.</p>
         <div class="modal-actions">
           <button class="${locked ? "primary" : ""}" type="button" data-action="check-ram">Check again</button>
         </div>
@@ -2948,7 +2997,7 @@ function renderRecordingModal(): string {
                     <button type="button" data-action="rerecord-voice">Re-record</button>
                     <button class="primary" type="button" data-action="save-recorded-voice" ${canSave ? "" : "disabled"}>Save voice</button>
                   </div>
-                  <p class="quiet">Saving is instant. You pick which lines to make next.</p>
+                  <p class="quiet">Saving is instant. You pick which lines to generate next.</p>
                 `
                 : `<p class="empty">Your recording shows up here so you can listen before saving it.</p>`
             }
@@ -2969,7 +3018,7 @@ function renderDeleteModelModal(): string {
             <h2 id="delete-model-title">Delete the voice engine?</h2>
           </div>
         </div>
-        <p>Your voices and the lines you made stay on this computer. To make new lines you'll need to download the voice engine again.</p>
+        <p>Your voices and their lines stay on this computer. To generate new lines you'll need to download the voice engine again.</p>
         <div class="modal-actions">
           <button type="button" data-action="cancel-delete-model">Cancel</button>
           <button class="danger" type="button" data-action="delete-model-files">Delete voice engine</button>
@@ -3035,7 +3084,7 @@ function renderDeleteVoiceModal(): string {
           </div>
           <button class="small-button" type="button" data-action="cancel-delete-voice">Close</button>
         </div>
-        <p class="quiet">Its lines can be made again from the recording. Deleting the voice removes the recording too.</p>
+        <p class="quiet">Its lines can be regenerated from the recording. Deleting the voice removes the recording too.</p>
         <div class="delete-choice-grid">
           <button type="button" data-action="delete-voice-files" ${profile.clip_count === 0 ? "disabled" : ""}>Delete clips, keep the recording</button>
           <button class="danger" type="button" data-action="delete-voice-profile">Delete the voice</button>
@@ -3083,7 +3132,7 @@ function renderDownloadBusyModal(): string {
   const copy = upToDate
     ? "Already up to date. Nothing was downloaded."
     : done
-      ? "The voice engine is installed. Lines you made play without it."
+      ? "The voice engine is installed. Generated lines play without it."
       : checking
         ? "Checking the installed files. Nothing is downloading."
         : download?.message ?? "Downloading the voice engine.";
@@ -4348,6 +4397,11 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     if (button) {
       button.textContent = theme === "dark" ? "Dark" : "Light";
     }
+    return;
+  }
+
+  if (action === "nudge-stop" || action === "nudge-replay") {
+    void emit("nudge-control", action === "nudge-stop" ? "stop" : "replay");
     return;
   }
 
@@ -5638,7 +5692,7 @@ async function saveRecordedVoice(): Promise<void> {
     recordingState = "idle";
     voiceError = "";
     render();
-    showFeedback("Voice saved. Make its lines below.");
+    showFeedback("Voice saved. Generate its lines below.");
     document.querySelector(".phrase-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     recordingError = errorText(error); // the dialog is still open; a banner would sit behind it
@@ -6365,13 +6419,32 @@ async function playNudge(current: CurrentSession | null): Promise<void> {
   }
   try {
     nudgeAudio?.pause();
-    nudgeAudio = new Audio(clipAssetUrl(clip.path));
-    nudgeAudio.preload = "auto";
-    await nudgeAudio.play();
+    const audio = new Audio(clipAssetUrl(clip.path));
+    nudgeAudio = audio;
+    audio.preload = "auto";
+    const phrase = effectivePhrases().find((item) => clipBelongsToPhrase(clip, item.id));
+    lastNudgeVoice = { voice: selectedVoice().name, line: phrase?.text ?? "" };
+    // Only the current line reports; one replaced mid-word stays quiet.
+    const ended = () => {
+      if (nudgeAudio === audio) {
+        announceNudge(false);
+      }
+    };
+    audio.addEventListener("ended", ended);
+    audio.addEventListener("pause", ended);
+    await audio.play();
+    announceNudge(true);
     voiceError = "";
   } catch (error) {
     voiceError = `Could not play the line: ${errorText(error)}`;
     render();
+  }
+}
+
+/** Tells the distraction card (another window) whether the voice is speaking, and what. */
+function announceNudge(speaking: boolean): void {
+  if (lastNudgeVoice) {
+    void emit("nudge-voice", { speaking, ...lastNudgeVoice } satisfies NudgeVoice);
   }
 }
 
@@ -6839,9 +6912,9 @@ function availableVoices(): VoiceOption[] {
         name: profile.display_name,
         kind: ready > 0 ? "Ready" : hasReference ? "Recorded" : "Incomplete",
         detail: ready > 0
-          ? "Its lines are made and play in sessions."
+          ? "Its lines are generated and play in sessions."
           : hasReference
-            ? "Recorded. Make its lines before using this voice."
+            ? "Recorded. Generate its lines before using this voice."
             : "The recording is missing. Delete this voice or record it again.",
         coverage: `${ready}/${phrases.length} lines ready`,
         source: "custom" as VoiceSource,
@@ -7094,7 +7167,7 @@ function voiceBusyTitle(): string {
     case "delete-model":
       return "Deleting the voice engine";
     case "generate-clips":
-      return "Making a line";
+      return "Generating a line";
     case "delete-voice":
       return "Deleting voice";
     default:
@@ -7104,10 +7177,10 @@ function voiceBusyTitle(): string {
 
 function voiceBusyCopy(): string {
   if (voiceBusy === "generate-clips") {
-    return "About a minute, all on this computer. Lines you made play without the voice engine.";
+    return "About a minute, all on this computer. Generated lines play without the voice engine.";
   }
   if (voiceBusy === "download-model") {
-    return "The voice engine is large. Supervisor goes back to using little memory once the line is made.";
+    return "The voice engine is large. Supervisor goes back to using little memory once the line is generated.";
   }
   return "Local voice files are being updated.";
 }

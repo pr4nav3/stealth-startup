@@ -36,7 +36,17 @@ pass from Windows, and what is left for a release, is
       `AGENTS.md`. The distraction card says Back to my task, Allow once,
       Always allow; the voice page speaks of lines and the voice engine;
       backend errors a user can hit say what happened and what to do. The
-      landing page now says the voice engine is about 2 GB, not 300 MB
+      landing page now says the voice engine is about 2 GB, not 300 MB (Generate, Regenerate, GPU and
+      vision models kept on request)
+- [x] Distraction card with a voice (`feat/orb-card`): the card and the first
+      nudge come together at the strictness time (90, 60 or 30 s; a phone after
+      its 5-15 s grace), and the first nudge of each new distraction ignores the
+      cooldown; later ones on the same place still wait it out. The card is the
+      coral alert with "You opened YouTube." / "Your phone is out.", a voice
+      panel whose orb is the play button (bars while speaking, a play triangle
+      after), the task and time left, and Back to my task / Allow once / Always
+      allow. The main window plays the audio and tells the card through
+      `nudge-voice` / `nudge-control` events
 
 ## macOS pass (2026-10-25)
 

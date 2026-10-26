@@ -67,6 +67,8 @@ rules apply from the next sample and never change a recorded session. See `plans
 
 **History v4, Voice v2 and the mock agree; the app has not been checked.** Every screen was rendered through `mock.html` with fixtures, not against a real database. Places most likely to differ from the mock: the month picker's `get_focus_days` on a sparse history, session rows' miniature timelines on long sessions, the voice page's status tiles when the worker is really down.
 
+**The distraction card shows at the nudge time, not at 8 seconds** (2026-10-25). Before, the card came up as soon as a distraction passed the short grace and the voice followed at the strictness time; now both come at the strictness time. The live Session tab still says Distracted from the short grace. A phone card speaks the voice's next tone line, which may mention a tab; phone-specific lines are not written yet. The voice panel appears only when a line actually played for that card (none picked, or none generated, leaves it out). The card's audio comes from the main window, so it needs the main window's webview alive (it is, hidden or not).
+
 **PDF export is unimplemented.** Its nonfunctional button and empty handler were removed.
 
 ---

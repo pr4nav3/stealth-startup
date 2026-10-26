@@ -26,6 +26,9 @@ pub struct FocusEngine {
     /// Set while the place's clock is paused (idle, or Supervisor in front).
     held_since: Option<Duration>,
     last_nudge_at: Option<Duration>,
+    /// This place has had its first nudge. The first nudge on a new distraction plays with
+    /// its card whatever the cooldown; later ones on the same place wait out the cooldown.
+    nudged_here: bool,
     /// Muted engines keep judging time but never ask for a nudge.
     muted: bool,
     /// From the webcam: someone is in view (counts like media playing), or nobody has been
@@ -44,6 +47,7 @@ impl FocusEngine {
             window_started_at: Duration::ZERO,
             held_since: None,
             last_nudge_at: None,
+            nudged_here: false,
             muted: false,
             camera_present: false,
             camera_away: false,
@@ -65,6 +69,7 @@ impl FocusEngine {
             self.place = Some((activity.kind, activity.key.clone()));
             self.window_started_at = now;
             self.held_since = None;
+            self.nudged_here = false;
         }
 
         if self.is_away(sample) {
@@ -89,6 +94,7 @@ impl FocusEngine {
 
         if should_nudge {
             self.last_nudge_at = Some(now);
+            self.nudged_here = true;
         }
 
         self.snapshot(sample, activity, state, matched_rule, should_nudge, next_nudge_in_seconds, now)
@@ -120,6 +126,10 @@ impl FocusEngine {
 
     pub fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted
     }
 
     pub fn set_camera(&mut self, present: bool, away: bool) {
@@ -178,6 +188,7 @@ impl FocusEngine {
             .saturating_sub(seconds_on_window);
         let cooldown_wait = self
             .last_nudge_at
+            .filter(|_| self.nudged_here)
             .map(|last| {
                 self.config
                     .nudge_cooldown_seconds
@@ -206,6 +217,8 @@ impl FocusEngine {
             distracting: matched_rule.is_some(),
             matched_rule,
             seconds_on_current_window: elapsed_seconds(now, self.window_started_at),
+            interrupt: state == FocusState::Distracted
+                && elapsed_seconds(now, self.window_started_at) >= self.config.nudge_after_seconds,
             should_nudge,
             next_nudge_in_seconds,
         }
@@ -240,6 +253,9 @@ pub struct FocusSnapshot {
     pub distracting: bool,
     pub matched_rule: Option<AppRule>,
     pub seconds_on_current_window: u64,
+    /// The distraction card is up: a distraction past the strictness's nudge time. Its first
+    /// nudge plays with it.
+    pub interrupt: bool,
     pub should_nudge: bool,
     pub next_nudge_in_seconds: Option<u64>,
 }
@@ -582,6 +598,27 @@ mod tests {
         assert!(!cooled_down.should_nudge);
         assert_eq!(cooled_down.next_nudge_in_seconds, Some(28));
         assert!(observe(&mut engine, &youtube, 0.0, 40).should_nudge);
+    }
+
+    #[test]
+    fn a_new_distraction_speaks_with_its_card_even_inside_the_cooldown() {
+        let mut engine = test_engine(vec![AppRule::website("youtube.com"), AppRule::website("reddit.com")]);
+        let youtube = Activity::website("chrome", "youtube.com");
+        let reddit = Activity::website("chrome", "reddit.com");
+
+        observe(&mut engine, &youtube, 0.0, 0);
+        assert!(!observe(&mut engine, &youtube, 0.0, 9).interrupt);
+        let card = observe(&mut engine, &youtube, 0.0, 10);
+        assert!(card.interrupt && card.should_nudge);
+        // Reddit right after: no card, no voice until its own nudge time...
+        let early = observe(&mut engine, &reddit, 0.0, 15);
+        assert!(!early.interrupt && !early.should_nudge);
+        // ...then both together, though YouTube's nudge was only 15 s ago.
+        let second = observe(&mut engine, &reddit, 0.0, 25);
+        assert!(second.interrupt && second.should_nudge);
+        // Staying put, the next nudge waits out the cooldown.
+        assert!(!observe(&mut engine, &reddit, 0.0, 40).should_nudge);
+        assert!(observe(&mut engine, &reddit, 0.0, 55).should_nudge);
     }
 
     fn test_engine(rules: Vec<AppRule>) -> FocusEngine {

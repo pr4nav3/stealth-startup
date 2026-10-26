@@ -557,6 +557,8 @@ struct Camera {
     /// While a phone is in view: when it was first seen. Its span is the open span.
     phone_since: Option<Duration>,
     phone_seen_at: Duration,
+    /// This phone span has had its first nudge (which plays with its card, cooldown or not).
+    phone_nudged: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1293,6 +1295,7 @@ impl Session {
         self.close_open_span(now, storage);
         self.open_marker_span(Activity::phone(), PHONE_STATE);
         self.camera.phone_since = Some(now);
+        self.camera.phone_nudged = false;
         self.push_event(now, "Phone in view", "WEBCAM");
     }
 
@@ -1310,8 +1313,10 @@ impl Session {
             self.push_event(now, "Phone put down", "WEBCAM");
             return;
         }
-        if now.saturating_sub(since).as_secs() >= self.phone_grace_seconds() && self.engine.nudge_ready(now) {
+        let due = !self.camera.phone_nudged && !self.engine.is_muted() || self.engine.nudge_ready(now);
+        if now.saturating_sub(since).as_secs() >= self.phone_grace_seconds() && due {
             self.engine.note_nudge(now);
+            self.camera.phone_nudged = true;
             self.metrics.nudges += 1;
             self.push_event(now, "Phone nudge queued", "VOICE 01");
             self.persist_event(now, "nudge", Some("phone"), storage);
@@ -1650,6 +1655,8 @@ fn marked_focus(focus: &FocusSnapshot, matched_rule: Option<AppRule>, strictness
         markable: focus.markable,
         state,
         seconds_on_current_window: focus.seconds_on_current_window,
+        interrupt: state == FocusState::Distracted
+            && focus.seconds_on_current_window >= config.nudge_after_seconds,
         should_nudge: false,
         next_nudge_in_seconds: None,
     }
@@ -2066,21 +2073,23 @@ mod tests {
     }
 
     #[test]
-    fn window_and_phone_nudges_share_one_cooldown() {
+    fn each_new_distraction_speaks_with_its_card_then_nudges_share_the_cooldown() {
         let mut manager = webcam_manager();
         manager.start(input("Phone", Strictness::Strict), seconds(0));
         let nudges = |manager: &SessionManager, t| manager.snapshot(seconds(t)).current.unwrap().metrics.nudges;
         for t in 0..=210 {
-            // Strict: YouTube is nudged at 30s; the phone from 31s to 125s.
+            // Strict: YouTube's card and voice at 30s; the phone in view from 31s to 125s.
             manager.record_webcam((31..=125).contains(&t), true, seconds(t));
             record(&mut manager, site("youtube.com", 0.0), seconds(t));
             match t {
                 30 => assert_eq!(nudges(&manager, t), 1),
-                // The phone waits out the 90s cooldown instead of nudging 5s in.
-                119 => assert_eq!(nudges(&manager, t), 1),
-                120 => assert_eq!(nudges(&manager, t), 2),
-                // And YouTube, back in front, waits out the phone's.
-                209 => assert_eq!(nudges(&manager, t), 2),
+                // The phone is a new distraction: its card speaks after the 5s grace, cooldown or not.
+                35 => assert_eq!(nudges(&manager, t), 1),
+                36 => assert_eq!(nudges(&manager, t), 2),
+                // Its next nudge waits out the 90s cooldown...
+                125 => assert_eq!(nudges(&manager, t), 2),
+                126 => assert_eq!(nudges(&manager, t), 3),
+                // ...and YouTube, the same place it was, waits out the phone's.
                 210 => assert_eq!(nudges(&manager, t), 3),
                 _ => {}
             }

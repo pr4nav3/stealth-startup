@@ -42,7 +42,9 @@ const STATES = [
   ["report-delete", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, ".history-item"); await sleep(500); click(d, '[data-action="ask-delete-session"]'); }],
   ["trends", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, '[data-action="open-trends"]'); }],
   ["overlay-corner", M + "?view=overlay&live=1", null, 228, 400],
-  ["overlay-interrupt", M + "?view=overlay&live=1&drift=1", null, 520, 600],
+  ["overlay-interrupt", M + "?view=overlay&live=1&drift=1", null, 420, 600],
+  ["overlay-interrupt-voice", M + "?view=overlay&live=1&drift=1&voice=1&speak_ms=60000", () => sleep(1500), 420, 600],
+  ["overlay-phone-voice", M + "?view=overlay&live=1&phone=1&voice=1&speak_ms=60000", () => sleep(1500), 420, 600],
 ];
 const results = [];
 for (const [name, url, setup, w, h] of STATES) {
