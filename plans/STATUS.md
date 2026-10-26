@@ -31,6 +31,12 @@ pass from Windows, and what is left for a release, is
       now allows Home zero scroll
 - [x] Four Windows compiler warnings from the Mac pass; the silent-recording
       test runs on every OS
+- [x] Plain-language pass (`copy/plain-language`): every string users see,
+      checked across 40 mock screens and dialogs, uses the vocabulary in
+      `AGENTS.md`. The distraction card says Back to my task, Allow once,
+      Always allow; the voice page speaks of lines and the voice engine;
+      backend errors a user can hit say what happened and what to do. The
+      landing page now says the voice engine is about 2 GB, not 300 MB
 
 ## macOS pass (2026-10-25)
 

@@ -481,7 +481,7 @@ impl VoiceWorker {
         if !parsed.ok {
             return Err(parsed
                 .error
-                .unwrap_or_else(|| "voice worker failed".to_string()));
+                .unwrap_or_else(|| "The voice engine could not make this line.".to_string()));
         }
         let phases = parsed.phases_ms.unwrap_or_default();
         Ok(JobOutcome {
@@ -1301,7 +1301,7 @@ fn generate_clips_inner(
     let reference = supervisor_storage_file(&root, &input.reference_audio_path, "reference audio")?;
     // Size check only: hashing 1.9 GB here added ten seconds to every clip. Install verifies.
     if !model_status_for(&root, false).installed || !voice_runtime::status(&root).installed {
-        return Err("download the voice cloning model pack before generating clips".to_string());
+        return Err("Download the voice engine before making lines.".to_string());
     }
     ensure_generation_ram(worker.is_loaded())?;
 
@@ -1465,12 +1465,12 @@ fn download_snapshot(state: &VoiceDownloadState, root: &Path) -> VoiceDownloadSn
         eta_seconds,
         message: match state.phase {
             VoiceDownloadPhase::Idle => "No model download is running.".to_string(),
-            VoiceDownloadPhase::Checking => "Checking the installed model and runtime.".to_string(),
+            VoiceDownloadPhase::Checking => "Checking the installed voice engine.".to_string(),
             VoiceDownloadPhase::Downloading => state
                 .current_file
                 .as_ref()
                 .map(|file| format!("Downloading {file}"))
-                .unwrap_or_else(|| "Downloading model pack".to_string()),
+                .unwrap_or_else(|| "Downloading the voice engine".to_string()),
             VoiceDownloadPhase::Cancelling => {
                 "Cancelling download. Deleting partially installed files.".to_string()
             }
@@ -1647,7 +1647,7 @@ fn download_model_files(
         }
         if hash != file.sha256 {
             let _ = fs::remove_file(&tmp);
-            return Err(format!("downloaded checksum mismatch for {}", file.path));
+            return Err(format!("The download of {} was damaged. Try again.", file.path));
         }
         if target.exists() {
             fs::remove_file(&target).map_err(|error| error.to_string())?;
@@ -1667,7 +1667,7 @@ fn download_model_files(
 fn merge_generated_clips(profile_dir: &Path, staging_dir: &Path) -> Result<(), String> {
     let staged_clips = staging_dir.join("clips");
     if !staged_clips.is_dir() {
-        return Err("voice worker did not produce clip files".to_string());
+        return Err("The voice engine finished without making the line. Try again.".to_string());
     }
 
     let clips_dir = profile_dir.join("clips");
@@ -1710,7 +1710,7 @@ fn clip_phrase_id(stem: &str) -> &str {
 fn replace_generated_clips(profile_dir: &Path, staging_dir: &Path) -> Result<(), String> {
     let staged_clips = staging_dir.join("clips");
     if !staged_clips.is_dir() {
-        return Err("voice worker did not produce clip files".to_string());
+        return Err("The voice engine finished without making the line. Try again.".to_string());
     }
 
     let clips_dir = profile_dir.join("clips");
@@ -2472,8 +2472,8 @@ fn worker_stopped(tail: &Mutex<Vec<u8>>) -> String {
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     match text.lines().rev().find(|line| !line.trim().is_empty()) {
-        Some(line) => format!("voice worker stopped: {}", line.trim().chars().take(200).collect::<String>()),
-        None => "voice worker stopped".to_string(),
+        Some(line) => format!("The voice engine stopped: {}", line.trim().chars().take(200).collect::<String>()),
+        None => "The voice engine stopped.".to_string(),
     }
 }
 

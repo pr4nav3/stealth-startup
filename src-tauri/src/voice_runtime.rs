@@ -147,7 +147,7 @@ pub fn worker_launch(root: &Path) -> Result<WorkerLaunch, String> {
     }
 
     let Some((_install, executable)) = installed_runtime(root)? else {
-        return Err("download the voice runtime before generating clips".to_string());
+        return Err("Download the voice engine before making lines.".to_string());
     };
 
     Ok(WorkerLaunch {
@@ -298,7 +298,7 @@ fn select_runtime_asset(
         .filter(|runtime| runtime.target == target);
     let asset = matches
         .next()
-        .ok_or_else(|| format!("no voice runtime is published for {target}"))?;
+        .ok_or_else(|| format!("The voice engine is not available for this computer yet ({target})."))?;
     if matches.next().is_some() {
         return Err(format!(
             "voice runtime manifest contains duplicate target {target}"
@@ -368,7 +368,7 @@ fn install_archive(
             ));
         }
         if sha256_file(archive_path, cancel)? != asset.sha256 {
-            return Err("downloaded voice runtime checksum mismatch".to_string());
+            return Err("The voice engine download was damaged. Try again.".to_string());
         }
         if cancel.load(Ordering::SeqCst) {
             return Err(DOWNLOAD_CANCELLED.to_string());
