@@ -1081,7 +1081,6 @@ impl Session {
             metrics: self.metrics.clone(),
             evidence: self.evidence.clone(),
             focus: self.latest_focus.clone(),
-            on_supervisor: self.supervisor_state.is_some(),
             exceptions: self.exceptions.clone(),
             camera: self.camera_status(now),
         }
@@ -1485,8 +1484,6 @@ pub struct CurrentSession {
     pub metrics: SessionMetrics,
     pub evidence: Vec<EvidenceEvent>,
     pub focus: Option<FocusSnapshot>,
-    /// Supervisor's own window is in front (`focus` still holds the window before it).
-    pub on_supervisor: bool,
     /// Distractions allowed for this session.
     pub exceptions: Vec<AppRule>,
     pub camera: CameraStatus,
