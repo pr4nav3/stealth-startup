@@ -3347,7 +3347,8 @@ audio {
   height: 0;
   border-top: 5px solid transparent;
   border-bottom: 5px solid transparent;
-  border-left: 8px solid var(--sv-border);
+  /* Text colour, so it reads in dark mode too (the border colour stays near-black). */
+  border-left: 8px solid var(--sv-ink);
   transition: transform 140ms ease;
 }
 
