@@ -421,7 +421,7 @@ h1 {
 .live-strip {
   position: relative;
   overflow: hidden;
-  height: 20px;
+  height: 26px;
   margin-top: 14px;
   border: var(--border);
   border-radius: var(--radius-control);
