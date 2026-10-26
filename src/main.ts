@@ -84,6 +84,25 @@ interface FocusSnapshot {
   next_nudge_in_seconds: number | null;
 }
 
+interface PomodoroStatus {
+  round: number;
+  rounds: number;
+  work_seconds: number;
+  break_seconds: number;
+  /** "break_over": the break ran out and the session waits for the next round. */
+  phase: "work" | "break" | "break_over";
+  phase_remaining_seconds: number;
+  rounds_focused_seconds: number[];
+  moments: number;
+}
+
+/** Work / break rhythms on the start screen. */
+const POMODORO_RHYTHMS = [
+  { work: 25, rest: 5 },
+  { work: 50, rest: 10 },
+  { work: 90, rest: 20 },
+] as const;
+
 /** What the main window, which plays every nudge, tells the distraction card. */
 interface NudgeVoice {
   speaking: boolean;
@@ -143,6 +162,8 @@ interface CurrentSession {
   /** Distractions allowed for this session. */
   exceptions: AppRule[];
   camera: CameraStatus;
+  /** Present for Pomodoro sessions. */
+  pomodoro?: PomodoroStatus | null;
 }
 
 interface SessionSummary {
@@ -502,7 +523,12 @@ const starterRules: AppRule[] = ["youtube.com", "netflix.com", "tiktok.com", "in
 
 /** The lines a phone nudge plays: a set every voice can have, never a voice's speaking tone. */
 const PHONE_TONE: VoiceTone = "phone";
-const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern", PHONE_TONE];
+/** Lines for the end of a Pomodoro round and the end of its break. */
+const ROUND_OVER_TONE: VoiceTone = "roundover";
+const BREAK_OVER_TONE: VoiceTone = "breakover";
+/** Sets the app plays at its own moments: every voice can have them, none speaks them as its tone. */
+const MOMENT_TONES: VoiceTone[] = [PHONE_TONE, ROUND_OVER_TONE, BREAK_OVER_TONE];
+const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern", ...MOMENT_TONES];
 /** The editor's "New set…" choice. */
 
 const phraseBank: PhraseDefinition[] = [
@@ -530,6 +556,12 @@ const phraseBank: PhraseDefinition[] = [
   { id: "phone_it_can_wait", tone: "phone", text: "Put the phone away. It can wait." },
   { id: "phone_i_can_see_it", tone: "phone", text: "I can see your phone." },
   { id: "phone_eyes_up", tone: "phone", text: "Wrong screen. Eyes up." },
+  { id: "roundover_good_round", tone: "roundover", text: "Good round. Stand up, drink some water." },
+  { id: "roundover_take_five", tone: "roundover", text: "That's one done. Take a break." },
+  { id: "roundover_eyes_off", tone: "roundover", text: "Nice work. Eyes off the screen for a bit." },
+  { id: "breakover_back_to_it", tone: "breakover", text: "Break's over. Back to it." },
+  { id: "breakover_lets_go", tone: "breakover", text: "Time's up. Let's go." },
+  { id: "breakover_next_round", tone: "breakover", text: "Next round. You've got this." },
 ];
 
 const noneVoice: VoiceOption = {
@@ -570,6 +602,9 @@ function starterVoiceCard(id: string, profileId: string, name: string, detail: s
 
 const draft = {
   goal: "",
+  mode: "timer" as "timer" | "pomodoro",
+  rhythm: 0,
+  rounds: 4,
   duration_minutes: 25,
   strictness: "normal" as Strictness,
   voiceId: "starter-female",
@@ -707,6 +742,11 @@ let lastNudgeVoice: Omit<NudgeVoice, "speaking"> | null = null;
 let overlayVoice: (NudgeVoice & { at: number }) | null = null;
 /** When the current distraction card first showed. */
 let distractionLatchedAt = 0;
+/** The Pomodoro moment card on screen ("<session>:<moment>"), when it showed, and the last one
+ *  the user closed. A new moment (the break running out) brings the next card. */
+let momentKey = "";
+let momentShownAt = 0;
+let momentDismissed = "";
 const webcamSettings = {
   phoneUse: false,
   strict: false,
@@ -773,6 +813,10 @@ async function init(): Promise<void> {
       await refreshSnapshot();
       void playNudge(snapshot?.current ?? null);
     });
+    await listen<string>("session-moment", async (event) => {
+      await refreshSnapshot();
+      void playMoment(event.payload);
+    });
     // The card's orb: stop the line, or hear it again.
     await listen<string>("nudge-control", (event) => {
       if (!nudgeAudio) {
@@ -789,7 +833,7 @@ async function init(): Promise<void> {
   if (appView === "overlay") {
     await listen<NudgeVoice>("nudge-voice", (event) => {
       overlayVoice = { ...event.payload, at: Date.now() };
-      if (distractionIsActive()) {
+      if (distractionIsActive() || momentCardActive(snapshot?.current ?? null)) {
         render();
       }
     });
@@ -1074,6 +1118,7 @@ function sessionViewKey(current: CurrentSession | null): string {
     current.metrics.nudges,
     current.camera.phone ? 1 : 0,
     current.camera.phone_distracted ? 1 : 0,
+    current.pomodoro ? `${current.pomodoro.round}:${current.pomodoro.phase}` : "",
     rules,
   ].join("\u001f");
 }
@@ -1126,10 +1171,7 @@ function paintLive(current: CurrentSession | null): void {
       title.textContent = stateTitle(current);
     }
   }
-  const label = formatDuration(current.remaining_seconds);
-  const percent = current.duration_seconds
-    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
-    : 0;
+  const { label, percent } = liveTimer(current);
   document.querySelectorAll<HTMLElement>(".active-timer strong, .interrupt-time").forEach((node) => {
     node.textContent = label;
   });
@@ -1294,32 +1336,38 @@ function renderSession(current: CurrentSession | null): string {
     `;
   }
 
-  const percent = current.duration_seconds
-    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
-    : 0;
+  const timer = liveTimer(current);
+  const onBreak = isOnBreak(current);
   return `
     <section class="active-session-page">
       <div class="active-session-grid">
         <section class="state-slab active-state-card ${stateClass(current)}" aria-live="polite">
-          <p class="eyebrow">Current session</p>
+          ${
+            current.pomodoro
+              ? `<div class="eyebrow-row"><p class="eyebrow">${escapeHtml(roundLabel(current.pomodoro))}</p>${renderRoundDots(current.pomodoro)}</div>`
+              : `<p class="eyebrow">Current session</p>`
+          }
           <h2>${escapeHtml(stateTitle(current))}</h2>
           <div class="active-goal">
             <span>Session goal</span>
             <strong>${escapeHtml(current.goal)}</strong>
           </div>
           <div class="active-timer">
-            <strong>${formatDuration(current.remaining_seconds)}</strong>
-            <span>Remaining</span>
+            <strong>${timer.label}</strong>
+            <span>${escapeHtml(timer.caption)}</span>
           </div>
           <div class="active-progress" aria-label="Session progress">
-            <span style="width: ${percent}%"></span>
+            <span style="width: ${timer.percent}%"></span>
           </div>
         </section>
 
         <aside class="panel session-rules-card">
           <p class="eyebrow">Distractions</p>
-          ${renderSessionDistractions(current.exceptions)}
-          ${renderNowLine(current)}
+          ${
+            onBreak
+              ? `<p class="session-break-note">Don't count during a break.</p>`
+              : `${renderSessionDistractions(current.exceptions)}${renderNowLine(current)}`
+          }
           <button type="button" data-action="open-session-rules">Edit distractions</button>
         </aside>
       </div>
@@ -1328,6 +1376,60 @@ function renderSession(current: CurrentSession | null): string {
     </section>
     ${sessionRulesOpen ? renderSessionRulesModal() : ""}
   `;
+}
+
+/** A Pomodoro session between rounds: on its break, or waiting for the next round. */
+function isOnBreak(current: CurrentSession | null): boolean {
+  return Boolean(current?.pomodoro && current.pomodoro.phase !== "work");
+}
+
+/** "Round 2", or after a round "After round 2". */
+function roundLabel(pomodoro: PomodoroStatus): string {
+  return pomodoro.phase === "work" ? `Round ${pomodoro.round}` : `After round ${pomodoro.round}`;
+}
+
+/** Pause's place: Resume, or on a break "Start round 3". */
+function resumeLabel(current: CurrentSession): string {
+  if (current.status !== "paused") {
+    return "Pause";
+  }
+  return isOnBreak(current) && current.pomodoro ? `Start round ${current.pomodoro.round + 1}` : "Resume";
+}
+
+/** The big countdown and its bar: the session's time, or in a Pomodoro the current round or break. */
+function liveTimer(current: CurrentSession): { label: string; caption: string; percent: number } {
+  const pomodoro = current.pomodoro;
+  if (!pomodoro) {
+    const percent = current.duration_seconds
+      ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
+      : 0;
+    return { label: formatDuration(current.remaining_seconds), caption: "Remaining", percent };
+  }
+  if (pomodoro.phase === "work") {
+    const left = pomodoro.phase_remaining_seconds;
+    const last = pomodoro.round >= pomodoro.rounds;
+    return {
+      label: formatDuration(left),
+      caption: last ? "Until done" : "Until break",
+      percent: Math.min(100, Math.round(((pomodoro.work_seconds - left) / pomodoro.work_seconds) * 100)),
+    };
+  }
+  const left = pomodoro.phase_remaining_seconds;
+  return {
+    label: formatDuration(left),
+    caption: pomodoro.phase === "break_over" ? "Break over" : `Until round ${pomodoro.round + 1}`,
+    percent: Math.min(100, Math.round(((pomodoro.break_seconds - left) / pomodoro.break_seconds) * 100)),
+  };
+}
+
+/** One dot per round. Finished ones take the colour opposite the slab (yellow on a round,
+ *  green on a break), so they always stand out; the current round is ink. */
+function renderRoundDots(pomodoro: PomodoroStatus): string {
+  const finished = pomodoro.phase === "work" ? pomodoro.round - 1 : pomodoro.round;
+  return `<span class="round-dots" aria-label="${finished} of ${pomodoro.rounds} rounds finished">${Array.from(
+    { length: pomodoro.rounds },
+    (_, index) => `<i class="${index < finished ? "done" : index === finished && pomodoro.phase === "work" ? "now" : ""}"></i>`,
+  ).join("")}</span>`;
 }
 
 /** What is in front right now, named the way History names it, and how it counts. */
@@ -1403,7 +1505,7 @@ function renderActiveSessionControls(current: CurrentSession): string {
   const held = current.status === "paused";
   return `
     <div class="active-session-controls">
-      <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${held ? "Resume" : "Pause"}</button>
+      <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${escapeHtml(resumeLabel(current))}</button>
       <button class="danger" type="button" data-action="stop">End session</button>
     </div>
   `;
@@ -1431,6 +1533,9 @@ function renderOverlay(current: CurrentSession | null): string {
   if (distractionIsActive()) {
     return renderDistractionOverlay(current as CurrentSession);
   }
+  if (current && momentCardActive(current)) {
+    return renderMomentOverlay(current);
+  }
   // Muting keeps recording; only Pause holds the timer.
   const held = current?.status === "paused";
   const nudgesMuted = current?.status === "snoozed";
@@ -1447,7 +1552,7 @@ function renderOverlay(current: CurrentSession | null): string {
         current
           ? `
             <div class="overlay-actions">
-              <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${held ? "Resume" : "Pause"}</button>
+              <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${isOnBreak(current) ? "Next round" : escapeHtml(resumeLabel(current as CurrentSession))}</button>
               <button class="danger" type="button" data-action="stop">Stop</button>
             </div>
             <details class="overlay-more" ${overlayMoreOpen ? "open" : ""}>
@@ -1470,6 +1575,58 @@ function renderOverlay(current: CurrentSession | null): string {
           `
           : ""
       }
+    </main>
+  `;
+}
+
+/** A round just ended or its break ran out, and the user hasn't closed that card. */
+function momentCardActive(current: CurrentSession | null): boolean {
+  const pomodoro = current?.pomodoro;
+  if (!current || !pomodoro || pomodoro.phase === "work" || pomodoro.moments === 0) {
+    return false;
+  }
+  const key = `${current.id}:${pomodoro.moments}`;
+  if (key !== momentKey) {
+    momentKey = key;
+    momentShownAt = Date.now();
+  }
+  return momentDismissed !== key;
+}
+
+/** Round over (yellow): the round's title and time, a tomato per round, the voice, one button.
+ *  Break over (green): just that, the voice, and the button that starts the next round. */
+function renderMomentOverlay(current: CurrentSession): string {
+  const pomodoro = current.pomodoro as PomodoroStatus;
+  if (pomodoro.phase === "break_over") {
+    return `
+      <main class="overlay-shell overlay-interrupt">
+        <section class="state-slab interrupt-alert moment-break-over">
+          <h2 class="moment-title">Break over.</h2>
+          ${renderInterruptVoice(momentShownAt)}
+          <div class="moment-gap"></div>
+        </section>
+        <div class="interrupt-actions moment-actions">
+          <button class="primary" type="button" data-action="resume">Start round ${pomodoro.round + 1}</button>
+        </div>
+      </main>
+    `;
+  }
+  const focused = pomodoro.rounds_focused_seconds[pomodoro.round - 1] ?? 0;
+  return `
+    <main class="overlay-shell overlay-interrupt">
+      <section class="state-slab interrupt-alert moment-round-over">
+        <h2 class="moment-title">Round ${pomodoro.round} done.</h2>
+        <p class="moment-goal">${escapeHtml(current.goal)}</p>
+        <div class="tomatoes" aria-label="${pomodoro.round} of ${pomodoro.rounds} rounds done">
+          ${Array.from({ length: pomodoro.rounds }, (_, index) => `<span class="tomato ${index < pomodoro.round ? "is-done" : ""} ${index === pomodoro.round - 1 ? "is-new" : ""}"></span>`).join("")}
+        </div>
+        <p class="moment-focused"><b>${Math.round(focused / 60)} min</b> focused</p>
+        ${renderInterruptVoice(momentShownAt)}
+        <div class="moment-gap"></div>
+      </section>
+      <div class="interrupt-actions moment-actions">
+        <button class="primary" type="button" data-action="dismiss-moment">Start break</button>
+      </div>
     </main>
   `;
 }
@@ -1500,9 +1657,9 @@ function renderDistractionOverlay(current: CurrentSession): string {
 /** The voice that spoke for this card: an orb that is the play button, with bars while it
  *  speaks, and the line under the speaker's name. Nothing when no voice spoke for this card
  *  (no voice picked, or no line generated yet). A line can land a moment before the card. */
-function renderInterruptVoice(): string {
+function renderInterruptVoice(since = distractionLatchedAt): string {
   const voice = overlayVoice;
-  if (!voice || voice.at < distractionLatchedAt - 5000) {
+  if (!voice || voice.at < since - 5000) {
     return "";
   }
   const speaking = voice.speaking;
@@ -1589,7 +1746,7 @@ function syncOverlayPlacement(current: CurrentSession | null): void {
   if (appView !== "overlay") {
     return;
   }
-  const interrupt = distractionIsActive();
+  const interrupt = distractionIsActive() || momentCardActive(current);
   const next = interrupt ? "interrupt" : "corner";
   if (next !== overlayPlacement) {
     overlayPlacement = next;
@@ -1647,12 +1804,11 @@ function fitOverlayWindow(attempt = 0): void {
 }
 
 function renderOverlayProgress(current: CurrentSession): string {
-  const percent = current.duration_seconds
-    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
-    : 0;
+  const { label, percent } = liveTimer(current);
   return `
+    ${current.pomodoro ? renderRoundDots(current.pomodoro) : ""}
     <div class="overlay-progress">
-      <span>${formatDuration(current.remaining_seconds)} left</span>
+      <span>${label} left</span>
       <div class="progress" aria-label="Session progress"><span style="width: ${percent}%"></span></div>
     </div>
   `;
@@ -1805,6 +1961,12 @@ function renderPreflightModal(): string {
             <input id="preflight-goal" maxlength="220" value="${attr(draft.goal)}" placeholder="Finish the Supervisor UI overhaul" />
           </label>
 
+          <div class="mode-tabs" role="group" aria-label="Session kind">
+            <button class="${draft.mode === "timer" ? "active" : ""}" type="button" data-action="session-mode" data-mode="timer" aria-pressed="${draft.mode === "timer"}">Timer</button>
+            <button class="${draft.mode === "pomodoro" ? "active" : ""}" type="button" data-action="session-mode" data-mode="pomodoro" aria-pressed="${draft.mode === "pomodoro"}">Pomodoro</button>
+          </div>
+
+          ${draft.mode === "pomodoro" ? renderPomodoroField() : `
           <section class="duration-field">
             <div class="duration-head">
               <span>How long?</span>
@@ -1817,7 +1979,7 @@ function renderPreflightModal(): string {
               <span style="left: 60%">60</span>
               <span style="left: 100%">90</span>
             </div>
-          </section>
+          </section>`}
 
           <details class="preflight-disclosure" data-preflight-section="blocks" ${preflightBlocksOpen ? "open" : ""}>
             <summary>
@@ -1850,6 +2012,32 @@ function renderPreflightModal(): string {
         <button class="primary preflight-start" type="button" data-action="confirm-start-session">Start focus session</button>
       </section>
     </div>
+  `;
+}
+
+/** Work / break chips on the left, rounds on the right, the finish time under them. */
+function renderPomodoroField(): string {
+  const rhythm = POMODORO_RHYTHMS[draft.rhythm];
+  const minutes = draft.rounds * rhythm.work + (draft.rounds - 1) * rhythm.rest;
+  const done = new Date(Date.now() + minutes * 60_000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `
+    <section class="duration-field pomodoro-field">
+      <div class="duration-head"><span>Work / break</span><span>Rounds</span></div>
+      <div class="pomodoro-row">
+        <div class="pomodoro-rhythms" role="group" aria-label="Work and break minutes">
+          ${POMODORO_RHYTHMS.map(
+            (item, index) =>
+              `<button class="${index === draft.rhythm ? "active" : ""}" type="button" data-action="pomodoro-rhythm" data-index="${index}" aria-pressed="${index === draft.rhythm}">${item.work} / ${item.rest}</button>`,
+          ).join("")}
+        </div>
+        <span class="pomodoro-rounds">
+          <button type="button" data-action="pomodoro-rounds" data-step="-1" aria-label="One round fewer" ${draft.rounds <= 1 ? "disabled" : ""}>−</button>
+          <b>${draft.rounds}</b>
+          <button type="button" data-action="pomodoro-rounds" data-step="1" aria-label="One round more" ${draft.rounds >= 8 ? "disabled" : ""}>+</button>
+        </span>
+      </div>
+      <p class="pomodoro-done">Done around ${escapeHtml(done)}</p>
+    </section>
   `;
 }
 
@@ -2599,7 +2787,7 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
       </div>
     `;
   }
-  const useTone = sameTone(viewed, speaks) || sameTone(viewed, PHONE_TONE)
+  const useTone = sameTone(viewed, speaks) || isMomentTone(viewed)
     ? ""
     : `<button class="small-button" type="button" data-action="use-tone" data-tone="${attr(viewed)}" ${voice.profile && voiceBusy === null ? "" : "disabled"}>Use this tone</button>`;
   if (phrases.length === 0) {
@@ -4392,11 +4580,31 @@ async function startSession(): Promise<boolean> {
       duration_minutes: draft.duration_minutes,
       strictness: draft.strictness,
       exceptions: cloneRules(preflightExceptions),
+      pomodoro:
+        draft.mode === "pomodoro"
+          ? {
+              work_minutes: POMODORO_RHYTHMS[draft.rhythm].work,
+              break_minutes: POMODORO_RHYTHMS[draft.rhythm].rest,
+              rounds: draft.rounds,
+            }
+          : null,
     },
   });
 }
 
 async function runAction(action: string, source?: HTMLElement): Promise<void> {
+  if (action === "session-mode" || action === "pomodoro-rhythm" || action === "pomodoro-rounds") {
+    if (action === "session-mode") {
+      draft.mode = source?.dataset.mode === "pomodoro" ? "pomodoro" : "timer";
+    } else if (action === "pomodoro-rhythm") {
+      draft.rhythm = Math.min(POMODORO_RHYTHMS.length - 1, Math.max(0, Number(source?.dataset.index ?? 0)));
+    } else {
+      draft.rounds = Math.min(8, Math.max(1, draft.rounds + Number(source?.dataset.step ?? 0)));
+    }
+    paintPreflightLayer();
+    return;
+  }
+
   if (action === "toggle-theme") {
     theme = theme === "dark" ? "light" : "dark";
     localStorage.setItem("supervisor-theme", theme);
@@ -4410,6 +4618,12 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "nudge-stop" || action === "nudge-replay") {
     void emit("nudge-control", action === "nudge-stop" ? "stop" : "replay");
+    return;
+  }
+
+  if (action === "dismiss-moment") {
+    momentDismissed = momentKey;
+    render();
     return;
   }
 
@@ -6343,6 +6557,10 @@ function statusChip(current: CurrentSession | null): string {
     return "STANDBY";
   }
 
+  if (isOnBreak(current)) {
+    return "BREAK";
+  }
+
   if (current.status === "paused") {
     return "PAUSED";
   }
@@ -6357,6 +6575,10 @@ function statusChip(current: CurrentSession | null): string {
 function stateTitle(current: CurrentSession | null): string {
   if (!current) {
     return "Ready";
+  }
+
+  if (isOnBreak(current)) {
+    return current.pomodoro?.phase === "break_over" ? "Break over" : "Break";
   }
 
   if (current.status === "paused") {
@@ -6406,6 +6628,10 @@ function stateClass(current: CurrentSession | null): string {
     return "state-ready";
   }
 
+  if (isOnBreak(current)) {
+    return "state-break";
+  }
+
   if (current.status === "paused") {
     return "state-paused";
   }
@@ -6421,7 +6647,25 @@ async function playNudge(current: CurrentSession | null): Promise<void> {
   if (!current || current.status !== "active" || draft.voiceId === "none") {
     return;
   }
-  const clip = selectedNudgeClip(current.metrics.nudges, current.camera.phone);
+  await playLine(selectedNudgeClip(current.metrics.nudges, current.camera.phone));
+}
+
+/** A Pomodoro round or its break ended: the voice says a line from that moment's set, if the
+ *  voice has one. Breaks are pauses, so this plays whatever the session's status. */
+async function playMoment(phase: string): Promise<void> {
+  if (draft.voiceId === "none") {
+    return;
+  }
+  const tone = phase === "break_over" ? BREAK_OVER_TONE : ROUND_OVER_TONE;
+  const voice = selectedVoice();
+  const ready = tonePhrases(tone)
+    .map((phrase) => clipForPhrase(voice, phrase))
+    .filter((clip): clip is VoiceClipSummary => Boolean(clip));
+  const moments = snapshot?.current?.pomodoro?.moments ?? 1;
+  await playLine(ready.length ? ready[(moments - 1) % ready.length] : null);
+}
+
+async function playLine(clip: VoiceClipSummary | null): Promise<void> {
   if (!clip) {
     return;
   }
@@ -6889,7 +7133,7 @@ function isCustomTone(tone: VoiceTone): boolean {
 
 /** The tone a voice speaks in sessions: its saved one while that tone exists, else the first. */
 function profileTone(profile: VoiceProfileSummary | null): VoiceTone {
-  const tones = phraseToneOrder().filter((tone) => !sameTone(tone, PHONE_TONE));
+  const tones = phraseToneOrder().filter((tone) => !isMomentTone(tone));
   const saved = profile?.tone;
   return (saved && tones.find((tone) => sameTone(tone, saved))) || tones[0] || toneOrder[0];
 }
@@ -7206,17 +7450,30 @@ function formatBytes(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-/** What the Phone set is for, under its lines. */
+function isMomentTone(tone: VoiceTone): boolean {
+  return MOMENT_TONES.some((item) => sameTone(item, tone));
+}
+
+/** What a moment's set is for, under its lines. */
 function phoneHint(tone: VoiceTone): string {
-  return sameTone(tone, PHONE_TONE)
-    ? `<span class="clips-hint">Played when the camera sees your phone. Without them, the voice's own tone speaks.</span>`
-    : "";
+  const text = sameTone(tone, PHONE_TONE)
+    ? "Played when the camera sees your phone. Without them, the voice's own tone speaks."
+    : sameTone(tone, ROUND_OVER_TONE)
+      ? "Played when a Pomodoro round ends."
+      : sameTone(tone, BREAK_OVER_TONE)
+        ? "Played when a Pomodoro break ends."
+        : "";
+  return text ? `<span class="clips-hint">${text}</span>` : "";
 }
 
 function toneLabel(tone: VoiceTone): string {
   switch (tone) {
     case "phone":
       return "Phone";
+    case "roundover":
+      return "Round over";
+    case "breakover":
+      return "Break over";
     case "gentle":
       return "Gentle";
     case "mom":

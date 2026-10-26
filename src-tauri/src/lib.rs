@@ -1163,6 +1163,16 @@ fn new_nudge(seen: &mut (u64, u64), snapshot: &SessionSnapshot) -> bool {
     counted_new_nudge(seen, current.id, current.metrics.nudges)
 }
 
+/// A Pomodoro round ended ("break") or its break ran out ("break_over"): the main window plays
+/// a line for it and the status window shows its card. Sent once per moment, like a nudge.
+const MOMENT_EVENT: &str = "session-moment";
+
+fn new_moment(seen: &mut (u64, u64), snapshot: &SessionSnapshot) -> Option<&'static str> {
+    let current = snapshot.current.as_ref()?;
+    let pomodoro = current.pomodoro.as_ref()?;
+    counted_new_nudge(seen, current.id, pomodoro.moments).then_some(pomodoro.phase)
+}
+
 fn counted_new_nudge(seen: &mut (u64, u64), id: u64, nudges: u64) -> bool {
     let before = if seen.0 == id { seen.1 } else { 0 };
     *seen = (id, nudges);
@@ -1224,6 +1234,7 @@ fn automation_result(text: String) -> Result<(), String> {
 fn start_session_ticker(app: AppHandle) {
     let mut last_loop = app.state::<AppState>().started_at.elapsed();
     let mut nudges_seen = (0, 0);
+    let mut moments_seen = (0, 0);
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
 
@@ -1241,6 +1252,9 @@ fn start_session_ticker(app: AppHandle) {
             // A phone nudge can come from a webcam frame or this tick; both show up here.
             if new_nudge(&mut nudges_seen, &snapshot) {
                 let _ = app.emit(NUDGE_EVENT, ());
+            }
+            if let Some(phase) = new_moment(&mut moments_seen, &snapshot) {
+                let _ = app.emit(MOMENT_EVENT, phase);
             }
             (
                 had_current && matches!(snapshot.status, session::SessionStatus::Idle),
@@ -1283,6 +1297,9 @@ fn start_session_ticker(app: AppHandle) {
             last_loop = now;
             if new_nudge(&mut nudges_seen, &snapshot) {
                 let _ = app.emit(NUDGE_EVENT, ());
+            }
+            if let Some(phase) = new_moment(&mut moments_seen, &snapshot) {
+                let _ = app.emit(MOMENT_EVENT, phase);
             }
             was_polling && matches!(snapshot.status, session::SessionStatus::Idle)
         };

@@ -54,6 +54,29 @@ pass from Windows, and what is left for a release, is
       (the seed marker lists each line it offered). Starter voices are named
       Derek and Elise on screen, so the card reads "Elise is speaking"
 
+## Pomodoro (2026-10-26, branch `pomodoro`)
+
+- [x] Start screen: a Timer / Pomodoro switch under the goal. Timer keeps the
+      slider; Pomodoro shows 25/5, 50/10 and 90/20 chips with a rounds stepper
+      and the finish time. The session's length is its rounds' work time
+- [x] A break is a pause the session takes by itself at the end of a round:
+      nothing is judged or counted, the timer holds, the card turns yellow and
+      the distractions list reads "Don't count during a break". When the break
+      runs out the session waits; "Start round N" (Pause's place; "Next
+      round" in the status window) starts the next one. The last round ends
+      the session
+- [x] Round dots on the live card and the status window: finished rounds yellow
+      on a round, green on a break, the current one ink
+- [x] Round over card (yellow): "Round N done.", the session's goal, a tomato
+      per round (the new one drops in), the round's focused minutes, the voice,
+      Start break. Break over card (green): "Break over.", the voice, Start
+      round N. The backend emits `session-moment`; the main window plays a line
+      from the new Round over / Break over sets (system sets like Phone, never
+      a speaking tone; starter voices ship them)
+- [ ] Not built yet: Pomodoro in the report (rounds count), a closing line when
+      the last round ends, the voice page's Nudges / Moments grouping, the
+      practice run
+
 ## macOS pass (2026-10-25)
 
 - [x] Builds on macOS: `cargo test` 198 pass, 2 manual ignored; `npm run check`;
