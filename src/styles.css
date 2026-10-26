@@ -425,7 +425,8 @@ h1 {
   margin-top: 14px;
   border: var(--border);
   border-radius: var(--radius-control);
-  background: var(--sv-soft-white);
+  /* Fixed colours: the bar reads the same in both themes. */
+  background: #fff7df;
 }
 
 .live-strip i {
@@ -435,11 +436,11 @@ h1 {
 }
 
 .live-strip .strip-on {
-  background: var(--sv-green);
+  background: #a8eb37;
 }
 
 .live-strip .strip-off {
-  background: var(--sv-coral);
+  background: #ff684f;
 }
 
 .live-strip .strip-away {
@@ -452,7 +453,7 @@ h1 {
   bottom: 0;
   width: 2px;
   margin-left: -1px;
-  background: var(--sv-ink);
+  background: #101010;
 }
 
 /* So far above Distractions: numbers you glance at go above the list you rarely edit. */
