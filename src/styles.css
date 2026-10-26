@@ -416,19 +416,82 @@ h1 {
   line-height: 0.9;
 }
 
-.active-progress {
+/* The session so far: filled with what happened (work, distraction, away), empty for the
+   time left, an ink tick at now. */
+.live-strip {
+  position: relative;
   overflow: hidden;
-  height: 14px;
+  height: 20px;
   margin-top: 14px;
   border: var(--border);
   border-radius: var(--radius-control);
   background: var(--sv-soft-white);
 }
 
-.active-progress span {
-  display: block;
-  height: 100%;
+.live-strip i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.live-strip .strip-on {
+  background: var(--sv-green);
+}
+
+.live-strip .strip-off {
+  background: var(--sv-coral);
+}
+
+.live-strip .strip-away {
+  background: #8d8a80;
+}
+
+.live-strip .live-now {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
   background: var(--sv-ink);
+}
+
+/* So far above Distractions: numbers you glance at go above the list you rarely edit. */
+.session-side {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 14px;
+  min-width: 0;
+}
+
+.sofar-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.sofar-tile {
+  min-width: 0;
+  padding: 6px 8px;
+  border: var(--border);
+  border-radius: var(--radius-control);
+  background: var(--sv-soft-white);
+}
+
+.sofar-tile span {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sofar-tile strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 1.15rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
 }
 
 .session-rules-card {

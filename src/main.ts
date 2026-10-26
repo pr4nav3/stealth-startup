@@ -1134,8 +1134,9 @@ function paintLive(current: CurrentSession | null): void {
   if (overlayTime) {
     overlayTime.textContent = `${label} left`;
   }
+  paintSoFar(current);
   document
-    .querySelectorAll<HTMLElement>(".active-progress > span, .overlay-progress .progress > span")
+    .querySelectorAll<HTMLElement>(".overlay-progress .progress > span")
     .forEach((node) => {
       node.style.width = `${percent}%`;
     });
@@ -1291,9 +1292,6 @@ function renderSession(current: CurrentSession | null): string {
     `;
   }
 
-  const percent = current.duration_seconds
-    ? Math.min(100, Math.round((current.elapsed_seconds / current.duration_seconds) * 100))
-    : 0;
   return `
     <section class="active-session-page">
       <div class="active-session-grid">
@@ -1308,22 +1306,112 @@ function renderSession(current: CurrentSession | null): string {
             <strong>${formatDuration(current.remaining_seconds)}</strong>
             <span>Remaining</span>
           </div>
-          <div class="active-progress" aria-label="Session progress">
-            <span style="width: ${percent}%"></span>
-          </div>
+          <div class="live-strip" aria-label="Session so far: what happened, then the time left">${liveStripRuns(current)}</div>
         </section>
 
+        <div class="session-side">
+        <section class="panel session-sofar">
+          <p class="eyebrow">So far</p>
+          <div class="sofar-tiles">${renderSoFarTiles(current)}</div>
+        </section>
         <aside class="panel session-rules-card">
           <p class="eyebrow">Distractions</p>
           ${renderSessionDistractions(current.exceptions)}
           <button type="button" data-action="open-session-rules">Edit distractions</button>
         </aside>
+        </div>
       </div>
 
       ${renderActiveSessionControls(current)}
     </section>
     ${sessionRulesOpen ? renderSessionRulesModal() : ""}
   `;
+}
+
+/** The running session's saved spans (checkpointed every 15 s), fetched every few seconds
+ *  while the Session tab shows it. */
+let liveReport: SessionReport | null = null;
+let liveReportFetchedAt = 0;
+let liveReportFetching = false;
+
+/** The live bar and the So far numbers, repainted in place; a fresh report every 5 s. */
+function paintSoFar(current: CurrentSession): void {
+  const strip = document.querySelector<HTMLElement>(".live-strip");
+  if (!strip) {
+    return;
+  }
+  strip.innerHTML = liveStripRuns(current);
+  const tiles = document.querySelector<HTMLElement>(".sofar-tiles");
+  if (tiles) {
+    tiles.innerHTML = renderSoFarTiles(current);
+  }
+  if (liveReportFetching || Date.now() - liveReportFetchedAt < 5000) {
+    return;
+  }
+  liveReportFetching = true;
+  liveReportFetchedAt = Date.now();
+  void invoke<SessionReport>("get_session_report", { id: current.id })
+    .then((report) => {
+      liveReport = report;
+    })
+    .catch(() => {})
+    .finally(() => {
+      liveReportFetching = false;
+    });
+}
+
+/** What each span was, for the live bar: work, a distraction, away; a pause draws nothing. */
+function liveSpanClass(state: string): string {
+  if (stripOnTask(state)) {
+    return "strip-on";
+  }
+  if (stripOffTask(state)) {
+    return "strip-off";
+  }
+  return state === "idle" || state === "unknown" ? "strip-away" : "";
+}
+
+/** The bar spans the whole session: filled up to now with what happened, empty for the time
+ *  left. The newest saved span runs on to now, since the last checkpoint can be 15 s old. */
+function liveStripRuns(current: CurrentSession): string {
+  const total = Math.max(1, current.duration_seconds);
+  const spans = liveReport?.id === current.id ? liveReport.spans : [];
+  const runs: { cls: string; from: number; to: number }[] = [];
+  for (const span of spans) {
+    const cls = liveSpanClass(span.state);
+    const from = span.started_offset_seconds;
+    const to = from + span.seconds;
+    const last = runs[runs.length - 1];
+    if (last && last.cls === cls && from - last.to < 2) {
+      last.to = to;
+    } else if (cls) {
+      runs.push({ cls, from, to });
+    }
+  }
+  const last = runs[runs.length - 1];
+  if (last && current.elapsed_seconds > last.to) {
+    last.to = current.elapsed_seconds;
+  }
+  const pct = (seconds: number) => Math.min(100, (Math.max(0, seconds) / total) * 100);
+  const now = pct(current.elapsed_seconds);
+  return (
+    runs
+      .map((run) => `<i class="${run.cls}" style="left: ${pct(run.from).toFixed(2)}%; width: ${(pct(run.to) - pct(run.from)).toFixed(2)}%"></i>`)
+      .join("") + `<b class="live-now" style="left: ${now.toFixed(2)}%"></b>`
+  );
+}
+
+/** Focused so far, the longest unbroken stretch, and nudges: the report's numbers, live. */
+function renderSoFarTiles(current: CurrentSession): string {
+  const spans = liveReport?.id === current.id ? liveReport.spans : [];
+  const longest = Math.max(0, ...focusedStretches(spans));
+  const tile = (label: string, value: string, title: string) =>
+    `<div class="sofar-tile" title="${attr(title)}"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`;
+  return [
+    tile("Focused", formatHours(current.metrics.focused_seconds), "Time not spent on a distraction"),
+    tile("Longest", formatHours(longest), "Longest unbroken run of work"),
+    tile("Nudges", String(current.metrics.nudges), "Times Supervisor spoke up"),
+  ].join("");
 }
 
 /** The distractions, with the ones allowed for this session struck through. */
