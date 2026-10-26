@@ -481,7 +481,7 @@ impl VoiceWorker {
         if !parsed.ok {
             return Err(parsed
                 .error
-                .unwrap_or_else(|| "The voice engine could not make this line.".to_string()));
+                .unwrap_or_else(|| "The voice engine could not generate this line.".to_string()));
         }
         let phases = parsed.phases_ms.unwrap_or_default();
         Ok(JobOutcome {
@@ -1301,7 +1301,7 @@ fn generate_clips_inner(
     let reference = supervisor_storage_file(&root, &input.reference_audio_path, "reference audio")?;
     // Size check only: hashing 1.9 GB here added ten seconds to every clip. Install verifies.
     if !model_status_for(&root, false).installed || !voice_runtime::status(&root).installed {
-        return Err("Download the voice engine before making lines.".to_string());
+        return Err("Download the voice engine before generating lines.".to_string());
     }
     ensure_generation_ram(worker.is_loaded())?;
 
@@ -1667,7 +1667,7 @@ fn download_model_files(
 fn merge_generated_clips(profile_dir: &Path, staging_dir: &Path) -> Result<(), String> {
     let staged_clips = staging_dir.join("clips");
     if !staged_clips.is_dir() {
-        return Err("The voice engine finished without making the line. Try again.".to_string());
+        return Err("The voice engine finished without generating the line. Try again.".to_string());
     }
 
     let clips_dir = profile_dir.join("clips");
@@ -1710,7 +1710,7 @@ fn clip_phrase_id(stem: &str) -> &str {
 fn replace_generated_clips(profile_dir: &Path, staging_dir: &Path) -> Result<(), String> {
     let staged_clips = staging_dir.join("clips");
     if !staged_clips.is_dir() {
-        return Err("The voice engine finished without making the line. Try again.".to_string());
+        return Err("The voice engine finished without generating the line. Try again.".to_string());
     }
 
     let clips_dir = profile_dir.join("clips");

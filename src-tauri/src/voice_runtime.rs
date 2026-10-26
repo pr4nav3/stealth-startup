@@ -147,7 +147,7 @@ pub fn worker_launch(root: &Path) -> Result<WorkerLaunch, String> {
     }
 
     let Some((_install, executable)) = installed_runtime(root)? else {
-        return Err("Download the voice engine before making lines.".to_string());
+        return Err("Download the voice engine before generating lines.".to_string());
     };
 
     Ok(WorkerLaunch {
