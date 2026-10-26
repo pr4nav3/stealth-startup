@@ -39,8 +39,8 @@ const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const STARTER_PROFILES: &[(&str, &str, &str)] = &[
-    ("derek", "Starter Male", "derek.wav"),
-    ("elise", "Starter Female", "elise.wav"),
+    ("derek", "Derek", "derek.wav"),
+    ("elise", "Elise", "elise.wav"),
 ];
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
@@ -2837,20 +2837,24 @@ fn starter_resource(relative: &str, app: Option<&AppHandle>) -> Option<PathBuf> 
     bundled.exists().then_some(bundled)
 }
 
-/// Written once a starter voice's bundled clips are in, so a clip the user deletes or
-/// regenerates stays their choice instead of coming back on the next listing.
+/// The bundled lines already offered to a starter voice, one phrase id per line, so a clip the
+/// user deletes or regenerates stays their choice, while a line added in a later version still
+/// arrives.
 const STARTER_CLIPS_MARKER: &str = "starter-clips-seeded";
 
 /// The bundled phrase clips (`voices/<id>/<phrase_id>.wav`), so a first session with a starter
-/// voice already speaks. A clip the profile already has for a phrase is kept.
+/// voice already speaks. Each is offered once; a clip the profile already has for it is kept.
 fn seed_starter_clips(dir: &Path, id: &str, app: Option<&AppHandle>) {
-    let marker = dir.join(STARTER_CLIPS_MARKER);
-    if marker.exists() {
-        return;
-    }
     let Some(entries) = starter_resource(id, app).and_then(|src| fs::read_dir(src).ok()) else {
         return;
     };
+    let marker = dir.join(STARTER_CLIPS_MARKER);
+    let mut offered: std::collections::BTreeSet<String> = fs::read_to_string(&marker)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let before = offered.len();
     let clips = dir.join("clips");
     if fs::create_dir_all(&clips).is_err() {
         return;
@@ -2866,15 +2870,20 @@ fn seed_starter_clips(dir: &Path, id: &str, app: Option<&AppHandle>) {
         ) else {
             continue;
         };
-        if existing.iter().any(|clip| clip_path_matches(clip, phrase)) {
+        if offered.contains(phrase) {
             continue;
         }
-        if fs::copy(&path, clips.join(name)).is_err() {
-            // Try again next time rather than mark a half-done copy as finished.
-            return;
+        let have = existing.iter().any(|clip| clip_path_matches(clip, phrase));
+        // A failed copy is not marked, so it is tried again next time.
+        if have || fs::copy(&path, clips.join(name)).is_ok() {
+            offered.insert(phrase.to_string());
         }
     }
-    let _ = fs::write(marker, b"");
+    if offered.len() != before {
+        let list: Vec<&str> = offered.iter().map(String::as_str).collect();
+        let _ = fs::write(marker, list.join("
+"));
+    }
 }
 
 fn seed_starter_profiles(root: &Path, app: Option<&AppHandle>) {
@@ -3348,6 +3357,16 @@ mod tests {
         fs::remove_file(clips.join("stern_close_it_now.wav")).unwrap();
         seed_starter_profiles(&root, None);
         assert!(!clips.join("stern_close_it_now.wav").exists());
+
+        // A line bundled by a later version still arrives.
+        let marker = dir.join(STARTER_CLIPS_MARKER);
+        let without: Vec<String> = fs::read_to_string(&marker).unwrap().lines()
+            .filter(|line| *line != "phone_eyes_up").map(str::to_string).collect();
+        fs::write(&marker, without.join("
+")).unwrap();
+        fs::remove_file(clips.join("phone_eyes_up.wav")).unwrap();
+        seed_starter_profiles(&root, None);
+        assert!(clips.join("phone_eyes_up.wav").exists());
         let _ = fs::remove_dir_all(root);
     }
 

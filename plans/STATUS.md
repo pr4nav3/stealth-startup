@@ -47,6 +47,12 @@ pass from Windows, and what is left for a release, is
       after), the task and time left, and Back to my task / Allow once / Always
       allow. The main window plays the audio and tells the card through
       `nudge-voice` / `nudge-control` events
+- [x] Phone lines: a bundled Phone set (four lines) that every voice can
+      generate; a phone nudge plays from it, else from the voice's tone. It is
+      never a speaking tone and never counts toward a voice being ready.
+      Starter voices ship its clips; new bundled lines reach existing installs
+      (the seed marker lists each line it offered). Starter voices are named
+      Derek and Elise on screen, so the card reads "Elise is speaking"
 
 ## macOS pass (2026-10-25)
 

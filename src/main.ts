@@ -500,7 +500,9 @@ const starterRules: AppRule[] = ["youtube.com", "netflix.com", "tiktok.com", "in
   }),
 );
 
-const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern"];
+/** The lines a phone nudge plays: a set every voice can have, never a voice's speaking tone. */
+const PHONE_TONE: VoiceTone = "phone";
+const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern", PHONE_TONE];
 /** The editor's "New set…" choice. */
 
 const phraseBank: PhraseDefinition[] = [
@@ -524,6 +526,10 @@ const phraseBank: PhraseDefinition[] = [
   { id: "stern_you_picked_this", tone: "stern", text: "You picked this. Finish it." },
   { id: "stern_no_negotiating", tone: "stern", text: "Back to work. No negotiating." },
   { id: "stern_want_it_back", tone: "stern", text: "Every minute here is one you'll want back." },
+  { id: "phone_down_back_to_it", tone: "phone", text: "Phone down. Back to it." },
+  { id: "phone_it_can_wait", tone: "phone", text: "Put the phone away. It can wait." },
+  { id: "phone_i_can_see_it", tone: "phone", text: "I can see your phone." },
+  { id: "phone_eyes_up", tone: "phone", text: "Wrong screen. Eyes up." },
 ];
 
 const noneVoice: VoiceOption = {
@@ -541,8 +547,8 @@ const STARTER_PROFILE_IDS = ["derek", "elise"] as const;
 
 function starterVoiceOptions(): VoiceOption[] {
   return [
-    starterVoiceCard("starter-male", "derek", "Starter Male", "Low-friction voice for first-run sessions."),
-    starterVoiceCard("starter-female", "elise", "Starter Female", "Warmer starter voice with the same lines."),
+    starterVoiceCard("starter-male", "derek", "Derek", "Starter voice. Its lines come ready."),
+    starterVoiceCard("starter-female", "elise", "Elise", "Warmer starter voice. Its lines come ready."),
   ];
 }
 
@@ -2593,7 +2599,7 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
       </div>
     `;
   }
-  const useTone = sameTone(viewed, speaks)
+  const useTone = sameTone(viewed, speaks) || sameTone(viewed, PHONE_TONE)
     ? ""
     : `<button class="small-button" type="button" data-action="use-tone" data-tone="${attr(viewed)}" ${voice.profile && voiceBusy === null ? "" : "disabled"}>Use this tone</button>`;
   if (phrases.length === 0) {
@@ -2609,6 +2615,7 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
     return `
       <div class="clips-foot">
         <div class="clips-foot-actions"><span class="clips-hint is-ready">All ${phrases.length} lines ready.</span>${useTone}${addLine}</div>
+        ${phoneHint(viewed)}
       </div>
     `;
   }
@@ -2629,6 +2636,7 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
         ${addLine}
       </div>
       <span class="clips-hint ${failed && !tileBad ? "is-bad" : ""}" role="${failed ? "alert" : "status"}">${escapeHtml(hint)}</span>
+      ${phoneHint(viewed)}
     </div>
   `;
 }
@@ -6413,7 +6421,7 @@ async function playNudge(current: CurrentSession | null): Promise<void> {
   if (!current || current.status !== "active" || draft.voiceId === "none") {
     return;
   }
-  const clip = selectedNudgeClip(current.metrics.nudges);
+  const clip = selectedNudgeClip(current.metrics.nudges, current.camera.phone);
   if (!clip) {
     return;
   }
@@ -6448,13 +6456,16 @@ function announceNudge(speaking: boolean): void {
   }
 }
 
-/** Lines from the voice's own tone; any clip at all only when that tone has none ready. */
-function selectedNudgeClip(nudgeCount: number): VoiceClipSummary | null {
+/** Lines from the voice's own tone (for a phone, its Phone lines first); any clip at all only
+ *  when that tone has none ready. */
+function selectedNudgeClip(nudgeCount: number, phone = false): VoiceClipSummary | null {
   const voice = selectedVoice();
-  const phrases = tonePhrases(voiceTone(voice));
-  const ready = phrases
-    .map((phrase) => clipForPhrase(voice, phrase))
-    .filter((clip): clip is VoiceClipSummary => Boolean(clip));
+  const readyIn = (tone: VoiceTone) =>
+    tonePhrases(tone)
+      .map((phrase) => clipForPhrase(voice, phrase))
+      .filter((clip): clip is VoiceClipSummary => Boolean(clip));
+  const phoneReady = phone ? readyIn(PHONE_TONE) : [];
+  const ready = phoneReady.length > 0 ? phoneReady : readyIn(voiceTone(voice));
   if (ready.length === 0) {
     const clips = voice.profile?.clips ?? [];
     if (clips.length === 0) {
@@ -6878,7 +6889,7 @@ function isCustomTone(tone: VoiceTone): boolean {
 
 /** The tone a voice speaks in sessions: its saved one while that tone exists, else the first. */
 function profileTone(profile: VoiceProfileSummary | null): VoiceTone {
-  const tones = phraseToneOrder();
+  const tones = phraseToneOrder().filter((tone) => !sameTone(tone, PHONE_TONE));
   const saved = profile?.tone;
   return (saved && tones.find((tone) => sameTone(tone, saved))) || tones[0] || toneOrder[0];
 }
@@ -7195,8 +7206,17 @@ function formatBytes(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
+/** What the Phone set is for, under its lines. */
+function phoneHint(tone: VoiceTone): string {
+  return sameTone(tone, PHONE_TONE)
+    ? `<span class="clips-hint">Played when the camera sees your phone. Without them, the voice's own tone speaks.</span>`
+    : "";
+}
+
 function toneLabel(tone: VoiceTone): string {
   switch (tone) {
+    case "phone":
+      return "Phone";
     case "gentle":
       return "Gentle";
     case "mom":

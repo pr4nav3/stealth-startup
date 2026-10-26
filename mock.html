@@ -61,8 +61,8 @@
       const dl = { polls: 0 };
       const clipFor = (phraseId) => ({clip_id: "mum_" + phraseId, phrase_id: phraseId, file_name: phraseId + ".wav", path: "c:/clips/" + phraseId + ".wav", bytes: 4096});
       const profiles = [
-        {profile_id:"derek",display_name:"Starter Male",profile_dir:"",reference_path:"c:/d.wav",reference_retained:true,tone:null,clips:[]},
-        {profile_id:"elise",display_name:"Starter Female",profile_dir:"",reference_path:"c:/e.wav",reference_retained:true,tone:null,clips:[]},
+        {profile_id:"derek",display_name:"Derek",profile_dir:"",reference_path:"c:/d.wav",reference_retained:true,tone:null,clips:[]},
+        {profile_id:"elise",display_name:"Elise",profile_dir:"",reference_path:"c:/e.wav",reference_retained:true,tone:null,clips:[]},
         {profile_id:"mum",display_name:"Mum",profile_dir:"",reference_path:"c:/x.wav",reference_retained:true,tone: q.get("tone") || "mom",clips: q.get("clips") ? q.get("clips").split(",").map(clipFor) : []},
       ];
       if (q.get("dad") === "1") profiles.push({profile_id:"dad",display_name:"Dad",profile_dir:"",reference_path:"c:/y.wav",reference_retained:true,tone:"stern",clips:[]});

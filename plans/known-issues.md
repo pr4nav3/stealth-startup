@@ -67,7 +67,7 @@ rules apply from the next sample and never change a recorded session. See `plans
 
 **History v4, Voice v2 and the mock agree; the app has not been checked.** Every screen was rendered through `mock.html` with fixtures, not against a real database. Places most likely to differ from the mock: the month picker's `get_focus_days` on a sparse history, session rows' miniature timelines on long sessions, the voice page's status tiles when the worker is really down.
 
-**The distraction card shows at the nudge time, not at 8 seconds** (2026-10-25). Before, the card came up as soon as a distraction passed the short grace and the voice followed at the strictness time; now both come at the strictness time. The live Session tab still says Distracted from the short grace. A phone card speaks the voice's next tone line, which may mention a tab; phone-specific lines are not written yet. The voice panel appears only when a line actually played for that card (none picked, or none generated, leaves it out). The card's audio comes from the main window, so it needs the main window's webview alive (it is, hidden or not).
+**The distraction card shows at the nudge time, not at 8 seconds** (2026-10-25). Before, the card came up as soon as a distraction passed the short grace and the voice followed at the strictness time; now both come at the strictness time. The live Session tab still says Distracted from the short grace. A phone card speaks from the voice's Phone lines (four, bundled; starter voices ship them) and falls back to the voice's own tone when that voice has none generated. The voice panel appears only when a line actually played for that card (none picked, or none generated, leaves it out). The card's audio comes from the main window, so it needs the main window's webview alive (it is, hidden or not).
 
 **PDF export is unimplemented.** Its nonfunctional button and empty handler were removed.
 
@@ -75,8 +75,8 @@ rules apply from the next sample and never change a recorded session. See `plans
 
 ## Voice
 
-**Starter clips are machine-checked, not listened to.** Since 2026-10-25 `derek` and `elise` ship
-all 20 bundled lines (`src-tauri/voices/<id>/`), copied into the starter profiles once. Each was
+**Starter clips are machine-checked, not listened to.** Since 2026-10-25 the starter voices (named Derek
+and Elise on screen) ship all 24 bundled lines, the 20 tone lines plus 4 Phone lines (`src-tauri/voices/<id>/`), copied into the starter profiles once. Each was
 picked from four seeded takes by length against its words; nobody has heard them. A user who
 edited a bundled line's words before this version keeps the original words in that clip until
 they regenerate it.
