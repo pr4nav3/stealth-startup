@@ -3,8 +3,8 @@
 Living log of what is done and what is left. Update this file when an item
 moves, rather than appending a second tracker.
 
-Last updated: 2026-10-25 evening (`fix/post-mac-review`, branched from
-`app-v2-simplified-rules` at `aa9a92a`)
+Last updated: 2026-10-25 night (`app-v2-simplified-rules` at `ab3c544`, merged
+and pushed; `main` points at the same commit)
 
 Product OS targets: **macOS and Windows**. Linux is a workshop only, not a V1
 ship target. Everything through 2026-10-24 was written and run on Windows. On
@@ -108,9 +108,11 @@ pass from Windows, and what is left for a release, is
 ## Branches
 
 **`app-v2-simplified-rules` is the baseline**, and `origin/main` points at the
-same commit (`aa9a92a`, fast-forwarded by the Mac pass). Work after the Mac
-pass is on **`fix/post-mac-review`**, to be merged into the baseline with a
-plain merge.
+same commit. Everything below is merged into it: the post-Mac review
+(`fix/post-mac-review`), the plain-language pass (`copy/plain-language`), the
+speaking distraction card (`feat/orb-card`) and a tried-then-reverted day card
+change (`feat/day-card-last-session`; the strip stays the whole day). Those
+branches can be deleted.
 
 On 2026-10-25 the remote history was rewritten once to replace a Mac hostname
 author address with the gmail one; no tree or message changed. Every older
@@ -285,9 +287,9 @@ Needs a person (details in `plans/review-2026-10-25.md`):
 
 Agent work, no sign-off needed:
 
-7. Merge `fix/post-mac-review` into `app-v2-simplified-rules` once reviewed,
-   fast-forward `main`, delete the `feat/*`, `test-features` and `backup/*`
-   branches.
+7. Delete the merged branches: `fix/post-mac-review`, `copy/plain-language`,
+   `feat/orb-card`, `feat/day-card-last-session`, the old `feat/*`,
+   `test-features` and `backup/*`.
 8. Freeze the Windows webcam worker (`.venv-webcam` needs PyInstaller from
    `webcam_bakeoff/build-requirements.txt`) and build the NSIS installer with
    `tauri.bundle.conf.json`, so the Windows decision only has to pick a channel.
@@ -321,8 +323,8 @@ Agent work, no sign-off needed:
 
 Every shipped item has to work as intended on **Windows** and on **macOS**.
 
-- `cargo test` in `src-tauri`: Windows 210 tests, 204 pass, 6 ignored
-  (2026-10-25, `fix/post-mac-review`); macOS 207 pass at `aa9a92a`
+- `cargo test` in `src-tauri`: Windows 211 tests, 205 pass, 6 ignored
+  (2026-10-25, `ab3c544`); macOS 207 pass at `aa9a92a`
   (Mac handoff). CI (`.github/workflows/ci.yml`) runs both on every push
 - `npm run check` (tsc + vite build)
 - Browser mock: `npm run dev:ui`, open `http://127.0.0.1:1420/mock.html`

@@ -5,11 +5,14 @@ branch `app-v2-simplified-rules`; `origin/main` was fast-forwarded to it the sam
 `plans/STATUS.md`. Holes to expect: `plans/known-issues.md`.
 
 **After the pass (2026-10-25, Windows):** `plans/review-2026-10-25.md` reviewed every Mac
-commit and fixed, on `fix/post-mac-review`: bundled starter clips (`src-tauri/voices/<id>/`),
-the silent Voice page on a failed clip, clip time estimates, and the empty Home scroll
-(`scripts/mac-ui-check/assert.py` now allows Home no scroll at all, so rerun the WebKit check on
-the Mac). A Mac agent should pull that branch, rerun `cargo test` and `check.sh`, and hear one
-starter clip play in a session.
+commit and fixed: bundled starter clips (`src-tauri/voices/<id>/`), the silent Voice page on a
+failed clip, clip time estimates, and the empty Home scroll (`scripts/mac-ui-check/assert.py` now
+allows Home no scroll at all). The same night the distraction card was rebuilt: it appears with
+the first nudge at the strictness time, its voice panel's orb is the play button (bars while the
+line plays), and the card window is 420 px wide. All of it is merged into the baseline. On the
+Mac: pull, rerun `cargo test` and `check.sh`, then in a real session check that a starter voice
+speaks with the card, the bars move only while it speaks, the orb stops and replays the line,
+and the card fits its window (macOS counts the title bar in the window height).
 
 **First Mac pass (2026-10-25).** The app compiles, `cargo test` passes (198, 2 manual
 ignored), `npm run check` passes, and a debug `Supervisor.app` runs with the V2 UI. Section 0

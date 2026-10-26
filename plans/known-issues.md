@@ -3,7 +3,7 @@
 Last updated: 2026-10-25
 
 Starter list when swapping agents. Baseline is **`app-v2-simplified-rules`**; `origin/main` was
-fast-forwarded to it on 2026-10-25. Work after the Mac pass is on `fix/post-mac-review`.
+fast-forwarded to it on 2026-10-25, and everything since is merged into both.
 
 Work tracker: `plans/STATUS.md`. This file is the holes to check, not the roadmap.
 
