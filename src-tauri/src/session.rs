@@ -266,7 +266,22 @@ impl SessionManager {
             return;
         }
         let strictness = input.strictness.unwrap_or(self.settings.default_strictness);
-        let duration_seconds = input.duration_minutes.clamp(5, 180) * 60;
+        let pomodoro = input.pomodoro.map(|plan| Pomodoro {
+            work_seconds: plan.work_minutes.clamp(5, 120) * 60,
+            break_seconds: plan.break_minutes.clamp(1, 60) * 60,
+            rounds: plan.rounds.clamp(1, 12),
+            round: 1,
+            break_until: None,
+            break_over: false,
+            focused_at_round_start: 0,
+            rounds_focused_seconds: Vec::new(),
+            moments: 0,
+        });
+        // A Pomodoro session lasts its rounds' work; the breaks are held time, like a pause.
+        let duration_seconds = match &pomodoro {
+            Some(plan) => plan.work_seconds * u64::from(plan.rounds),
+            None => input.duration_minutes.clamp(5, 180) * 60,
+        };
         let goal = clean_goal(input.goal);
         let rules = self.rules();
         let exceptions = clean_rules(input.exceptions.unwrap_or_default());
@@ -281,15 +296,14 @@ impl SessionManager {
                 }),
             None => 0,
         };
-        self.current = Some(Session::new(
-            session_id,
-            goal,
-            duration_seconds,
-            strictness,
-            rules,
-            exceptions,
-            now,
-        ));
+        let mut session = Session::new(session_id, goal, duration_seconds, strictness, rules, exceptions, now);
+        if let Some(plan) = pomodoro {
+            let detail = format!("{}/{}x{}", plan.work_seconds / 60, plan.break_seconds / 60, plan.rounds);
+            session.persist_event(now, "pomodoro", Some(&detail), self.storage.as_ref());
+            session.persist_event(now, "round_start", Some("1"), self.storage.as_ref());
+            session.pomodoro = Some(plan);
+        }
+        self.current = Some(session);
         self.settings.status_window_on_top = true;
         self.save_settings();
     }
@@ -377,7 +391,7 @@ impl SessionManager {
 
     pub fn resume(&mut self, now: Duration) -> SessionSnapshot {
         if let Some(session) = self.current.as_mut() {
-            session.resume(now, self.storage.as_ref());
+            session.start_next_round(now, self.storage.as_ref());
         }
         self.snapshot(now)
     }
@@ -388,7 +402,7 @@ impl SessionManager {
             return;
         };
         match session.status {
-            SessionStatus::Paused => session.resume(now, storage),
+            SessionStatus::Paused => session.start_next_round(now, storage),
             SessionStatus::Active | SessionStatus::Snoozed => session.pause(now, storage),
             _ => {}
         }
@@ -580,6 +594,21 @@ struct Session {
     /// When window reads started failing, while they still are.
     capture_failing_since: Option<Duration>,
     camera: Camera,
+    pomodoro: Option<Pomodoro>,
+}
+
+#[derive(Debug)]
+struct Pomodoro {
+    work_seconds: u64,
+    break_seconds: u64,
+    rounds: u32,
+    round: u32,
+    /// While on a break: when it ends (same clock as `now`, in seconds).
+    break_until: Option<u64>,
+    break_over: bool,
+    focused_at_round_start: u64,
+    rounds_focused_seconds: Vec<u64>,
+    moments: u64,
 }
 
 /// What the webcam last said. Only flags and times: frames never reach the session.
@@ -644,6 +673,7 @@ impl Session {
             present_at: now,
             capture_failing_since: None,
             camera: Camera::default(),
+            pomodoro: None,
         }
     }
 
@@ -651,6 +681,7 @@ impl Session {
         if self.status == SessionStatus::Paused {
             self.checkpoint_open_span(now, storage);
         }
+        self.tick_pomodoro(now, storage);
         if self.is_recording() {
             self.update_phone(now, storage);
         }
@@ -662,6 +693,81 @@ impl Session {
             self.unmute();
             self.push_event(now, "Nudges unmuted", "WATCHING");
         }
+    }
+
+    fn tick_pomodoro(&mut self, now: Duration, storage: Option<&SessionStorage>) {
+        let elapsed = self.raw_timer_elapsed_seconds(now);
+        let recording = self.is_recording();
+        let Some(plan) = self.pomodoro.as_ref() else {
+            return;
+        };
+        // The last round's end is the session's end (`is_expired`), not a break.
+        if recording && plan.round < plan.rounds && elapsed >= plan.work_seconds * u64::from(plan.round) {
+            // Pause first: it accounts the round's last second before its focus is read.
+            self.pause(now, storage);
+            let focused = self.metrics.focused_seconds;
+            let Some(plan) = self.pomodoro.as_mut() else {
+                return;
+            };
+            plan.rounds_focused_seconds.push(focused.saturating_sub(plan.focused_at_round_start));
+            plan.break_until = Some(now.as_secs() + plan.break_seconds);
+            plan.break_over = false;
+            plan.moments += 1;
+            let round = plan.round.to_string();
+            self.persist_event(now, "round_over", Some(&round), storage);
+            return;
+        }
+        let Some(plan) = self.pomodoro.as_mut() else {
+            return;
+        };
+        if let Some(until) = plan.break_until {
+            if !plan.break_over && now.as_secs() >= until {
+                plan.break_over = true;
+                plan.moments += 1;
+                self.push_event(now, "Break over", "POMODORO");
+            }
+        }
+    }
+
+    /// Starts the next round after a break (early or on time). Elsewhere it is a plain resume.
+    fn start_next_round(&mut self, now: Duration, storage: Option<&SessionStorage>) {
+        let focused = self.metrics.focused_seconds;
+        let next = match self.pomodoro.as_mut() {
+            Some(plan) if plan.break_until.is_some() => {
+                plan.break_until = None;
+                plan.break_over = false;
+                plan.round += 1;
+                plan.focused_at_round_start = focused;
+                Some(plan.round.to_string())
+            }
+            _ => None,
+        };
+        self.resume(now, storage);
+        if let Some(round) = next {
+            self.persist_event(now, "round_start", Some(&round), storage);
+        }
+    }
+
+    fn pomodoro_status(&self, now: Duration) -> Option<PomodoroStatus> {
+        let plan = self.pomodoro.as_ref()?;
+        let (phase, phase_remaining_seconds) = match plan.break_until {
+            Some(_) if plan.break_over => ("break_over", 0),
+            Some(until) => ("break", until.saturating_sub(now.as_secs())),
+            None => (
+                "work",
+                (plan.work_seconds * u64::from(plan.round)).saturating_sub(self.timer_elapsed_seconds(now)),
+            ),
+        };
+        Some(PomodoroStatus {
+            round: plan.round,
+            rounds: plan.rounds,
+            work_seconds: plan.work_seconds,
+            break_seconds: plan.break_seconds,
+            phase,
+            phase_remaining_seconds,
+            rounds_focused_seconds: plan.rounds_focused_seconds.clone(),
+            moments: plan.moments,
+        })
     }
 
     /// Muted sessions record exactly like active ones; only nudges stop.
@@ -1116,6 +1222,7 @@ impl Session {
             focus: self.latest_focus.clone(),
             exceptions: self.exceptions.clone(),
             camera: self.camera_status(now),
+            pomodoro: self.pomodoro_status(now),
         }
     }
 
@@ -1412,6 +1519,35 @@ pub struct StartSessionInput {
     pub strictness: Option<Strictness>,
     /// Distractions allowed for this session.
     pub exceptions: Option<Vec<AppRule>>,
+    /// Rounds of work with breaks between them; the session is the rounds' work time.
+    #[serde(default)]
+    pub pomodoro: Option<PomodoroInput>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PomodoroInput {
+    pub work_minutes: u64,
+    pub break_minutes: u64,
+    pub rounds: u32,
+}
+
+/// Where a Pomodoro session is. A break is a pause the session takes by itself: nothing is
+/// judged or counted during it, and the timer holds. When the break runs out the session waits
+/// for the user to start the next round, so a round never starts with nobody at the desk.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PomodoroStatus {
+    pub round: u32,
+    pub rounds: u32,
+    pub work_seconds: u64,
+    pub break_seconds: u64,
+    /// "work", "break", or "break_over" (the break ran out; waiting for the next round).
+    pub phase: &'static str,
+    /// Until the break (in a round) or until the break ends (in a break).
+    pub phase_remaining_seconds: u64,
+    /// Focused seconds in each finished round, in order.
+    pub rounds_focused_seconds: Vec<u64>,
+    /// Counts each round end and break end, so the app plays one line per moment.
+    pub moments: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1521,6 +1657,8 @@ pub struct CurrentSession {
     /// Distractions allowed for this session.
     pub exceptions: Vec<AppRule>,
     pub camera: CameraStatus,
+    /// Present for Pomodoro sessions.
+    pub pomodoro: Option<PomodoroStatus>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -1926,6 +2064,7 @@ mod tests {
                 duration_minutes: 25,
                 strictness: Some(Strictness::Strict),
                 exceptions: Some(vec![AppRule::website("youtube.com")]),
+                pomodoro: None,
             },
             seconds(0),
         );
@@ -2916,7 +3055,43 @@ mod tests {
             duration_minutes,
             strictness: Some(strictness),
             exceptions: None,
+            pomodoro: None,
         }
+    }
+
+    #[test]
+    fn a_pomodoro_breaks_between_rounds_and_waits_for_the_next_one() {
+        let mut manager = test_manager();
+        let mut plan = input("Lab", Strictness::Normal);
+        plan.pomodoro = Some(PomodoroInput { work_minutes: 5, break_minutes: 1, rounds: 2 });
+        manager.start(plan, seconds(0));
+        let pomodoro = |manager: &SessionManager, t| manager.snapshot(seconds(t)).current.unwrap().pomodoro.unwrap();
+        for t in 0..300 {
+            record(&mut manager, sample("Code", "lab.md", 0.0), seconds(t));
+        }
+        assert_eq!(pomodoro(&manager, 299).phase, "work");
+        // Round 1 ends at 5 min: the break starts by itself and holds the timer.
+        record(&mut manager, sample("Code", "lab.md", 0.0), seconds(300));
+        let at_break = pomodoro(&manager, 300);
+        assert_eq!((at_break.phase, at_break.round, at_break.moments), ("break", 1, 1));
+        assert_eq!(at_break.rounds_focused_seconds, vec![300]);
+        assert_eq!(manager.snapshot(seconds(300)).status, SessionStatus::Paused);
+        // Distractions during the break are not judged.
+        for t in 301..400 {
+            record(&mut manager, site("youtube.com", 0.0), seconds(t));
+        }
+        let waiting = pomodoro(&manager, 400);
+        assert_eq!((waiting.phase, waiting.moments), ("break_over", 2));
+        assert_eq!(manager.snapshot(seconds(400)).current.unwrap().metrics.distracted_seconds, 0);
+        // The next round starts when asked, and the session ends with it.
+        manager.resume(seconds(400));
+        assert_eq!(pomodoro(&manager, 401).round, 2);
+        for t in 400..=700 {
+            record(&mut manager, sample("Code", "lab.md", 0.0), seconds(t));
+        }
+        let snapshot = manager.snapshot(seconds(701));
+        assert!(snapshot.current.is_none(), "the last round ends the session");
+        assert_eq!(snapshot.history[0].focus_seconds, 600);
     }
 
     fn record(

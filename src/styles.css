@@ -5794,3 +5794,212 @@ dt,
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+
+/* ---------- Pomodoro ---------- */
+
+/* Start screen: Timer or Pomodoro, drawn like the app's tabs. */
+.mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mode-tabs button {
+  min-height: 38px;
+}
+
+.mode-tabs button.active,
+.pomodoro-rhythms button.active {
+  background: var(--sv-yellow);
+  color: var(--sv-colored-ink);
+}
+
+/* Work / break chips on the left, rounds on the right: one line in the slider's place. */
+.pomodoro-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.pomodoro-rhythms {
+  display: grid;
+  flex: 1;
+  grid-template-columns: repeat(3, minmax(76px, 1fr));
+  gap: 8px;
+  max-width: 380px;
+}
+
+.pomodoro-rhythms button {
+  min-height: 40px;
+}
+
+.pomodoro-rounds {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pomodoro-rounds b {
+  min-width: 18px;
+  font-size: 1.05rem;
+  text-align: center;
+}
+
+.pomodoro-rounds button {
+  width: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+}
+
+.pomodoro-done {
+  margin: 6px 0 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
+}
+
+/* A break: yellow, like a pause, and the time off it says so. */
+.state-break,
+.active-session-grid .state-break,
+.overlay-shell .state-break {
+  background: #ffcf31;
+  color: var(--sv-colored-ink);
+}
+
+.session-break-note {
+  margin: 4px 0 0;
+  font-size: var(--sv-type-2);
+}
+
+/* Round dots. Finished rounds take the colour opposite the slab: yellow on a round, green on a
+   yellow slab (a break, a pause). The current round is ink. */
+.eyebrow-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.round-dots {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.overlay-slab .round-dots {
+  margin: 6px 0 2px;
+}
+
+.round-dots i {
+  width: 17px;
+  height: 17px;
+  border: 2px solid var(--sv-ink);
+  border-radius: 50%;
+  background: #fff7df;
+}
+
+.round-dots i.done {
+  background: var(--sv-yellow);
+}
+
+:is(.state-break, .state-paused, .state-suspicious) .round-dots i.done {
+  background: var(--sv-green);
+}
+
+.round-dots i.now {
+  background: var(--sv-ink);
+}
+
+/* The round-over and break-over cards: the distraction card's shape, yellow and green. */
+.interrupt-alert.moment-round-over {
+  background: var(--sv-yellow);
+}
+
+.interrupt-alert.moment-break-over {
+  background: var(--sv-green);
+}
+
+.interrupt-alert .moment-title {
+  margin-top: 2px;
+  font-size: 2.3rem;
+}
+
+.interrupt-alert .moment-goal {
+  margin: 6px 0 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.interrupt-alert .moment-focused {
+  margin: 8px 0 0;
+  font-size: 1.05rem;
+}
+
+.moment-focused b {
+  font-size: 1.6rem;
+  letter-spacing: -0.03em;
+}
+
+.moment-gap {
+  height: 16px;
+}
+
+/* A tomato per round, the paper Pomodoro: red for done, an outline for the rest. The newest
+   one drops in. */
+.tomatoes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.tomato {
+  position: relative;
+  width: 42px;
+  height: 38px;
+  border: 2.5px solid var(--sv-ink);
+  border-radius: 50% 50% 46% 46%;
+}
+
+.tomato::before {
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  width: 10px;
+  height: 9px;
+  margin-left: -5px;
+  border: 2px solid var(--sv-ink);
+  border-radius: 3px;
+  background: var(--sv-green);
+  content: "";
+}
+
+.tomato.is-done {
+  background: var(--sv-coral);
+}
+
+.tomato.is-new {
+  animation: tomato-drop 0.45s ease-out;
+}
+
+@keyframes tomato-drop {
+  0% {
+    opacity: 0;
+    transform: translateY(-14px) scale(1.25);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(0) scale(0.95);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tomato.is-new {
+    animation: none;
+  }
+}

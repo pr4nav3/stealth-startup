@@ -43,6 +43,12 @@ const STATES = [
   ["trends", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, '[data-action="open-trends"]'); }],
   ["overlay-corner", M + "?view=overlay&live=1", null, 228, 400],
   ["overlay-interrupt", M + "?view=overlay&live=1&drift=1", null, 420, 600],
+  ["preflight-pomodoro", M, async (d) => { click(d, '[data-action="open-preflight"]'); await sleep(300); click(d, '[data-mode="pomodoro"]'); }],
+  ["live-pomodoro-round", M + "?live=1&pomo=work", null],
+  ["live-pomodoro-break", M + "?live=1&pomo=break", null],
+  ["overlay-round-over", M + "?view=overlay&live=1&pomo=break&voice=1&speak_ms=60000", () => sleep(1500), 420, 600],
+  ["overlay-break-over", M + "?view=overlay&live=1&pomo=break_over&voice=1&speak_ms=60000", () => sleep(1500), 420, 600],
+  ["overlay-corner-break", M + "?view=overlay&live=1&pomo=break", (d) => click(d, '[data-action="dismiss-moment"]'), 228, 400],
   ["overlay-interrupt-voice", M + "?view=overlay&live=1&drift=1&voice=1&speak_ms=60000", () => sleep(1500), 420, 600],
   ["overlay-phone-voice", M + "?view=overlay&live=1&phone=1&voice=1&speak_ms=60000", () => sleep(1500), 420, 600],
 ];
