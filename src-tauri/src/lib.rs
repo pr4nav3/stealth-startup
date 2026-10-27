@@ -283,6 +283,22 @@ fn get_app_names(state: State<'_, AppState>) -> Result<HashMap<String, String>, 
 }
 
 #[tauri::command]
+fn review_candidates(id: u64, state: State<'_, AppState>) -> Result<Vec<storage::RecapApp>, String> {
+    lock_sessions(&state)?.review_candidates(id)
+}
+
+#[tauri::command]
+fn review_session(
+    id: u64,
+    distractions: Vec<focus::AppRule>,
+    work: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<session::RulesSaved, String> {
+    let now = state.started_at.elapsed();
+    lock_sessions(&state)?.review_session(id, distractions, work, now)
+}
+
+#[tauri::command]
 fn set_app_name(
     key: String,
     name: String,
@@ -669,6 +685,8 @@ pub fn run() {
             set_site_name,
             get_app_names,
             set_app_name,
+            review_candidates,
+            review_session,
             update_rules,
             get_phrase_library,
             update_phrase_library,

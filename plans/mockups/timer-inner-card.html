@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Timer inner card</title>
+<style>
+:root{--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sh:rgba(17,16,14,.68)}
+body{margin:0;background:#f4ead7;font-family:Inter,ui-sans-serif,system-ui,sans-serif;padding:16px}
+.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;max-width:960px;margin:0 auto}
+.theme{border-radius:10px;padding:16px}
+.light{--inner:#fff7df;--tink:#101010;--tmuted:#5d564a;background:#f4ead7}
+.dark{--inner:#353530;--tink:#fff8e9;--tmuted:#c9c2b2;background:#262622}
+.label{margin:0 0 10px;font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+.light .label{color:#101010}.dark .label{color:#fff8e9}
+.eb{margin:0;font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.05em;text-transform:uppercase}
+/* The Watching card keeps its state colour in both themes. */
+.slab{border:2px solid #101010;border-radius:7px;box-shadow:4px 4px 0 var(--sh);background:#a8eb37;color:#141410;padding:14px 16px;display:flex;flex-direction:column;min-height:300px}
+.slab.drift{background:#ff684f}
+/* Only this inner card follows the theme. */
+.timer{margin-top:auto;border:2px solid #101010;border-radius:7px;box-shadow:2px 2px 0 var(--sh);background:var(--inner);padding:10px 12px 12px;color:var(--tink)}
+.timer-row{display:flex;justify-content:space-between;align-items:end}
+.timer-row strong{font-size:50px;font-weight:750;letter-spacing:-.04em;line-height:1}
+.timer-row .eb{color:var(--tmuted)}
+/* The bar never changes colour. */
+.bar{position:relative;height:26px;margin-top:10px;border:2px solid #101010;border-radius:6px;background:#fff7df;overflow:hidden}
+.bar i{position:absolute;top:0;bottom:0}
+.bar .now{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:#101010}
+.stack{display:grid;gap:14px}
+</style>
+</head>
+<body>
+<div class="pair">
+  <div class="theme light">
+    <p class="label">Light</p>
+    <div class="stack">
+      <section class="slab">
+        <p class="eb">Current session</p>
+        <p style="margin:6px 0 0;font-size:44px;font-weight:750;letter-spacing:-.04em;line-height:1">Focused</p>
+        <p class="eb" style="margin-top:16px">Session goal</p>
+        <p style="margin:3px 0 0;font-weight:700;font-size:16px">Finish lab 3 writeup</p>
+        <div class="timer">
+          <div class="timer-row"><strong>18:20</strong><span class="eb">Remaining</span></div>
+          <div class="bar"><i style="left:0;width:22%;background:#a8eb37"></i><i style="left:22%;width:4%;background:#ff684f"></i><i style="left:26%;width:7%;background:#a8eb37"></i><i style="left:33%;width:2%;background:#8d8a80"></i><i style="left:35%;width:4%;background:#ff684f"></i><b class="now" style="left:39%"></b></div>
+        </div>
+      </section>
+      <section class="slab drift">
+        <p class="eb">Current session</p>
+        <p style="margin:6px 0 0;font-size:44px;font-weight:750;letter-spacing:-.04em;line-height:1">Distracted</p>
+        <p class="eb" style="margin-top:16px">Session goal</p>
+        <p style="margin:3px 0 0;font-weight:700;font-size:16px">Finish lab 3 writeup</p>
+        <div class="timer">
+          <div class="timer-row"><strong>18:20</strong><span class="eb">Remaining</span></div>
+          <div class="bar"><i style="left:0;width:22%;background:#a8eb37"></i><i style="left:22%;width:4%;background:#ff684f"></i><i style="left:26%;width:7%;background:#a8eb37"></i><i style="left:33%;width:2%;background:#8d8a80"></i><i style="left:35%;width:4%;background:#ff684f"></i><b class="now" style="left:39%"></b></div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <div class="theme dark">
+    <p class="label">Dark</p>
+    <div class="stack">
+      <section class="slab">
+        <p class="eb">Current session</p>
+        <p style="margin:6px 0 0;font-size:44px;font-weight:750;letter-spacing:-.04em;line-height:1">Focused</p>
+        <p class="eb" style="margin-top:16px">Session goal</p>
+        <p style="margin:3px 0 0;font-weight:700;font-size:16px">Finish lab 3 writeup</p>
+        <div class="timer">
+          <div class="timer-row"><strong>18:20</strong><span class="eb">Remaining</span></div>
+          <div class="bar"><i style="left:0;width:22%;background:#a8eb37"></i><i style="left:22%;width:4%;background:#ff684f"></i><i style="left:26%;width:7%;background:#a8eb37"></i><i style="left:33%;width:2%;background:#8d8a80"></i><i style="left:35%;width:4%;background:#ff684f"></i><b class="now" style="left:39%"></b></div>
+        </div>
+      </section>
+      <section class="slab drift">
+        <p class="eb">Current session</p>
+        <p style="margin:6px 0 0;font-size:44px;font-weight:750;letter-spacing:-.04em;line-height:1">Distracted</p>
+        <p class="eb" style="margin-top:16px">Session goal</p>
+        <p style="margin:3px 0 0;font-weight:700;font-size:16px">Finish lab 3 writeup</p>
+        <div class="timer">
+          <div class="timer-row"><strong>18:20</strong><span class="eb">Remaining</span></div>
+          <div class="bar"><i style="left:0;width:22%;background:#a8eb37"></i><i style="left:22%;width:4%;background:#ff684f"></i><i style="left:26%;width:7%;background:#a8eb37"></i><i style="left:33%;width:2%;background:#8d8a80"></i><i style="left:35%;width:4%;background:#ff684f"></i><b class="now" style="left:39%"></b></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+</body>
+</html>

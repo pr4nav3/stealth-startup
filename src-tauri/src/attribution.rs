@@ -9,7 +9,6 @@ use std::time::Duration;
 /// How long a confirmed site survives an unreadable or edited address in the same tab.
 const GRACE: Duration = Duration::from_millis(1500);
 const OTHER_WEBSITES_KEY: &str = "other-websites";
-pub const PAUSED_KEY: &str = "paused";
 pub const UNKNOWN_KEY: &str = "untracked";
 pub const PHONE_KEY: &str = "phone";
 pub const UNKNOWN_LABEL: &str = "Device asleep / unknown";
@@ -72,10 +71,6 @@ impl Activity {
     }
 
     /// The session was on hold. Fills the timeline; never counted toward any score.
-    pub fn paused() -> Self {
-        Self::marker(PAUSED_KEY, "Paused")
-    }
-
     /// The machine slept, froze, or would not report a window.
     pub fn unknown() -> Self {
         Self::marker(UNKNOWN_KEY, UNKNOWN_LABEL)

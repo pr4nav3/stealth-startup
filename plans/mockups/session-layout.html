@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Session recap layout</title>
+<style>
+:root{--canvas:#f4ead7;--panel:#fff4cf;--soft:#fff7df;--ink:#101010;--muted:#5d564a;--sh:rgba(17,16,14,.68);--green:#a8eb37;--coral:#ff684f;--yellow:#ffcf31;--grid:rgba(16,16,16,.1);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:Inter,ui-sans-serif,system-ui,sans-serif}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--canvas:#262622;--grid:rgba(255,248,233,.06);--muted:#c9c2b2}}
+:root[data-theme="dark"]{--canvas:#262622;--grid:rgba(255,248,233,.06);--muted:#c9c2b2}
+*{box-sizing:border-box}
+body{margin:0;color:#101010;font-family:var(--sans);background-color:var(--canvas);background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:22px 22px;padding:20px 16px 40px}
+main{max-width:860px;margin:0 auto;display:grid;gap:30px}
+.label{margin:0 0 4px;font-family:var(--mono);font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+.why{margin:0 0 10px;font-size:13.5px;color:var(--muted);line-height:1.45}
+.frame{display:grid;gap:12px;border:2px dashed rgba(127,127,127,.4);border-radius:10px;padding:14px}
+.eb{margin:0;font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+.box{border:2px solid #101010;border-radius:7px;box-shadow:4px 4px 0 var(--sh);background:var(--panel)}
+.hero{background:var(--yellow);padding:14px 16px}
+.hero h2{margin:0;font-size:26px;letter-spacing:-.03em}
+.hero .when{margin:4px 0 0;font-size:16px;font-weight:600}
+.hint{margin:6px 0 0;font-size:12px;color:#5d564a}
+.bar{position:relative;height:32px;margin-top:14px;border:2px solid #101010;border-radius:5px;background:var(--green);overflow:hidden}
+.bar i{position:absolute;top:0;bottom:0;background:var(--coral)}
+.bar b{position:absolute;top:0;bottom:0;width:3px;background:#101010}
+.legend{display:inline-flex;gap:12px;margin-top:10px;padding:4px 8px;border:2px solid #101010;border-radius:6px;background:var(--soft);font-family:var(--mono);font-size:10px;text-transform:uppercase}
+.legend span::before{content:"";display:inline-block;width:9px;height:9px;margin-right:5px;border:1px solid #101010;vertical-align:-1px;background:var(--green)}
+.legend span+span::before{background:var(--coral)}
+.stat{padding:8px 10px;background:var(--soft)}
+.stat span{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.05em;text-transform:uppercase}
+.stat strong{display:block;margin-top:4px;font-family:var(--mono);font-size:19px}
+.where{padding:12px 14px}
+.where h3{margin:6px 0 8px;font-size:16px}
+.app{display:grid;grid-template-columns:1fr 40% 40px;align-items:center;gap:10px;margin-top:6px;padding:8px 10px;border:2px solid #101010;border-radius:6px;background:var(--soft);font-size:14px}
+.app i{height:8px;border:1px solid #101010;background:var(--soft)}
+.app i::after{content:"";display:block;height:100%;background:var(--green)}
+.app.d i::after{background:var(--coral)}
+.app strong{font-size:13px;text-align:right}
+.dead{display:grid;place-items:center;min-height:70px;margin-top:10px;border:2px dashed #b8321f;border-radius:6px;font-family:var(--mono);font-size:11px;color:#b8321f;text-transform:uppercase}
+
+/* Today */
+.today{display:grid;grid-template-columns:1fr 150px;gap:10px}
+.today .stats{display:grid;gap:10px}
+.today .stat{border:2px solid #101010;border-radius:7px;box-shadow:4px 4px 0 var(--sh)}
+
+/* A: numbers in the card, under the bar */
+.a .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px}
+.a .stat{border:2px solid #101010;border-radius:6px}
+.a .top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+
+/* B: the numbers as a strip across the top */
+.b .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.b .stat{border:2px solid #101010;border-radius:7px;box-shadow:4px 4px 0 var(--sh)}
+@media (max-width:560px){.a .stats,.b .stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<main>
+
+<section>
+  <p class="label">Today</p>
+  <p class="why">Four stat cards stacked on the right set the row's height, so the yellow card stretches below its legend. The bar is also narrower than it needs to be.</p>
+  <div class="frame">
+    <div class="today">
+      <div class="box hero">
+        <h2>Read chapter 7</h2><p class="when">26 October 2026, 10:30 AM · Normal</p>
+        <p class="hint">Hover over a part of the bar to see the app and how long it lasted.</p>
+        <div class="bar"><i style="left:16%;width:5%"></i><b style="left:18%"></b><b style="left:19.5%"></b></div>
+        <div class="legend"><span>Work</span><span>Distraction</span></div>
+        <div class="dead">dead space</div>
+      </div>
+      <div class="stats">
+        <div class="stat"><span>Duration</span><strong>1:00 hr</strong></div>
+        <div class="stat"><span>Focused</span><strong>72%</strong></div>
+        <div class="stat"><span>Longest stretch</span><strong>19 min</strong></div>
+        <div class="stat"><span>Nudges</span><strong>2</strong></div>
+      </div>
+    </div>
+    <div class="box where"><p class="eb">Where it went</p><h3>Apps &amp; sites</h3><div class="app d"><span>YouTube</span><i></i><strong>7m</strong></div><div class="app"><span>VS Code</span><i></i><strong>43m</strong></div></div>
+  </div>
+</section>
+
+<section>
+  <p class="label">A · Numbers inside the card (recommended)</p>
+  <p class="why">One full-width card: title, then the bar across the whole width, then the four numbers in a row underneath. The legend moves up beside the date, so the card ends right after the numbers. The session and its numbers are read together, and the bar is about 20% wider.</p>
+  <div class="frame a">
+    <div class="box hero">
+      <div class="top">
+        <div><h2>Read chapter 7</h2><p class="when">26 October 2026, 10:30 AM · Normal</p></div>
+        <div class="legend" style="margin-top:4px"><span>Work</span><span>Distraction</span></div>
+      </div>
+      <p class="hint">Hover over the bar to see each app and how long it lasted.</p>
+      <div class="bar"><i style="left:16%;width:5%"></i><b style="left:18%"></b><b style="left:19.5%"></b></div>
+      <div class="stats">
+        <div class="stat"><span>Duration</span><strong>1:00 hr</strong></div>
+        <div class="stat"><span>Focused</span><strong>72%</strong></div>
+        <div class="stat"><span>Longest stretch</span><strong>19 min</strong></div>
+        <div class="stat"><span>Nudges</span><strong>2</strong></div>
+      </div>
+    </div>
+    <div class="box where"><p class="eb">Where it went</p><h3>Apps &amp; sites</h3><div class="app d"><span>YouTube</span><i></i><strong>7m</strong></div><div class="app"><span>VS Code</span><i></i><strong>43m</strong></div></div>
+  </div>
+</section>
+
+<section>
+  <p class="label">B · Numbers as a strip on top</p>
+  <p class="why">The four stat cards keep their look but sit in a row above a full-width session card. The page reads as a headline row first, then the session. It's a smaller change, but the numbers come before the title.</p>
+  <div class="frame b">
+    <div class="stats">
+      <div class="stat"><span>Duration</span><strong>1:00 hr</strong></div>
+      <div class="stat"><span>Focused</span><strong>72%</strong></div>
+      <div class="stat"><span>Longest stretch</span><strong>19 min</strong></div>
+      <div class="stat"><span>Nudges</span><strong>2</strong></div>
+    </div>
+    <div class="box hero">
+      <h2>Read chapter 7</h2><p class="when">26 October 2026, 10:30 AM · Normal</p>
+      <p class="hint">Hover over the bar to see each app and how long it lasted.</p>
+      <div class="bar"><i style="left:16%;width:5%"></i><b style="left:18%"></b><b style="left:19.5%"></b></div>
+      <div class="legend"><span>Work</span><span>Distraction</span></div>
+    </div>
+    <div class="box where"><p class="eb">Where it went</p><h3>Apps &amp; sites</h3><div class="app d"><span>YouTube</span><i></i><strong>7m</strong></div><div class="app"><span>VS Code</span><i></i><strong>43m</strong></div></div>
+  </div>
+</section>
+
+</main>
+</body>
+</html>

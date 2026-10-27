@@ -4,7 +4,7 @@
 //! bundle identifier). `AppKeys` turns identities into the app keys spans and rules store.
 //! Keys stay the old stem where that is safe, so existing history and rules keep matching.
 
-use crate::attribution::{PAUSED_KEY, SUPERVISOR_KEY, UNKNOWN_KEY};
+use crate::attribution::{SUPERVISOR_KEY, UNKNOWN_KEY};
 use std::collections::{HashMap, HashSet};
 
 /// One program that runs many apps. Its stem names no single app, so history kept under it
@@ -15,7 +15,7 @@ const SHARED_HOSTS: &[&str] = &[
 ];
 
 /// Keys Supervisor's own rows use. A captured app never takes one.
-const RESERVED_KEYS: &[&str] = &[SUPERVISOR_KEY, UNKNOWN_KEY, PAUSED_KEY, "other-websites"];
+const RESERVED_KEYS: &[&str] = &[SUPERVISOR_KEY, UNKNOWN_KEY, "other-websites"];
 
 /// Version info that names a runtime, not the app built on it.
 const RUNTIME_PRODUCTS: &[&str] = &["electron", "nw.js", "chromium embedded framework"];

@@ -60,7 +60,7 @@ for (const [name, url, setup, w, h] of STATES) {
     if (setup) await setup(d);
     await sleep(900);
     const sizes = {};
-    for (const sel of [".app-shell", ".home-grid", ".modal-panel", ".preflight-panel", ".state-slab", ".interrupt-alert", ".settings-page", ".voice-page", ".webcam-page", ".history-page", ".report-stage", ".overlay-shell", ".cal-grid", ".quote-card", ".onboard-panel", ".history-item", ".voice-card", ".phrase-panel", ".trend-card"]) {
+    for (const sel of [".app-shell", ".home-grid", ".modal-panel", ".preflight-panel", ".state-slab", ".interrupt-alert", ".settings-page", ".voice-page", ".webcam-page", ".history-page", ".report-slab", ".overlay-shell", ".cal-grid", ".quote-card", ".onboard-panel", ".history-item", ".voice-card", ".phrase-panel", ".trend-card"]) {
       const el = d.querySelector(sel); if (el) { const r = el.getBoundingClientRect(); sizes[sel] = [Math.round(r.width), Math.round(r.height)]; }
     }
     const w2 = frame.contentWindow;

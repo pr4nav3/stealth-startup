@@ -201,6 +201,40 @@ impl SessionManager {
         self.app_names()
     }
 
+    /// What to ask about after a session: up to four apps or sites it counted as work for two
+    /// minutes or more that are not on the list and were never answered "work". Browsers are
+    /// never asked about (their sites are), nor Supervisor, the phone or untracked time.
+    pub fn review_candidates(&self, id: u64) -> Result<Vec<crate::storage::RecapApp>, String> {
+        let known = self.storage()?.known_work()?;
+        let rules = self.rules();
+        let mut apps: Vec<_> = self.session_report(id)?.apps.into_iter()
+            .filter(|app| app.group == "Work" && app.seconds >= 120)
+            .filter(|app| match app.kind.as_str() {
+                "website" => true,
+                "app" => !website::is_browser(&app.key)
+                    && ![crate::attribution::SUPERVISOR_KEY, "untracked", "phone"].contains(&app.key.as_str()),
+                _ => false,
+            })
+            .filter(|app| !known.contains(&app.key))
+            .filter(|app| !rules.iter().any(|rule| rule.value.eq_ignore_ascii_case(&app.key)))
+            .collect();
+        apps.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+        apps.truncate(4);
+        Ok(apps)
+    }
+
+    /// After a session: the apps and sites named distractions go on the list and count as
+    /// distracted time in that session; the ones named work are not asked about again.
+    pub fn review_session(&mut self, id: u64, distractions: Vec<AppRule>, work: Vec<String>, now: Duration) -> Result<RulesSaved, String> {
+        let keys: Vec<String> = distractions.iter().map(|rule| rule.value.to_lowercase()).collect();
+        self.storage()?.review_session(id, &keys, &work)?;
+        let mut rules = self.rules();
+        rules.extend(distractions);
+        let saved = self.update_rules(rules, now);
+        self.refresh_history();
+        Ok(saved)
+    }
+
     pub fn load_phrase_library(&self) -> Result<crate::storage::StoredPhraseLibrary, String> {
         self.storage()?.load_phrase_library()
     }
@@ -767,8 +801,8 @@ impl Session {
         }
         self.account_current(now);
         self.start_timer_hold(now);
+        // A pause is cut out of the session: offsets stop with the timer, nothing is recorded.
         self.close_open_span(now, storage);
-        self.open_marker_span(Activity::paused(), "paused");
         self.camera = Camera::default();
         self.unmute();
         self.status = SessionStatus::Paused;
@@ -778,7 +812,6 @@ impl Session {
 
     fn resume(&mut self, now: Duration, storage: Option<&SessionStorage>) {
         if self.status == SessionStatus::Paused {
-            self.close_open_span(now, storage);
             self.finish_timer_hold(now);
             self.status = SessionStatus::Active;
             self.last_accounted_at = now;
@@ -886,8 +919,7 @@ impl Session {
         // A phone span stays a phone span; the decision applies once it is put down.
         let on_phone = self.phone_active();
         let recorded_activity = self.open_span.as_ref().map(|span| span.activity.clone());
-        // While paused the open span is the pause itself; closing it here would store the rest
-        // of the pause as whatever comes next.
+        // Nothing is open while paused.
         if !on_phone && self.is_recording() {
             self.close_open_span(now, storage);
         }
@@ -920,8 +952,9 @@ impl Session {
         self.push_event(now, "Session saved", "LOCAL");
     }
 
+    /// Seconds into the session with pauses cut out, so the spans are the timer's time only.
     fn session_offset_seconds(&self, now: Duration) -> u64 {
-        now.as_secs().saturating_sub(self.started_at_seconds)
+        self.raw_timer_elapsed_seconds(now)
     }
 
     /// A read that fails during a switch (Alt-Tab to a minimised window, a virtual desktop
@@ -1179,7 +1212,8 @@ impl Session {
         let Some(state) = focus_state_from_key(&span.state).filter(|state| *state != FocusState::Idle) else {
             return boundary;
         };
-        let span_start = Duration::from_secs(self.started_at_seconds + span.started_offset_seconds);
+        let span_start = now.saturating_sub(Duration::from_secs(
+            self.session_offset_seconds(now).saturating_sub(span.started_offset_seconds)));
         let last_input = now.saturating_sub(Duration::from_secs_f64(sample.idle_seconds.unwrap_or(0.0)));
         let left_at = Duration::from_secs(last_input.max(span_start).max(self.present_at).as_secs());
         // The site's nudge clock stops at the same moment.
@@ -2287,7 +2321,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_time_is_recorded_but_never_scored() {
+    fn paused_time_is_cut_out_of_the_session() {
         let mut manager = test_manager();
         manager.start(input("Focus", Strictness::Normal), seconds(0));
         let id = manager.snapshot(seconds(0)).current.unwrap().id;
@@ -2298,12 +2332,11 @@ mod tests {
         manager.stop(seconds(120));
         let report = manager.session_report(id).expect("report");
 
-        let paused: u64 = report.spans.iter().filter(|span| span.state == "paused")
-            .map(|span| span.seconds).sum();
-        assert_eq!(paused, 60);
+        let spans: Vec<_> = report.spans.iter()
+            .map(|span| (span.started_offset_seconds, span.seconds, span.state.as_str())).collect();
+        assert_eq!(spans, vec![(0, 30, "focused"), (30, 30, "focused")]);
         assert_eq!(report.duration_seconds, 60);
         assert_eq!(report.focused_seconds, 60);
-        assert!(report.apps.iter().all(|app| app.key != "paused"));
     }
 
     #[test]
@@ -2324,7 +2357,7 @@ mod tests {
         assert_eq!(report.distracted_seconds, 20);
     }
 
-    /// The core promise of the report: from Start to Stop, every second belongs to exactly one
+    /// The core promise of the report: from Start to Stop, every unpaused second belongs to exactly one
     /// recorded segment. Random event sequences must never leave a hole or an overlap.
     #[test]
     fn every_second_of_a_session_is_recorded() {
@@ -2406,6 +2439,8 @@ mod tests {
             let rules = manager.rules();
             manager.update_rules(rules, seconds(now));
             now += 1;
+            // Pauses are cut out: the timeline is the timer's time, not the wall clock's.
+            let ran = manager.snapshot(seconds(now)).current.unwrap().elapsed_seconds;
             manager.stop(seconds(now));
 
             let report = manager.session_report(id).expect("report");
@@ -2415,7 +2450,7 @@ mod tests {
                 assert_eq!(span.started_offset_seconds, cursor, "seed {seed}: hole or overlap at {cursor}s");
                 cursor += span.seconds;
             }
-            assert_eq!(cursor, now, "seed {seed}: timeline ends at {cursor}s, session at {now}s");
+            assert_eq!(cursor, ran, "seed {seed}: timeline ends at {cursor}s, session ran {ran}s");
             assert_eq!(manager.storage.as_ref().unwrap().repaired_seconds(), 0, "seed {seed}: holes were repaired");
             let phone: u64 = spans.iter().filter(|span| span.state == "phone").map(|span| span.seconds).sum();
             assert_eq!(report.phone_seconds, phone, "seed {seed}");

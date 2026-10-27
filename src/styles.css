@@ -416,8 +416,8 @@ h1 {
   line-height: 0.9;
 }
 
-/* The session so far: filled with what happened (work, distraction, away), empty for the
-   time left, an ink tick at now. */
+/* The session so far: work in ink, distractions in coral, away in grey, the time left empty,
+   a cream tick at now. No green, so it reads on every state colour of the card. */
 .live-strip {
   position: relative;
   overflow: hidden;
@@ -436,7 +436,7 @@ h1 {
 }
 
 .live-strip .strip-on {
-  background: #a8eb37;
+  background: #101010;
 }
 
 .live-strip .strip-off {
@@ -453,7 +453,8 @@ h1 {
   bottom: 0;
   width: 2px;
   margin-left: -1px;
-  background: #101010;
+  background: #fff7df;
+  box-shadow: 0 0 0 1px #101010;
 }
 
 /* So far above Distractions: numbers you glance at go above the list you rarely edit. */
@@ -762,33 +763,6 @@ h1 {
   background: transparent;
   color: var(--ink);
   opacity: 0.4;
-}
-
-.cal-day.in-chain {
-  border-width: 3px;
-  padding: 3px 5px;
-}
-
-.cal-day.in-chain::after {
-  content: "";
-  position: absolute;
-  right: -11px;
-  top: 50%;
-  z-index: 1;
-  width: 11px;
-  height: 4px;
-  margin-top: -2px;
-  background: var(--sv-border);
-}
-
-.cal-day.chain-end::after {
-  display: none;
-}
-
-.cal-day.is-bridge {
-  border-style: dashed;
-  background: transparent;
-  opacity: 0.55;
 }
 
 .cal-grid.is-animated .cal-day {
@@ -3372,15 +3346,21 @@ audio {
   font-weight: 650;
 }
 
+/* The label stays on one line beside its toggle in the narrow window. */
+.overlay-mute > span:first-child {
+  min-width: 0;
+  white-space: nowrap;
+}
+
 .overlay-more-body > p {
   margin: 0;
   color: var(--ink);
   font-size: var(--sv-type-4);
 }
 
+/* One mark now, full width like the pin below it. */
 .overlay-marks {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
 
@@ -4145,6 +4125,32 @@ button.wp-day.is-future:disabled {
   background: color-mix(in srgb, var(--sv-ink) 18%, var(--panel));
 }
 
+/* A label under every bar: its week, "So far" for this one, bold for the one being viewed. */
+.trend-spark-labels {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.trend-spark-labels span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.03em;
+  text-align: center;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.trend-spark-labels .is-viewed {
+  color: var(--ink);
+  font-weight: 700;
+}
+
 .trend-spark-bar.is-empty {
   border-color: color-mix(in srgb, var(--sv-ink) 35%, transparent);
   background: transparent;
@@ -4898,16 +4904,8 @@ button.history-item {
   width: auto;
 }
 
-.report-stage {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(128px, 17%, 148px);
-  grid-template-areas: "slab stats";
-  align-items: stretch;
-  gap: 10px;
-}
-
 .report-slab {
-  grid-area: slab;
+  grid-area: auto;
   min-width: 0;
   min-height: 0;
 }
@@ -4918,56 +4916,96 @@ button.history-item {
   overflow-wrap: anywhere;
 }
 
+/* The numbers in a row, straight on the page under the bar's card. */
 .report-stats {
-  grid-area: stats;
   display: grid;
-  grid-auto-rows: minmax(0, 1fr);
-  min-width: 0;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   gap: 8px;
 }
 
 .report-stat {
   display: grid;
-  align-content: center;
   min-width: 0;
-  gap: 4px;
+  min-height: 0;
+  height: auto;
+  padding: 0;
   border: var(--border);
-  border-radius: var(--radius-card);
-  padding: 10px 8px;
+  border-radius: var(--radius-control);
   background: var(--panel);
   box-shadow: var(--shadow-control);
+  color: var(--ink);
+  font: inherit;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  perspective: 600px;
 }
 
-.report-stat span,
-.report-stat strong {
+.report-stat:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--sv-shadow-color);
+}
+
+.report-stat:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--sv-shadow-color);
+}
+
+/* The front sets the tile's size; the description lies over it, so the tile stays snug and never jumps. */
+.report-stat {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.report-stat-face {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 10px;
+  justify-items: start;
+  text-align: left;
+  backface-visibility: hidden;
+  transition: transform 260ms ease, opacity 260ms ease;
+}
+
+.report-stat-back {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  padding: 4px 8px;
+  font-size: var(--sv-type-4);
+  line-height: 1.2;
+  transform: rotateX(180deg);
+  opacity: 0;
+}
+
+.report-stat.is-flipped .report-stat-face {
+  transform: rotateX(-180deg);
+  opacity: 0;
+}
+
+.report-stat.is-flipped .report-stat-back {
+  transform: none;
+  opacity: 1;
+}
+
+/* The card's dark text is for its yellow; the tiles follow the theme, so their text does too. */
+.report-slab .report-stat :is(span, strong) {
+  color: var(--ink);
+}
+
+.report-stat-face > span,
+.report-stat-face > strong {
   min-width: 0;
 }
 
-.report-stat span {
+.report-stat-face > span {
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
   line-height: 1.15;
   text-transform: uppercase;
-}
-
-/* The score's slot, asking for classifying while most of the session is unclassified. */
-button.report-stat-action {
-  display: grid;
-  justify-content: stretch;
-  height: auto;
-  min-height: 0;
-  color: inherit;
-  text-align: left;
-  text-transform: none;
-  letter-spacing: normal;
-  line-height: normal;
-}
-
-button.report-stat-action strong {
-  font-size: var(--sv-type-3);
-  white-space: normal;
-  text-decoration: underline;
-  text-underline-offset: 3px;
 }
 
 .report-stat strong {
@@ -4979,10 +5017,29 @@ button.report-stat-action strong {
   white-space: nowrap;
 }
 
+/* The hint on the left, the legend across from it, both just above the bar. A long legend
+   wraps its swatches first, then drops under the hint. */
+.report-bar-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 6px 16px;
+  margin-top: 4px;
+}
+
+.report-bar-head .report-hint {
+  flex: 1 1 200px;
+}
+
+.report-bar-head + .timeline-wrap {
+  margin-top: 8px;
+}
+
 .report-inset {
+  flex: 0 1 auto;
   width: fit-content;
   max-width: 100%;
-  margin: 10px auto 0;
   padding: 8px 10px;
   border: var(--border);
   border-radius: var(--radius-card);
@@ -5051,17 +5108,9 @@ button.report-stat-action strong {
 }
 
 @container history (max-width: 520px) {
-  .report-stage {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      "slab"
-      "stats";
-  }
-
   .report-stats {
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(0, 1fr);
-    grid-auto-rows: auto;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -5257,7 +5306,79 @@ button.report-stat-action strong {
 }
 
 .timeline-wrap {
+  position: relative;
   margin-top: 22px;
+}
+
+/* The hovered run pops out of the bar: a copy in its colour that sits on the run and grows past
+   the bar's edges, outside its clip; the rest of the bar stays as it is. */
+.timeline-lift {
+  position: absolute;
+  z-index: 2;
+  border: 2px solid var(--sv-border);
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    left 120ms ease-out,
+    width 120ms ease-out,
+    top 160ms cubic-bezier(0.2, 0.9, 0.3, 1.25),
+    height 160ms cubic-bezier(0.2, 0.9, 0.3, 1.25),
+    opacity 80ms ease-out;
+}
+
+.timeline-lift.is-up {
+  opacity: 1;
+}
+
+.timeline-tip {
+  position: absolute;
+  bottom: calc(100% + 18px);
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 6px 9px;
+  border-radius: 5px;
+  background: #4c4b46;
+  color: #fff8e9;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Points down at the run, even when the tip is pushed in from the bar's ends. */
+.timeline-tip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: var(--caret, 50%);
+  border: 6px solid transparent;
+  border-top-color: #4c4b46;
+  transform: translateX(-50%);
+}
+
+/* A group of thin parts lists each one, with its colour. */
+.timeline-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-tip-row i {
+  width: 9px;
+  height: 9px;
+  border: 1px solid #fff8e9;
+  border-radius: 2px;
+}
+
+.timeline-tip b {
+  font-weight: 700;
+}
+
+.timeline-tip small {
+  display: block;
+  color: #c9c2b2;
+  font-size: 0.74rem;
 }
 
 .timeline-bar {
@@ -5276,13 +5397,10 @@ button.report-stat-action strong {
   height: 100%;
 }
 
-.timeline-tick {
-  position: absolute;
-  top: -2px;
-  width: 3px;
-  height: calc(100% + 4px);
-  background: var(--ink);
-  pointer-events: none;
+.timeline-wrap:focus-visible {
+  outline: 2px solid var(--sv-border);
+  outline-offset: 4px;
+  border-radius: 6px;
 }
 
 .state-waiting {
@@ -5503,11 +5621,11 @@ button.report-stat-action strong {
   background: #ff684f;
 }
 
-/* Phone = the webcam saw a phone in hand. Distracted coral, striped so it reads apart. */
+/* Phone = the webcam saw a phone in hand. Violet: apart from distraction coral and away blue. */
 .timeline-bar .state-phone,
 .mini-timeline .state-phone,
 .legend-key.state-phone {
-  background: repeating-linear-gradient(-45deg, #ff684f 0 4px, #b8321f 4px 7px);
+  background: #b07cf0;
 }
 
 /* Unrated = no rule yet; not focus until rated. Warm grey, apart from Neutral cream and Away blue. */
@@ -5521,21 +5639,11 @@ button.report-stat-action strong {
   background: #7f93b5;
 }
 
-.timeline-bar .state-paused,
-.mini-timeline .state-paused,
-.legend-key.state-paused {
-  background: #45423b;
-}
-
 /* Empty bar = time with no recorded span (Supervisor in front, capture gap). Must not read as Neutral. */
 .timeline-bar,
 .mini-timeline,
 .legend-key.state-unrecorded {
   background: repeating-linear-gradient(-45deg, #fff7df 0 4px, #d8ccb0 4px 5px);
-}
-
-.timeline-tick {
-  background: #101010;
 }
 
 .eyebrow,
@@ -5559,4 +5667,130 @@ dt,
 .legend-swatch span,
 .report-log summary {
   line-height: 1;
+}
+
+/* After a session: "Any distractions here?" Chips like the distractions list, one tap each. */
+.review-panel {
+  width: min(520px, 100%);
+}
+
+.review-panel h2 {
+  margin-top: 4px;
+}
+
+.review-intro {
+  margin: 8px 0 0;
+  font-size: var(--sv-type-3);
+  font-weight: 650;
+}
+
+.review-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px;
+  border: var(--border);
+  border-radius: var(--radius-control);
+  background: var(--sv-soft-white);
+}
+
+.review-chip {
+  display: inline-flex;
+  align-items: stretch;
+  min-height: 36px;
+  overflow: hidden;
+  border: var(--border);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-control);
+  background: var(--panel);
+}
+
+.review-chip.is-distraction {
+  background: var(--sv-coral);
+}
+
+.review-chip.is-distraction :is(button, small) {
+  color: #141410;
+}
+
+.review-chip button {
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--ink);
+  transform: none;
+}
+
+.review-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.review-toggle > span {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.15;
+}
+
+.review-toggle small {
+  font-size: 0.7rem;
+  opacity: 0.7;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.review-rename {
+  padding: 0 9px;
+  border-left: var(--border) !important;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.review-name {
+  width: 16ch;
+  min-height: 0;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  background: var(--sv-soft-white);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+}
+
+.review-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.review-foot button:last-child {
+  padding: 0 16px;
+}
+
+.review-later {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: none;
+  color: var(--muted);
+  font-size: var(--sv-type-3);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>What was this</title>
+<style>
+:root{--canvas:#f4ead7;--panel:#fff4cf;--soft:#fff7df;--ink:#101010;--muted:#5d564a;--border:#101010;--sh:rgba(17,16,14,.68);--green:#a8eb37;--coral:#ff684f;--yellow:#ffcf31;--grid:rgba(16,16,16,.1);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:Inter,ui-sans-serif,system-ui,sans-serif}
+:root[data-theme="dark"]{--canvas:#262622;--panel:#353530;--soft:#4c4b46;--ink:#fff8e9;--muted:#c9c2b2;--grid:rgba(255,248,233,.06)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--canvas:#262622;--panel:#353530;--soft:#4c4b46;--ink:#fff8e9;--muted:#c9c2b2;--grid:rgba(255,248,233,.06)}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;color:var(--ink);font-family:var(--sans);background-color:var(--canvas);background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:22px 22px}
+.eb{margin:0 0 4px;font-family:var(--mono);font-size:calc(.82rem + 1px);font-weight:500;letter-spacing:.04em;text-transform:uppercase}
+.box{border:2px solid var(--border);border-radius:7px;box-shadow:4px 4px 0 var(--sh);background:var(--panel)}
+button{font:inherit;color:#141410;cursor:pointer}
+.btn{min-height:34px;padding:0 14px;border:2px solid var(--border);border-radius:6px;box-shadow:2px 2px 0 var(--sh);background:var(--soft);color:var(--ink);font-family:var(--mono);font-size:.78rem;letter-spacing:.04em;text-transform:uppercase}
+.btn.primary{background:var(--green);color:#141410}
+.btn:active{transform:translate(1px,1px);box-shadow:1px 1px 0 var(--sh)}
+
+/* The session page behind, as it would be once the popup closes. */
+.page{max-width:900px;margin:0 auto;padding:18px 16px 40px}
+.top{display:flex;justify-content:space-between;align-items:center}
+.top h1{margin:0;font-size:1.7rem;letter-spacing:-.03em}
+.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0 14px}
+.tabs span{display:grid;place-items:center;height:30px;border:2px solid var(--border);border-radius:6px;box-shadow:2px 2px 0 var(--sh);background:var(--soft);font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.05em}
+.tabs span.on{background:var(--yellow);color:#141410}
+.report{padding:16px}
+.report h2{margin:2px 0 4px;font-size:1.5rem;letter-spacing:-.03em}
+.report p.meta{margin:0;color:var(--muted);font-size:.9rem}
+.bar{height:40px;margin-top:18px;border:2px solid var(--border);border-radius:5px;background:linear-gradient(90deg,var(--green) 0 26%,var(--coral) 26% 31%,var(--green) 31% 62%,#7f93b5 62% 70%,var(--green) 70% 100%)}
+.ghost-rows{display:grid;gap:8px;margin-top:16px}
+.ghost-rows i{display:block;height:14px;border-radius:4px;background:var(--grid)}
+
+/* The popup: the Edit distractions popup's look, one tap per app. */
+.backdrop{position:fixed;inset:0;display:grid;place-items:center;padding:18px;background:rgba(16,16,16,.22);transition:opacity .2s}
+.backdrop.gone{opacity:0;pointer-events:none}
+.panel{width:min(560px,100%);padding:16px}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.head h2{margin:2px 0 0;font-size:1.35rem;letter-spacing:-.02em}
+.intro{margin:8px 0 0;font-weight:650;font-size:.95rem}
+.hint{margin:2px 0 0;color:var(--muted);font-size:.85rem}
+.well{margin-top:14px;padding:12px;border:2px solid var(--border);border-radius:6px;background:var(--soft);display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:stretch;min-height:34px;border:2px solid var(--border);border-radius:6px;box-shadow:2px 2px 0 var(--sh);background:var(--panel);color:var(--ink);overflow:hidden;transition:background .12s}
+.chip.is-distraction{background:var(--coral);color:#141410}
+.chip:has(.toggle:active){transform:translate(1px,1px);box-shadow:1px 1px 0 var(--sh)}
+.toggle,.pen{border:0;background:none;color:inherit;display:inline-flex;align-items:center}
+.toggle{gap:8px;padding:0 10px;font-family:var(--mono);font-size:.76rem;letter-spacing:.04em;text-transform:uppercase}
+.toggle small{font-size:.7rem;opacity:.7;text-transform:none}
+.pen{padding:0 8px;border-left:2px solid var(--border)}
+.pen svg{width:13px;height:13px}
+.pen:hover{background:rgba(16,16,16,.08)}
+.chip input{width:15ch;margin:0;padding:0 8px;border:0;outline:0;background:var(--soft);color:var(--ink);font-family:var(--mono);font-size:.76rem;letter-spacing:.04em;text-transform:uppercase}
+.chip .was{display:block;font-size:.62rem;opacity:.65;text-transform:none;letter-spacing:0}
+.toggle span{display:flex;flex-direction:column;align-items:flex-start;line-height:1.15}
+.foot{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px}
+.later{border:0;background:none;padding:0;color:var(--muted);font-size:.85rem;text-decoration:underline;text-underline-offset:3px}
+
+.controls{position:fixed;right:16px;bottom:16px;display:flex;gap:8px}
+</style>
+</head>
+<body>
+<div class="page" aria-hidden="true">
+  <div class="top"><h1>Supervisor</h1></div>
+  <div class="tabs"><span class="on">Session</span><span>Settings</span><span>History</span></div>
+  <section class="box report">
+    <p class="eb">Session done</p>
+    <h2>Finish lab 3 writeup</h2>
+    <p class="meta">26 October 2026, 2:10 PM · Normal</p>
+    <div class="bar"></div>
+    <div class="ghost-rows"><i style="width:70%"></i><i style="width:45%"></i><i style="width:58%"></i></div>
+  </section>
+</div>
+
+<div class="backdrop" id="popup">
+  <section class="box panel" role="dialog" aria-modal="true" aria-labelledby="t">
+    <div class="head">
+      <div>
+        <p class="eb">Session done</p>
+        <h2 id="t">Were any of these a distraction?</h2>
+      </div>
+    </div>
+    <p class="intro">Supervisor counted these as work.</p>
+    <p class="hint">Tap the ones that weren't. They go on your distractions list. The pencil renames.</p>
+    <div class="well">
+      <div class="chip" data-kind="app"><button class="toggle" type="button"><span data-name>Spotify</span><small>9m</small></button><button class="pen" type="button" aria-label="Rename"></button></div>
+      <div class="chip" data-kind="site"><button class="toggle" type="button"><span data-name>news.ycombinator.com</span><small>6m</small></button><button class="pen" type="button" aria-label="Rename"></button></div>
+      <div class="chip" data-kind="app"><button class="toggle" type="button"><span data-name>Code - Insiders</span><small>3m</small></button><button class="pen" type="button" aria-label="Rename"></button></div>
+    </div>
+    <div class="foot">
+      <button class="later" type="button" data-close>Ask me next time</button>
+      <button class="btn primary" type="button" data-close id="done">All work</button>
+    </div>
+  </section>
+</div>
+
+<div class="controls">
+  <button class="btn" type="button" id="again">Show popup</button>
+  <button class="btn" type="button" id="theme">Dark</button>
+</div>
+
+<script>
+const popup = document.getElementById("popup");
+const done = document.getElementById("done");
+const chips = [...document.querySelectorAll(".chip")];
+const PEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 14l1-4 8-8 3 3-8 8z"/></svg>';
+const SAVE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M2.5 8.5l3.5 3.5 7.5-8"/></svg>';
+chips.forEach(chip => {
+  const pen = chip.querySelector(".pen"), toggle = chip.querySelector(".toggle");
+  const name = chip.querySelector("[data-name]");
+  const original = name.textContent;
+  pen.innerHTML = PEN;
+  // Rename in place: the name becomes a field, Enter or the tick keeps it, Escape drops it.
+  function finish(keep) {
+    const input = chip.querySelector("input");
+    if (!input) return;
+    const value = input.value.trim();
+    if (keep && value) name.innerHTML = value === original ? value : `${value}<small class="was">was ${original}</small>`;
+    input.remove(); toggle.hidden = false; pen.innerHTML = PEN; pen.setAttribute("aria-label", "Rename");
+  }
+  pen.addEventListener("click", () => {
+    if (chip.querySelector("input")) return finish(true);
+    const input = document.createElement("input");
+    input.value = name.firstChild.textContent;
+    toggle.hidden = true; chip.insertBefore(input, pen);
+    pen.innerHTML = SAVE; pen.setAttribute("aria-label", "Keep name");
+    input.focus(); input.select();
+    input.addEventListener("keydown", e => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); });
+  });
+});
+function label() {
+  const n = chips.filter(c => c.classList.contains("is-distraction")).length;
+  done.textContent = n === 0 ? "All work" : `Add ${n} to distractions`;
+  done.style.background = n ? "var(--coral)" : "";
+}
+chips.forEach(c => c.querySelector(".toggle").addEventListener("click", () => { c.classList.toggle("is-distraction"); label(); }));
+document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => popup.classList.add("gone")));
+document.getElementById("again").addEventListener("click", () => { chips.forEach(c => c.classList.remove("is-distraction")); label(); popup.classList.remove("gone"); });
+const theme = document.getElementById("theme");
+theme.addEventListener("click", () => {
+  const dark = document.documentElement.dataset.theme !== "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  theme.textContent = dark ? "Light" : "Dark";
+});
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 use crate::activity;
 use crate::app_identity::{self, AppKeys};
-use crate::attribution::{Activity, PAUSED_KEY, PHONE_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
+use crate::attribution::{Activity, PHONE_KEY, SUPERVISOR_KEY, UNKNOWN_KEY, UNKNOWN_LABEL};
 use crate::focus::{starter_rules, AppRule, RuleTarget};
 use crate::session::{utc_now, SessionSettings, SessionSummary, Strictness, SummarySegment, HISTORY_CACHE_LIMIT};
 use crate::website;
@@ -10,16 +10,17 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i32 = 13;
+const SCHEMA_VERSION: i32 = 14;
 /// Weeks of history the Trends page and the attention-span chart can draw.
 const TREND_WEEK_COUNT: usize = 8;
 const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
+/// Apps and sites the user said were work after a session, so they are never asked about again.
+const KNOWN_WORK_KEY: &str = "review.known_work";
 
 /// How long a `session` row's timer actually ran. Sessions that never closed cleanly have no
 /// timer value; their tracked span time is the best record of how long they ran.
 const RUN_SECONDS_SQL: &str = "COALESCE(session.elapsed_seconds,
-    (SELECT COALESCE(SUM(span.seconds), 0) FROM span
-     WHERE span.session_id = session.id AND span.state != 'paused'))";
+    (SELECT COALESCE(SUM(span.seconds), 0) FROM span WHERE span.session_id = session.id))";
 
 const WEBCAM_SETTING_KEYS: &[&str] = &[
     "webcam.enabled",
@@ -797,6 +798,33 @@ impl SessionStorage {
             tx.execute_batch("PRAGMA user_version = 13;").map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
         }
+        if version < 14 {
+            // Pauses used to be recorded as "paused" spans on the wall clock. They are cut out
+            // now: each one goes and everything after it moves back by its length. Latest
+            // first, so an earlier pause's offset is never moved before it is cut.
+            let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+            let pauses: Vec<(i64, i64, i64)> = {
+                let mut stmt = self.conn
+                    .prepare("SELECT session_id, started_offset_seconds, seconds FROM span
+                              WHERE state = 'paused' ORDER BY session_id, started_offset_seconds DESC")
+                    .map_err(|error| error.to_string())?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .map_err(|error| error.to_string())?;
+                rows.collect::<Result<_, _>>().map_err(|error| error.to_string())?
+            };
+            for (session, start, seconds) in pauses {
+                tx.execute("DELETE FROM span WHERE session_id = ?1 AND state = 'paused' AND started_offset_seconds = ?2",
+                    params![session, start]).map_err(|error| error.to_string())?;
+                tx.execute("UPDATE span SET started_offset_seconds = started_offset_seconds - ?3
+                            WHERE session_id = ?1 AND started_offset_seconds >= ?2",
+                    params![session, start + seconds, seconds]).map_err(|error| error.to_string())?;
+                tx.execute("UPDATE event SET at_offset_seconds = MAX(?2, at_offset_seconds - ?3)
+                            WHERE session_id = ?1 AND at_offset_seconds > ?2",
+                    params![session, start, seconds]).map_err(|error| error.to_string())?;
+            }
+            tx.execute_batch("PRAGMA user_version = 14;").map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 
@@ -1053,6 +1081,37 @@ impl SessionStorage {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Activity keys the user answered "work" for after a session.
+    pub fn known_work(&self) -> Result<Vec<String>, String> {
+        match self.conn.query_row("SELECT value FROM setting WHERE key = ?1", [KNOWN_WORK_KEY],
+            |row| row.get::<_, String>(0)) {
+            Ok(value) => serde_json::from_str(&value).map_err(|error| error.to_string()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Vec::new()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// The answers to "were any of these a distraction?": this session's time on each named
+    /// distraction becomes distracted time, and the rest is remembered as work.
+    pub fn review_session(&self, session_id: u64, distractions: &[String], work: &[String]) -> Result<(), String> {
+        let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        for key in distractions {
+            tx.execute("UPDATE span SET state = 'distracted'
+                        WHERE session_id = ?1 AND activity_key = ?2 AND state = 'focused'",
+                params![session_id, key]).map_err(|error| error.to_string())?;
+        }
+        let mut known = self.known_work()?;
+        for key in work {
+            if !known.contains(key) {
+                known.push(key.clone());
+            }
+        }
+        known.retain(|key| !distractions.contains(key));
+        self.set_setting(KNOWN_WORK_KEY, &serde_json::to_string(&known).map_err(|error| error.to_string())?)?;
+        self.recompute_session_metrics(session_id)?;
+        tx.commit().map_err(|error| error.to_string())
     }
 
     pub fn load_phrase_library(&self) -> Result<StoredPhraseLibrary, String> {
@@ -2016,7 +2075,7 @@ pub fn focus_state_key(state: crate::focus::FocusState) -> &'static str {
 fn ratable(kind: &str, key: &str) -> bool {
     match kind {
         "website" => true,
-        "app" => ![SUPERVISOR_KEY, UNKNOWN_KEY, PAUSED_KEY, PHONE_KEY].contains(&key) && !website::is_browser(key),
+        "app" => ![SUPERVISOR_KEY, UNKNOWN_KEY, PHONE_KEY].contains(&key) && !website::is_browser(key),
         _ => false,
     }
 }
@@ -2075,7 +2134,7 @@ fn count_drifts(spans: &[ReportSpan]) -> u64 {
         previous_end = span.started_offset_seconds.saturating_add(span.seconds);
         let focus_like = on_task(&span.state);
         let drift_like = matches!(span.state.as_str(), "distracted" | "idle" | "suspicious" | "phone");
-        if matches!(span.state.as_str(), "paused" | "unknown") {
+        if span.state == "unknown" {
             in_focus_track = false;
         } else if focus_like {
             in_focus_track = true;
@@ -2131,7 +2190,7 @@ fn focused_stretches(spans: &[ReportSpan]) -> Vec<u64> {
         previous_end = span.started_offset_seconds.saturating_add(span.seconds);
         match span.state.as_str() {
             state if on_task(state) => current += span.seconds,
-            "distracted" | "idle" | "suspicious" | "phone" | "paused" | "unknown" => {
+            "distracted" | "idle" | "suspicious" | "phone" | "unknown" => {
                 if current > 0 {
                     stretches.push(current);
                     current = 0;
@@ -2597,10 +2656,9 @@ mod tests {
             (app("Code"), "focused", 60, 120),
             (site("youtube.com"), "suspicious", 180, 20),
             (site("youtube.com"), "distracted", 200, 40),
-            (Activity::paused(), "paused", 240, 300), // a pause is not counted
-            (site("youtube.com"), "distracted", 540, 30),
-            (app("Notes"), "focused", 570, 60),
-            (site("reddit.com"), "distracted", 630, 90), // still drifting at the end
+            (site("youtube.com"), "distracted", 240, 30),
+            (app("Notes"), "focused", 270, 60),
+            (site("reddit.com"), "distracted", 330, 90), // still drifting at the end
         ] {
             storage.insert_span(id, &activity, state, start, seconds).unwrap();
         }
@@ -3460,18 +3518,35 @@ mod tests {
     }
 
     #[test]
-    fn recovered_sessions_do_not_count_pauses_as_run_time() {
-        let storage = SessionStorage::open_in_memory().expect("open db");
-        let id = storage
-            .insert_session("Crash", Strictness::Normal, "2026-09-22T12:00:00Z", 3600)
-            .expect("insert session");
-        storage.insert_span(id, &app("Code"), "focused", 0, 600).unwrap();
-        storage.insert_span(id, &Activity::paused(), "paused", 600, 600).unwrap();
-        storage.recover_orphans().unwrap();
-        let report = storage.get_session_report(id).expect("report");
+    fn review_makes_named_distractions_distracted_and_remembers_work() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Review", Strictness::Normal, "2026-09-22T12:00:00Z", 900).unwrap();
+        storage.insert_span(id, &app("Spotify"), "focused", 0, 300).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 300, 600).unwrap();
+        storage.close_session(id, "2026-09-22T12:15:00Z", "stopped", 900).unwrap();
+        storage.review_session(id, &["spotify".to_string()], &["code".to_string()]).unwrap();
+        let report = storage.get_session_report(id).unwrap();
+        assert_eq!((report.focused_seconds, report.distracted_seconds), (600, 300));
+        assert_eq!(storage.known_work().unwrap(), vec!["code".to_string()]);
+    }
 
-        assert_eq!(report.duration_seconds, 600);
-        assert_eq!(report.focus_percent, 100);
+    #[test]
+    fn version_fourteen_cuts_old_pauses_out_of_the_timeline() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Old", Strictness::Normal, "2026-09-22T12:00:00Z", 900).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 0, 100).unwrap();
+        storage.insert_span(id, &app("Paused"), "paused", 100, 50).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 150, 100).unwrap();
+        storage.insert_span(id, &app("Paused"), "paused", 250, 30).unwrap();
+        storage.insert_span(id, &site("youtube.com"), "distracted", 280, 20).unwrap();
+        storage.insert_event(id, 160, "nudge", None).unwrap();
+        storage.conn.execute_batch("PRAGMA user_version = 13;").unwrap();
+        let reopened = SessionStorage::from_connection(storage.conn).unwrap();
+        let report = reopened.get_session_report(id).unwrap();
+        let spans: Vec<_> = report.spans.iter()
+            .map(|span| (span.started_offset_seconds, span.seconds, span.state.as_str())).collect();
+        assert_eq!(spans, vec![(0, 100, "focused"), (100, 100, "focused"), (200, 20, "distracted")]);
+        assert_eq!(report.events[0].at_offset_seconds, 110);
     }
 
     #[test]

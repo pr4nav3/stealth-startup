@@ -646,6 +646,13 @@ let siteNames: Record<string, string> = {};
 let appNames: Record<string, string> = {};
 let editingRecapNames = false;
 let historyRename: { kind: "app" | "website"; key: string; value: string } | null = null;
+/** "Any distractions here?" after a session: what it counted as work, each one tapped or renamed. */
+interface ReviewItem extends RecapApp {
+  distraction: boolean;
+  renaming: boolean;
+  name: string;
+}
+let sessionReview: { id: number; items: ReviewItem[]; saving: boolean } | null = null;
 let customPhrases: PhraseDefinition[] = [];
 let customPhraseSets: string[] = [];
 let phraseOverrides: Record<string, PhraseDefinition> = {};
@@ -882,7 +889,7 @@ async function refreshSnapshotNow(): Promise<void> {
       ensureSelectedVoice();
       // Not while a dialog or editor is open: a recording or clip job would vanish behind History.
       if (historyHydrated && newest && !snapshot.current && !editorIsOpen()) {
-        void openHistoryReport(newest);
+        void openHistoryReport(newest, true);
         return;
       }
       if (historyHydrated && newest && activeTab === "history") {
@@ -1262,7 +1269,7 @@ function renderSession(current: CurrentSession | null): string {
   if (!current) {
     void ensureDayCard();
     const note = dailyNote();
-    const streak = streakInfo();
+    const streak = { days: streakDays() };
     return `
       <section class="home-ready">
         <div class="home-grid">
@@ -1272,8 +1279,8 @@ function renderSession(current: CurrentSession | null): string {
               <strong>${streak.days}</strong>
               <span>day streak</span>
             </div>
-            <p class="streak-rule">25 min a day keeps it. Weekends don't count or break it.</p>
-            ${renderCalendar(streak)}
+            <p class="streak-rule">25 focused minutes a day keeps it going.</p>
+            ${renderCalendar()}
           </article>
           <div class="home-side">
             ${onboardingVisible() ? renderOnboardingLine() : ""}
@@ -1452,6 +1459,114 @@ function renderActiveSessionControls(current: CurrentSession): string {
   `;
 }
 
+function renderSessionReview(review: { items: ReviewItem[]; saving: boolean }): string {
+  const marked = review.items.filter((item) => item.distraction).length;
+  const chips = review.items
+    .map((item, index) => {
+      const main = item.renaming
+        ? `<input class="review-name" data-review-name="${index}" maxlength="60" value="${attr(item.name)}" aria-label="New name for ${attr(item.label)}" />`
+        : `<button class="review-toggle" type="button" data-review-toggle="${index}" aria-pressed="${item.distraction}">
+            <span>${escapeHtml(item.name)}${item.name !== item.label ? `<small class="review-was">was ${escapeHtml(item.label)}</small>` : ""}</span>
+            <small>${escapeHtml(formatHours(item.seconds))}</small>
+          </button>`;
+      return `<div class="review-chip ${item.distraction ? "is-distraction" : ""}">${main}<button class="review-rename" type="button" data-review-rename="${index}">${item.renaming ? "Save" : "Rename"}</button></div>`;
+    })
+    .join("");
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel review-panel" role="dialog" aria-modal="true" aria-labelledby="review-title">
+        <p class="eyebrow">Session done</p>
+        <h2 id="review-title">Any distractions here?</h2>
+        <p class="review-intro">These counted as work. Tap any that weren't.</p>
+        <div class="review-chips">${chips}</div>
+        <div class="review-foot">
+          <button class="review-later" type="button" data-action="review-later">Ask me later</button>
+          <button class="${marked ? "danger" : "primary"}" type="button" data-action="review-save" ${review.saving ? "disabled" : ""}>${marked ? `Add ${marked} to distractions` : "All work"}</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+/** Renames first, then the answers: the distractions go on the list and count in this session. */
+async function saveSessionReview(): Promise<void> {
+  const review = sessionReview;
+  if (!review || review.saving) {
+    return;
+  }
+  review.saving = true;
+  try {
+    for (const item of review.items.filter((item) => item.name.trim() && item.name !== item.label)) {
+      if (item.kind === "website") {
+        siteNames = await invoke<Record<string, string>>("set_site_name", { key: item.key, name: item.name });
+      } else {
+        appNames = await invoke<Record<string, string>>("set_app_name", { key: item.key, name: item.name });
+      }
+    }
+    const saved = await invoke<RulesSaved>("review_session", {
+      id: review.id,
+      distractions: review.items
+        .filter((item) => item.distraction)
+        .map((item) => ({ target: item.kind === "website" ? "website" : "app", value: item.key })),
+      work: review.items.filter((item) => !item.distraction).map((item) => item.key),
+    });
+    permanentRules = saved.rules;
+    sessionReview = null;
+    await openHistoryReport(review.id);
+  } catch (error) {
+    review.saving = false;
+    showFeedback(errorText(error));
+    render();
+  }
+}
+
+function bindSessionReview(root: ParentNode): void {
+  const review = sessionReview;
+  if (!review) {
+    return;
+  }
+  root.querySelectorAll<HTMLButtonElement>("[data-review-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = review.items[Number(button.dataset.reviewToggle)];
+      item.distraction = !item.distraction;
+      render();
+    });
+  });
+  const finishRename = (item: ReviewItem, input: HTMLInputElement | null, keep: boolean) => {
+    if (keep && input) {
+      item.name = input.value.trim() || item.label;
+    }
+    item.renaming = false;
+    render();
+  };
+  root.querySelectorAll<HTMLButtonElement>("[data-review-rename]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.reviewRename);
+      const item = review.items[index];
+      if (item.renaming) {
+        finishRename(item, root.querySelector<HTMLInputElement>(`[data-review-name="${index}"]`), true);
+        return;
+      }
+      review.items.forEach((other) => (other.renaming = false));
+      item.renaming = true;
+      render();
+      root.querySelector<HTMLInputElement>(`[data-review-name="${index}"]`)?.select();
+    });
+  });
+  root.querySelectorAll<HTMLInputElement>("[data-review-name]").forEach((input) => {
+    const item = review.items[Number(input.dataset.reviewName)];
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !composing(event)) {
+        event.preventDefault();
+        finishRename(item, input, true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finishRename(item, null, false);
+      }
+    });
+  });
+}
+
 function renderSessionRulesModal(): string {
   return `
     <div class="modal-backdrop" role="presentation">
@@ -1497,7 +1612,7 @@ function renderOverlay(current: CurrentSession | null): string {
               <summary>More settings</summary>
               <div class="overlay-more-body">
                 <label class="overlay-mute">
-                  <span>Mute nudges for 5 min</span>
+                  <span>Mute for 5 min</span>
                   <span class="toggle-field">
                     <input id="overlay-snooze" class="toggle-input" type="checkbox" ${nudgesMuted ? "checked" : ""} ${held ? "disabled" : ""} aria-label="Mute nudges for 5 minutes" />
                     <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
@@ -3243,7 +3358,7 @@ function renderDownloadBusyModal(): string {
 
 function renderHistory(): string {
   if (historyView === "report" && sessionReport) {
-    return renderSessionReport(sessionReport);
+    return renderSessionReport(sessionReport) + (sessionReview?.id === sessionReport.id ? renderSessionReview(sessionReview) : "");
   }
   if (historyView === "trends") {
     return renderTrends();
@@ -3538,6 +3653,15 @@ function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean
               </span>
             </span>
           `;
+        })
+        .join("")}
+    </div>
+    <div class="trend-spark-labels" aria-hidden="true">
+      ${"<span></span>".repeat(pad)}
+      ${shown
+        .map((week) => {
+          const text = week.week_start === running ? "So far" : formatWeekStart(week.week_start);
+          return `<span class="${week.week_start === weekStart ? "is-viewed" : ""}">${escapeHtml(text)}</span>`;
         })
         .join("")}
     </div>
@@ -3964,7 +4088,8 @@ function renderWeekPlot(weeks: WeekPoint[], ariaLabel: string, options: WeekPlot
     : "";
   const xLabels = points
     .map((point, index) => {
-      if (!showLabel(index)) {
+      // The unfinished week is always labelled, so its hollow mark is never left unexplained.
+      if (!showLabel(index) && !point.current) {
         return "";
       }
       const currentNote = point.current
@@ -4070,22 +4195,22 @@ function renderSessionReport(report: SessionReport): string {
         <button class="small-button" type="button" data-action="close-report">Back</button>
         <button class="small-button danger" type="button" data-action="ask-delete-session" data-session-id="${report.id}">Delete</button>
       </div>
-      <div class="report-stage">
-        <section class="state-slab report-slab">
-          <h2>${escapeHtml(report.goal)}</h2>
-          <p class="report-meta">${escapeHtml(reportSummaryLine(report))}</p>
-          <p class="report-meta report-hint ${report.spans.length ? "" : "is-placeholder"}" ${report.spans.length ? "" : `aria-hidden="true"`}>Hover over a part of the bar to see the app and how long it lasted.</p>
-          ${renderReportTimeline(report)}
+      <section class="state-slab report-slab">
+        <h2>${escapeHtml(report.goal)}</h2>
+        <p class="report-meta">${escapeHtml(reportSummaryLine(report))}</p>
+        <div class="report-bar-head">
+          <p class="report-meta report-hint ${report.spans.length ? "" : "is-placeholder"}" ${report.spans.length ? "" : `aria-hidden="true"`}>Hover over the bar to see each app and how long it lasted.</p>
           ${legend ? `<div class="report-inset">${legend}</div>` : ""}
-        </section>
-        <aside class="report-stats" aria-label="Session stats">
-          ${reportStat("Duration", formatClockWithUnit(report.duration_seconds), "How long the session ran, pauses included")}
-          ${reportStat("Focused", `${report.focus_percent}%`, "Share of the session not spent on a distraction")}
-          ${reportStat("Longest stretch", formatMinutes(report.longest_stretch_seconds), "Longest unbroken run of work")}
-          ${reportStat("Nudges", String(report.nudge_count), "Times Supervisor spoke up about a distraction")}
-          ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds), "Time the webcam saw a phone") : ""}
-        </aside>
-      </div>
+        </div>
+        ${renderReportTimeline(report)}
+      </section>
+      <section class="report-stats" aria-label="Session stats">
+          ${reportStat("Duration", formatClockWithUnit(report.duration_seconds), "How long the session ran. Paused time isn't counted.")}
+        ${reportStat("Focused", `${report.focus_percent}%`, "How much of the session you spent off your distractions.")}
+        ${reportStat("Longest stretch", formatMinutes(report.longest_stretch_seconds), "Your longest run of work without a distraction or stepping away.")}
+        ${reportStat("Nudges", String(report.nudge_count), "How many times Supervisor spoke up to pull you back.")}
+        ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds), "How long the webcam saw a phone in your hand.") : ""}
+      </section>
       <section class="panel recap-apps">
         <p class="eyebrow">WHERE IT WENT</p>
         <h2>Apps & sites</h2>
@@ -4099,25 +4224,75 @@ function renderSessionReport(report: SessionReport): string {
   `;
 }
 
+/** Stat tiles turned over to their explanation; cleared when another report opens. */
+const flippedStats = new Set<string>();
+
+/** A stat tile that turns over on click to say, in plain words, what the number is. */
 function reportStat(labelText: string, value: string, help: string): string {
+  const flipped = flippedStats.has(labelText);
   return `
-    <div class="report-stat" title="${attr(help)}">
-      <span>${escapeHtml(labelText)}</span>
-      <strong>${escapeHtml(value)}</strong>
-    </div>
+    <button class="report-stat ${flipped ? "is-flipped" : ""}" type="button" data-stat-flip="${attr(labelText)}" aria-pressed="${flipped}">
+      <span class="report-stat-face"><span>${escapeHtml(labelText)}</span><strong>${escapeHtml(value)}</strong></span>
+      <span class="report-stat-face report-stat-back">${escapeHtml(help)}</span>
+    </button>
   `;
 }
 
-/** Span offsets include pauses, so the bar can be longer than the timer duration. */
+/** Pauses are cut out, so the bar is the time the session ran; older sessions recorded before
+ *  the gap-free recorder can still run a little past it. */
 function timelineSeconds(report: SessionReport): number {
   const spanEnd = report.spans.reduce((end, span) => Math.max(end, span.started_offset_seconds + span.seconds), 0);
-  const eventEnd = report.events.reduce((end, event) => Math.max(end, event.at_offset_seconds), 0);
-  return Math.max(report.duration_seconds, 1, spanEnd, eventEnd);
+  return Math.max(report.duration_seconds, 1, spanEnd);
+}
+
+/** One stretch of the report's bar: back-to-back spans of the same kind joined. */
+interface TimelineRun {
+  state: string;
+  from: number;
+  to: number;
+  labels: string[];
+}
+
+/** Suspicious reads as a distraction and lost time as away, so each run is one colour. */
+function timelineKind(state: string): string {
+  return state === "suspicious" ? "distracted" : state === "unknown" ? "idle" : state;
+}
+
+/** Spans joined into runs when back to back and the same kind. Nothing short is hidden: the
+ *  bar draws every run at least a few pixels wide. A gap (an unrecorded stretch) is kept. */
+function timelineRuns(spans: ReportSpan[]): TimelineRun[] {
+  const runs: TimelineRun[] = [];
+  for (const span of spans) {
+    const from = span.started_offset_seconds;
+    const to = from + span.seconds;
+    const state = timelineKind(span.state);
+    const last = runs[runs.length - 1];
+    const touching = last && from - last.to < 2;
+    if (touching && last.state === state) {
+      last.to = to;
+      if (!last.labels.includes(span.label)) {
+        last.labels.push(span.label);
+      }
+    } else {
+      runs.push({ state, from, to, labels: [span.label] });
+    }
+  }
+  return runs;
+}
+
+const TIMELINE_NAMES: Record<string, string> = { phone: "Phone", idle: "Away" };
+
+/** What a run is called on hover: the apps and sites, and how long. Whether it was work or a
+ *  distraction is left to the colour and the legend; Away and Phone have no names of their own. */
+function timelineRunLine(run: TimelineRun): string {
+  const names = run.labels.length > 3 ? `${run.labels.slice(0, 3).join(", ")} +${run.labels.length - 3}` : run.labels.join(", ");
+  const head = run.state === "idle" || run.state === "phone" ? TIMELINE_NAMES[run.state] : names;
+  const seconds = run.to - run.from;
+  return `${head} · ${seconds < 60 ? `${Math.round(seconds)}s` : formatHours(seconds)}`;
 }
 
 function renderReportTimeline(report: SessionReport): string {
   const duration = timelineSeconds(report);
-  const nudges = report.events.filter((event) => event.kind === "nudge");
   if (report.spans.length === 0) {
     // An empty bar where the timeline would be, so the card keeps its layout.
     return `
@@ -4128,27 +4303,170 @@ function renderReportTimeline(report: SessionReport): string {
       </div>
     `;
   }
+  const runs = timelineRuns(report.spans);
+  const pct = (seconds: number) => (seconds / duration) * 100;
+  // The hover reads each run from these; the lifted run and the tip sit outside the clipped bar.
+  const data = runs.map((run) => ({
+    from: pct(run.from),
+    to: pct(run.to),
+    line: timelineRunLine(run),
+    when: `${formatDuration(run.from)} to ${formatDuration(run.to)}`,
+  }));
   return `
-    <div class="timeline-wrap">
+    <div class="timeline-wrap" tabindex="0" aria-label="Session timeline. Use the left and right arrow keys to step through it." data-runs="${attr(JSON.stringify(data))}">
       <div class="timeline-bar" role="img" aria-label="Session timeline">
-        ${report.spans
-          .map((span) => {
-            const title = `${span.label} · ${formatDuration(span.seconds)}`;
-            const left = (span.started_offset_seconds / duration) * 100;
-            const width = (span.seconds / duration) * 100;
-            return `<span class="timeline-span state-${escapeHtml(span.state)}" style="left: ${left.toFixed(3)}%; width: ${width.toFixed(3)}%" title="${attr(title)}"></span>`;
-          })
-          .join("")}
-        ${nudges
-          .map((event) => {
-            const left = Math.min(100, (event.at_offset_seconds / duration) * 100);
-            return `<i class="timeline-tick" style="left: ${left.toFixed(2)}%" title="${attr(`Nudge at ${formatDuration(event.at_offset_seconds)}`)}"></i>`;
-          })
+        ${runs
+          .map((run) => `<span class="timeline-span state-${escapeHtml(run.state)}" style="left: ${pct(run.from).toFixed(3)}%; width: max(3px, ${(pct(run.to) - pct(run.from)).toFixed(3)}%)${pct(run.to) - pct(run.from) < 1 ? "; z-index: 1" : ""}"></span>`)
           .join("")}
       </div>
+      <b class="timeline-lift" aria-hidden="true"></b>
+      <div class="timeline-tip" hidden></div>
     </div>
   `;
 }
+
+type TimelineHoverRun = { from: number; to: number; line: string; when: string };
+
+/** Parts of the bar too thin to point at (under 10px) that sit side by side hover as one group. */
+const TIMELINE_THIN = 10;
+
+function timelineGroups(runs: TimelineHoverRun[], width: number): number[][] {
+  const thin = (index: number) => ((runs[index].to - runs[index].from) / 100) * width < TIMELINE_THIN;
+  const groups: number[][] = [];
+  runs.forEach((_, index) => {
+    const last = groups[groups.length - 1];
+    if (last && thin(index) && thin(last[last.length - 1])) {
+      last.push(index);
+    } else {
+      groups.push([index]);
+    }
+  });
+  return groups;
+}
+
+function clearTimeline(wrap: HTMLElement): void {
+  wrap.querySelector<HTMLElement>(".timeline-lift")!.classList.remove("is-up");
+  wrap.querySelector<HTMLElement>(".timeline-tip")!.hidden = true;
+  delete wrap.dataset.pick;
+}
+
+/** Pops a part, or a group of thin parts, out of the bar and points the tip at it. A group pops
+ *  out as a little zoomed-in bar, each part 16px wide, and the tip lists them in order. */
+function showTimelineGroup(wrap: HTMLElement, group: number[]): void {
+  const bar = wrap.querySelector<HTMLElement>(".timeline-bar")!;
+  const lift = wrap.querySelector<HTMLElement>(".timeline-lift")!;
+  const tip = wrap.querySelector<HTMLElement>(".timeline-tip")!;
+  const runs = JSON.parse(wrap.dataset.runs ?? "[]") as TimelineHoverRun[];
+  const spans = bar.querySelectorAll<HTMLElement>(".timeline-span");
+  const parts = group.map((index) => runs[index]);
+  wrap.dataset.pick = String(group[0]);
+  const inner = bar.clientWidth;
+  const left = (parts[0].from / 100) * inner;
+  const width = Math.max(((parts[parts.length - 1].to - parts[0].from) / 100) * inner, 3);
+  const liftWidth = Math.max(width, group.length > 1 ? group.length * 16 : 12);
+  const center = bar.offsetLeft + bar.clientLeft + left + width / 2;
+  const top = bar.offsetTop + bar.clientTop;
+  const colour = (index: number) => getComputedStyle(spans[index]).backgroundColor;
+  // A group shows each part as an equal slice, with an ink line between.
+  const slice = 100 / group.length;
+  lift.style.background =
+    group.length === 1
+      ? getComputedStyle(spans[group[0]]).background
+      : `linear-gradient(90deg, ${group.map((index, n) => `${colour(index)} ${n * slice}% ${(n + 1) * slice}%`).join(", ")})`;
+  if (group.length > 1) {
+    lift.style.backgroundImage = `repeating-linear-gradient(90deg, transparent 0 calc(${slice}% - 2px), #101010 calc(${slice}% - 2px) ${slice}%), ${lift.style.backgroundImage}`;
+  }
+  // Coming up from nothing: start flush with the bar, then grow; a popped part slides along.
+  if (!lift.classList.contains("is-up")) {
+    lift.style.transition = "none";
+    lift.style.top = `${top}px`;
+    lift.style.height = `${bar.clientHeight}px`;
+    lift.style.left = `${center - width / 2}px`;
+    lift.style.width = `${width}px`;
+    void lift.offsetWidth;
+    lift.style.transition = "";
+  }
+  lift.style.top = `${top - 9}px`;
+  lift.style.height = `${bar.clientHeight + 18}px`;
+  lift.style.left = `${center - liftWidth / 2 - 6}px`;
+  lift.style.width = `${liftWidth + 12}px`;
+  lift.classList.add("is-up");
+  const from = parts[0].when.split(" to ")[0];
+  const to = parts[parts.length - 1].when.split(" to ")[1];
+  tip.innerHTML =
+    group.length === 1
+      ? `<b>${escapeHtml(parts[0].line)}</b><small>${escapeHtml(parts[0].when)}</small>`
+      : `${parts.map((part, n) => `<b class="timeline-tip-row"><i style="background: ${colour(group[n])}"></i>${escapeHtml(part.line)}</b>`).join("")}<small>${escapeHtml(from)} to ${escapeHtml(to)}</small>`;
+  tip.hidden = false;
+  const half = tip.offsetWidth / 2;
+  const tipLeft = Math.min(Math.max(center, bar.offsetLeft + half), bar.offsetLeft + bar.offsetWidth - half);
+  tip.style.left = `${tipLeft}px`;
+  tip.style.setProperty("--caret", `${center - tipLeft + half}px`);
+}
+
+/** One hover for the whole bar: the part under the cursor, or a thin one (or a group of thin
+ *  ones) within 8px, so even a sliver can be found without aiming at it. */
+function hoverTimeline(event: MouseEvent): void {
+  const wrap = (event.target as HTMLElement).closest<HTMLElement>(".timeline-wrap[data-runs]");
+  document.querySelectorAll<HTMLElement>(".timeline-wrap[data-pick]").forEach((other) => {
+    if (other !== wrap) {
+      clearTimeline(other);
+    }
+  });
+  const bar = wrap?.querySelector<HTMLElement>(".timeline-bar");
+  if (!wrap || !bar) {
+    return;
+  }
+  const box = bar.getBoundingClientRect();
+  const x = event.clientX - box.left;
+  if (x < -8 || x > box.width + 8) {
+    clearTimeline(wrap);
+    return;
+  }
+  const runs = JSON.parse(wrap.dataset.runs ?? "[]") as TimelineHoverRun[];
+  const px = (percent: number) => (percent / 100) * box.width;
+  const groups = timelineGroups(runs, box.width);
+  const reach = (group: number[]) => {
+    const from = px(runs[group[0]].from);
+    return [from, Math.max(px(runs[group[group.length - 1]].to), from + 3)];
+  };
+  let pick = groups.find((group) => x >= reach(group)[0] && x < reach(group)[1]) ?? groups[groups.length - 1];
+  let nearest = Infinity;
+  groups.forEach((group) => {
+    const [from, to] = reach(group);
+    const distance = x < from ? from - x : x > to ? x - to : 0;
+    if ((group.length > 1 || to - from < TIMELINE_THIN) && distance <= 8 && distance < nearest) {
+      nearest = distance;
+      pick = group;
+    }
+  });
+  showTimelineGroup(wrap, pick);
+}
+
+document.addEventListener("mousemove", hoverTimeline);
+
+// Left and Right step through the parts one by one, however thin; Escape lets go.
+document.addEventListener("keydown", (event) => {
+  const wrap = (event.target as HTMLElement).closest?.<HTMLElement>(".timeline-wrap[data-runs]");
+  if (!wrap || !["ArrowLeft", "ArrowRight", "Escape"].includes(event.key)) {
+    return;
+  }
+  event.preventDefault();
+  if (event.key === "Escape") {
+    clearTimeline(wrap);
+    return;
+  }
+  const runs = JSON.parse(wrap.dataset.runs ?? "[]") as TimelineHoverRun[];
+  const current = wrap.dataset.pick === undefined ? (event.key === "ArrowRight" ? -1 : runs.length) : Number(wrap.dataset.pick);
+  const pick = Math.min(Math.max(current + (event.key === "ArrowRight" ? 1 : -1), 0), runs.length - 1);
+  showTimelineGroup(wrap, [pick]);
+});
+document.addEventListener("focusout", (event) => {
+  const wrap = (event.target as HTMLElement).closest?.<HTMLElement>(".timeline-wrap[data-pick]");
+  if (wrap) {
+    clearTimeline(wrap);
+  }
+});
 
 /** Only the states this session's bar actually shows. */
 function renderTimelineLegend(report: SessionReport, unrecorded: boolean): string {
@@ -4159,7 +4477,6 @@ function renderTimelineLegend(report: SessionReport, unrecorded: boolean): strin
     [["phone"], "state-phone", "Phone"],
     // Idle (no input) and device asleep / unknown are one "Away"; hovering a segment says which.
     [["idle", "unknown"], "state-idle", "Away"],
-    [["paused"], "state-paused", "Paused"],
   ]
     .filter(([states]) => (states as string[]).some((state) => present.has(state)))
     .map(([, cls, name]) => [cls as string, name as string]);
@@ -4320,6 +4637,20 @@ function bindEvents(): void {
 
   bindPreflight(document);
   bindClipsControls(document);
+  bindSessionReview(document);
+  document.querySelectorAll<HTMLButtonElement>("[data-stat-flip]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.statFlip ?? "";
+      const flipped = !flippedStats.has(key);
+      if (flipped) {
+        flippedStats.add(key);
+      } else {
+        flippedStats.delete(key);
+      }
+      button.classList.toggle("is-flipped", flipped);
+      button.setAttribute("aria-pressed", String(flipped));
+    });
+  });
 
   document.getElementById("default-strictness")?.addEventListener("change", (event) => {
     void updateDefaultStrictness((event.target as HTMLSelectElement).value as Strictness);
@@ -5049,6 +5380,17 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "review-save") {
+    await saveSessionReview();
+    return;
+  }
+  if (action === "review-later") {
+    // Nothing saved: the same apps come up after the next session.
+    sessionReview = null;
+    render();
+    return;
+  }
+
   if (action === "pin-window" || action === "unpin-window") {
     const enabled = action === "pin-window";
     if (await invokeSnapshot("set_status_window_on_top", { enabled }, false)) {
@@ -5084,7 +5426,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     showFeedback(`Distraction: ${name}`);
   }
   if (ok && action === "stop" && history[0]) {
-    await openHistoryReport(history[0].id);
+    await openHistoryReport(history[0].id, true);
   }
 }
 
@@ -7385,13 +7727,23 @@ function noteNewHistory(items: SessionSummary[]): number | null {
   return newest;
 }
 
-async function openHistoryReport(id: number): Promise<void> {
+/** `review`: the session just ended, so ask about what it counted as work first. */
+async function openHistoryReport(id: number, review = false): Promise<void> {
+  if (sessionReport?.id !== id) {
+    flippedStats.clear();
+  }
   if (settingsView === "webcam") {
     settingsView = "home";
     await stopWebcamPreview();
   }
   try {
     sessionReport = await invoke<SessionReport>("get_session_report", { id });
+    if (review) {
+      const items = await invoke<RecapApp[]>("review_candidates", { id }).catch(() => []);
+      sessionReview = items.length
+        ? { id, saving: false, items: items.map((app) => ({ ...app, distraction: false, renaming: false, name: app.label })) }
+        : null;
+    }
     historyView = "report";
     activeTab = "history";
     lastError = "";
@@ -7580,39 +7932,22 @@ function dayFocusMap(): Map<string, number> {
   return new Map(trends.daily_focus.map((day) => [day.date, day.focus_seconds]));
 }
 
-function isWeekend(date: Date): boolean {
-  return date.getDay() === 0 || date.getDay() === 6;
-}
-
-/**
- * The current streak: consecutive counted days ending today or yesterday. Weekends never
- * break it; a weekend inside the run is a bridge. `chain` is every day drawn as part of it.
- */
-function streakInfo(asOf = dayKey(new Date())): { days: number; chain: Set<string> } {
+/** The current streak: consecutive days with 25 focused minutes, ending today or yesterday.
+ *  Today doesn't break it while there is still time to count. */
+function streakDays(asOf = dayKey(new Date())): number {
   const focus = dayFocusMap();
-  const run: { key: string; counted: boolean }[] = [];
-  const todayKey = dayKey(new Date());
   const cursor = parseDayKey(asOf);
+  let days = 0;
   for (let step = 0; step < 400; step += 1) {
     const key = dayKey(cursor);
-    const counted = (focus.get(key) ?? 0) >= STREAK_DAY_SECONDS;
-    if (counted) {
-      run.push({ key, counted: true });
-    } else if (isWeekend(cursor)) {
-      run.push({ key, counted: false });
-    } else if (!(step === 0 && key === todayKey)) {
-      // A past weekday with no counted time broke the streak; today still has time to count.
+    if ((focus.get(key) ?? 0) >= STREAK_DAY_SECONDS) {
+      days += 1;
+    } else if (!(step === 0 && key === dayKey(new Date()))) {
       break;
     }
     cursor.setDate(cursor.getDate() - 1);
   }
-  // Bridges only count between counted days.
-  while (run.length && !run[0].counted) run.shift();
-  while (run.length && !run[run.length - 1].counted) run.pop();
-  return {
-    days: run.filter((day) => day.counted).length,
-    chain: new Set(run.map((day) => day.key)),
-  };
+  return days;
 }
 
 /**
@@ -7634,7 +7969,7 @@ function monthLabel(date: Date): string {
   return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
-function renderCalendar(streak: { chain: Set<string> }): string {
+function renderCalendar(): string {
   const focus = dayFocusMap();
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -7654,13 +7989,6 @@ function renderCalendar(streak: { chain: Set<string> }): string {
     if (date > today) classes.push("is-future");
     else if (key === dayKey(today)) classes.push("is-today");
     else if (seconds >= STREAK_DAY_SECONDS) classes.push("is-on");
-    if (streak.chain.has(key)) {
-      classes.push("in-chain");
-      if (seconds < STREAK_DAY_SECONDS && key !== dayKey(today)) classes.push("is-bridge");
-      const next = new Date(date);
-      next.setDate(date.getDate() + 1);
-      if (date.getDay() === 0 || !streak.chain.has(dayKey(next))) classes.push("chain-end");
-    }
     const label = `${date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}, ${formatMinutes(seconds)}`;
     days.push(
       `<span class="${classes.join(" ")}" style="animation-delay: ${index * 12}ms" title="${attr(label)}">${date.getDate()}</span>`,
@@ -7867,7 +8195,7 @@ function renderDayCard(todayStreakDays: number): string {
     `;
   }
   const summary = summarizeDay(dayCard);
-  const streakText = streakLabel(streakInfo(summary.day).days);
+  const streakText = streakLabel(streakDays(summary.day));
   const strip = stripRuns(summary.segments)
     .map((run) => `<i class="${run.on ? "strip-on" : "strip-off"}" style="left: ${(run.left * 100).toFixed(2)}%; width: ${(run.width * 100).toFixed(2)}%"></i>`)
     .join("");
@@ -7924,7 +8252,7 @@ async function copyCard(): Promise<void> {
     return;
   }
   const summary = summarizeDay(dayCard);
-  const streakDays = streakInfo(summary.day).days;
+  const streak = streakDays(summary.day);
   const scale = 2;
   const width = 640;
   const height = 316;
@@ -8015,7 +8343,7 @@ async function copyCard(): Promise<void> {
   const stats: [string, string][] = [
     ["FOCUSED", formatHours(summary.focusedSeconds)],
     ["ATTENTION SPAN", formatMinutes(summary.attentionSeconds)],
-    ["STREAK", streakLabel(streakDays)],
+    ["STREAK", streakLabel(streak)],
   ];
   // Three tiles in the app's card language: border, hard shadow, slightly rounded.
   const tileGap = 12;
