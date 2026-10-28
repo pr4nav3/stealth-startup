@@ -232,13 +232,16 @@ interface DailyFocus {
   session_count: number;
 }
 
-interface TrendWeek {
-  week_start: string;
+/** One week (from Monday) or month (from the 1st); `start` is its first day. */
+interface TrendPeriod {
+  start: string;
   session_count: number;
   focus_seconds: number;
   median_stretch_seconds: number;
   recovery_median_seconds: number | null;
 }
+
+type TrendUnit = "week" | "month";
 
 interface FocusRecap {
   start: string;
@@ -255,9 +258,8 @@ interface HistoryWeek {
 
 interface TrendsData {
   daily_focus: DailyFocus[];
-  /** Oldest first, ending with the current week. */
-  weeks: TrendWeek[];
-  full_weeks: number;
+  /** The last eight weeks, oldest first, ending with the current week. */
+  weeks: TrendPeriod[];
   week_recap: FocusRecap;
 }
 
@@ -265,6 +267,8 @@ type HistoryView = "list" | "report" | "trends";
 
 /** Trends need this many completed weeks before week-over-week lines mean anything. */
 const TRENDS_UNLOCK_WEEKS = 2;
+/** Bars per screen of Trends: about three months of weeks, or a year of months. */
+const TREND_WINDOW = 12;
 
 interface RecapBucket {
   label: string;
@@ -652,10 +656,14 @@ const APP_GROUPS = ["Distractions", "Work", "Away"];
 /** How the groups and scores are decided, under every Apps & sites list. */
 /** False until the first get_trends answers: the calendar waits for it before popping in. */
 let trendsLoaded = false;
+/** Trends: every week and month from the first session through now (null until opened), which
+ *  of the two the bars show, and how many windows of TREND_WINDOW back from now. */
+let trendPeriods: Record<TrendUnit, TrendPeriod[]> | null = null;
+let trendUnit: TrendUnit = "week";
+let trendPage = 0;
 let trends: TrendsData = {
   daily_focus: [],
   weeks: [],
-  full_weeks: 0,
   week_recap: EMPTY_RECAP,
 };
 let historyWeekStart = "";
@@ -3924,7 +3932,7 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
 function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: boolean): string {
   const weeks = trends.weeks;
   const previousStart = addDaysKey(weekStart, -7);
-  const previous = weeks.find((week) => week.week_start === previousStart);
+  const previous = weeks.find((week) => week.start === previousStart);
   const current = weekStart === thisMondayKey();
   const todayIndex = (new Date().getDay() + 6) % 7;
   let value = "—";
@@ -3935,8 +3943,8 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: b
     value = "No weeks yet";
     caption = "Finish a session and this week starts the chart.";
   } else if (!previous) {
-    value = weeks[0].week_start === weekStart ? "First week" : "Off the chart";
-    caption = weeks[0].week_start === weekStart ? "Nothing before it to compare with." : "Trends keep the last eight weeks.";
+    value = weeks[0].start === weekStart ? "First week" : "Off the chart";
+    caption = weeks[0].start === weekStart ? "Nothing before it to compare with." : "Open Trends to see older weeks.";
   } else if (previous.session_count === 0 && recap.session_count === 0) {
     value = "Quiet";
     caption = current ? "No sessions this week or last." : "No sessions this week or the one before.";
@@ -3966,11 +3974,11 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: b
   `;
 }
 
-/** Weeks on the door's chart; Trends itself keeps eight. */
+/** Weeks on the door's chart. */
 const DOOR_WEEKS = 4;
 
 /** Plain bars, newest week at the right, no axis: the figure above says what they mean. */
-function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean): string {
+function renderDoorChart(shown: TrendPeriod[], weekStart: string, animate: boolean): string {
   const maxWeek = Math.max(...shown.map((week) => week.focus_seconds), 1);
   const pad = DOOR_WEEKS - shown.length;
   const running = thisMondayKey();
@@ -3979,9 +3987,9 @@ function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean
       ${'<span class="trend-spark-track"><span class="trend-spark-bar is-empty"></span></span>'.repeat(pad)}
       ${shown
         .map((week, index) => {
-          const classes = ["trend-spark-bar", week.week_start === weekStart ? "is-viewed" : "", week.week_start === running ? "is-running" : "", week.focus_seconds === 0 ? "is-empty" : ""].filter(Boolean).join(" ");
+          const classes = ["trend-spark-bar", week.start === weekStart ? "is-viewed" : "", week.start === running ? "is-running" : "", week.focus_seconds === 0 ? "is-empty" : ""].filter(Boolean).join(" ");
           const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
-          const tip = `${formatWeekStart(week.week_start)} · ${formatHours(week.focus_seconds)}${week.week_start === running ? " so far" : ""}`;
+          const tip = `${formatWeekStart(week.start)} · ${formatHours(week.focus_seconds)}${week.start === running ? " so far" : ""}`;
           return `
             <span class="trend-spark-track" aria-label="${attr(`${tip} · ${sessions}`)}">
               <span class="${classes}" style="--i: ${index}; ${week.focus_seconds ? `height: ${smartBarHeight(week.focus_seconds, maxWeek, 14)}%` : ""}">
@@ -3996,8 +4004,8 @@ function renderDoorChart(shown: TrendWeek[], weekStart: string, animate: boolean
       ${"<span></span>".repeat(pad)}
       ${shown
         .map((week) => {
-          const text = week.week_start === running ? "So far" : formatWeekStart(week.week_start);
-          return `<span class="${week.week_start === weekStart ? "is-viewed" : ""}">${escapeHtml(text)}</span>`;
+          const text = week.start === running ? "So far" : formatWeekStart(week.start);
+          return `<span class="${week.start === weekStart ? "is-viewed" : ""}">${escapeHtml(text)}</span>`;
         })
         .join("")}
     </div>
@@ -4115,12 +4123,6 @@ function renderHistoryItem(item: SessionSummary): string {
   `;
 }
 
-/** The two most recent completed weeks (oldest first); the current week is still running. */
-function completedWeeks(): [TrendWeek | undefined, TrendWeek | undefined] {
-  const done = trends.weeks.slice(0, -1);
-  return [done[done.length - 2], done[done.length - 1]];
-}
-
 function renderAppGroups(apps: RecapApp[], groups: string[]): string {
   const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
   return `<div class="recap-app-list">
@@ -4193,7 +4195,9 @@ function formatRecovery(totalSeconds: number): string {
 }
 
 function renderTrends(): string {
-  const locked = trends.full_weeks < TRENDS_UNLOCK_WEEKS;
+  const weeks = trendPeriods?.week ?? [];
+  // Completed weeks with a session, across all of history; the last week is still running.
+  const full = weeks.slice(0, -1).filter((week) => week.session_count > 0).length;
   return `
     <section class="history-page recap-page">
       <div class="subpage-head recap-head">
@@ -4203,18 +4207,18 @@ function renderTrends(): string {
           <h2>Trends</h2>
         </div>
       </div>
-      ${locked ? renderTrendsLocked() : renderTrendRows()}
+      ${full < TRENDS_UNLOCK_WEEKS ? renderTrendsLocked(full) : renderTrendsBody()}
     </section>
   `;
 }
 
-function renderTrendsLocked(): string {
-  const have = Math.min(trends.full_weeks, TRENDS_UNLOCK_WEEKS);
+function renderTrendsLocked(full: number): string {
+  const have = Math.min(full, TRENDS_UNLOCK_WEEKS);
   return `
     <section class="panel span-card trends-slab trends-locked">
       <p class="eyebrow">Trends</p>
       <p class="span-value">Unlocks after two full weeks</p>
-      <p class="span-caption">Week-over-week lines for focused time, attention span, and recovery need a couple of complete weeks before they mean anything.</p>
+      <p class="span-caption">Lines for focused time, attention span, and recovery need a couple of complete weeks before they mean anything.</p>
       <div class="trend-pips" role="img" aria-label="${have} of ${TRENDS_UNLOCK_WEEKS} full weeks">
         ${Array.from({ length: TRENDS_UNLOCK_WEEKS }, (_, index) => `<span class="${index < have ? "is-on" : ""}"></span>`).join("")}
         <strong>${have} of ${TRENDS_UNLOCK_WEEKS} full weeks</strong>
@@ -4223,112 +4227,198 @@ function renderTrendsLocked(): string {
   `;
 }
 
-function renderTrendRows(): string {
-  const weeks = trends.weeks;
-  const [previous, last] = completedWeeks();
-  const has = (week: TrendWeek | undefined): week is TrendWeek => Boolean(week && week.session_count > 0);
-  const lastRecovery = has(last) ? last.recovery_median_seconds : null;
-  const previousRecovery = has(previous) ? previous.recovery_median_seconds : null;
-  const noLast = has(last) ? "" : "No sessions last week";
+/** The `page`th window of TREND_WINDOW periods back from now, never before the first session. */
+function trendWindow(list: TrendPeriod[], page: number): TrendPeriod[] {
+  const end = list.length - page * TREND_WINDOW;
+  return end > 0 ? list.slice(Math.max(0, end - TREND_WINDOW), end) : [];
+}
 
-  const focus = trendCompare(
-    has(last) ? last.focus_seconds : null,
-    has(previous) ? previous.focus_seconds : null,
-    60,
-    formatHours,
-    false,
-  );
-  const span = trendCompare(
-    has(last) ? last.median_stretch_seconds : null,
-    has(previous) ? previous.median_stretch_seconds : null,
-    30,
-    formatMinutes,
-    false,
-  );
-  const recovery = trendCompare(lastRecovery, previousRecovery, 5, formatRecovery, true);
+function trendPageCount(list: TrendPeriod[]): number {
+  return Math.max(1, Math.ceil(list.length / TREND_WINDOW));
+}
+
+function trendUnitWord(count: number): string {
+  return `${count} ${trendUnit}${count === 1 ? "" : "s"}`;
+}
+
+/** The last day of the period that starts on `start`. */
+function trendPeriodEnd(start: string): string {
+  if (trendUnit === "week") {
+    return addDaysKey(start, 6);
+  }
+  const first = parseDayKey(start);
+  return dayKey(new Date(first.getFullYear(), first.getMonth() + 1, 0));
+}
+
+/** "Aug 10 – Nov 1, 2026", "Dec 29, 2025 – Mar 22, 2026"; months: "Mar – Oct 2026". */
+function formatTrendRange(startKey: string, endKey: string): string {
+  const start = parseDayKey(startKey);
+  const end = parseDayKey(endKey);
+  const sameYear = start.getFullYear() === end.getFullYear();
+  if (trendUnit === "month") {
+    const month = (date: Date, year: boolean) => date.toLocaleDateString(undefined, year ? { month: "short", year: "numeric" } : { month: "short" });
+    return start.getMonth() === end.getMonth() && sameYear ? month(end, true) : `${month(start, !sameYear)} – ${month(end, true)}`;
+  }
+  const day = (date: Date, year: boolean) =>
+    date.toLocaleDateString(undefined, year ? { month: "short", day: "numeric", year: "numeric" } : { month: "short", day: "numeric" });
+  return `${day(start, !sameYear)} – ${day(end, true)}`;
+}
+
+/** What one bar or point is, for its tip and screen readers: "Week of Oct 5", "October 2026". */
+function trendPeriodName(start: string): string {
+  return trendUnit === "week"
+    ? `Week of ${formatWeekStart(start)}`
+    : parseDayKey(start).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+/** Axis labels: a week's month once ("Aug 10", "17", "24"), a month's year when it turns. With
+ *  `every` 2 only every other period is labelled, counted from the newest, and the month or year
+ *  goes on the first label that shows it. */
+function trendTicks(shown: TrendPeriod[], every = 1): string[] {
+  let previous: Date | null = null;
+  return shown.map((period, index) => {
+    if ((shown.length - 1 - index) % every !== 0) {
+      return "";
+    }
+    const date = parseDayKey(period.start);
+    const before = previous;
+    previous = date;
+    if (trendUnit === "month") {
+      const month = date.toLocaleDateString(undefined, { month: "short" });
+      return before && before.getFullYear() !== date.getFullYear() ? `${month} ${date.getFullYear()}` : month;
+    }
+    return before && before.getMonth() === date.getMonth() ? String(date.getDate()) : formatWeekStart(period.start);
+  });
+}
+
+function averageOf(values: number[]): number | null {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+/** The median, or null when there is nothing to take it of. */
+function trendMedian(values: number[]): number | null {
+  return values.length ? medianOf(values) : null;
+}
+
+interface TrendPill {
+  text: string;
+  good: boolean;
+}
+
+/** "↑ 42m vs the 12 before", or Steady inside `threshold`; null with nothing to compare. */
+function trendPill(
+  now: number | null,
+  before: number | null,
+  count: number,
+  threshold: number,
+  format: (seconds: number) => string,
+  lowerIsBetter: boolean,
+): TrendPill | null {
+  if (now == null || before == null) {
+    return null;
+  }
+  const versus = `vs the ${count} before`;
+  const change = now - before;
+  if (Math.abs(change) < threshold) {
+    return { text: `Steady ${versus}`, good: true };
+  }
+  const up = change > 0;
+  const amount = format(Math.abs(change));
+  const text = lowerIsBetter ? `${amount} ${up ? "slower" : "faster"} ${versus}` : `${up ? "↑" : "↓"} ${amount} ${versus}`;
+  return { text, good: lowerIsBetter ? !up : up };
+}
+
+function renderTrendsBody(): string {
+  const list = trendPeriods?.[trendUnit] ?? [];
+  trendPage = Math.min(trendPage, trendPageCount(list) - 1);
+  const shown = trendWindow(list, trendPage);
+  if (!shown.length) {
+    return "";
+  }
+  const before = trendWindow(list, trendPage + 1);
+  // The period in progress is drawn paler and left out of every average.
+  const running = list[list.length - 1].start;
+  const done = (periods: TrendPeriod[]) => periods.filter((period) => period.start !== running);
+  const worked = (periods: TrendPeriod[]) => done(periods).filter((period) => period.session_count > 0);
+  const animate = takeAnimation("trends");
+
+  const focusNow = averageOf(done(shown).map((period) => period.focus_seconds));
+  const focusBefore = averageOf(done(before).map((period) => period.focus_seconds));
+  const total = shown.reduce((sum, period) => sum + period.focus_seconds, 0);
+  const sessions = shown.reduce((sum, period) => sum + period.session_count, 0);
+  const spanNow = trendMedian(worked(shown).map((period) => period.median_stretch_seconds));
+  const spanBefore = trendMedian(worked(before).map((period) => period.median_stretch_seconds));
+  const recoveries = (periods: TrendPeriod[]) =>
+    done(periods).flatMap((period) => (period.recovery_median_seconds == null ? [] : [period.recovery_median_seconds]));
+  const recoveryNow = trendMedian(recoveries(shown));
+  // With no finished period yet, the running one stands in, marked "so far".
+  const runningPeriod = shown[shown.length - 1].start === running ? shown[shown.length - 1] : null;
+  const spanSoFar = spanNow == null && runningPeriod && runningPeriod.session_count > 0 ? runningPeriod.median_stretch_seconds : null;
+  const recoverySoFar = recoveryNow == null ? runningPeriod?.recovery_median_seconds ?? null : null;
+  const recoveryBefore = trendMedian(recoveries(before));
+  const ticks = trendTicks(shown);
+  // The half-width line charts fit every other label.
+  const lineTicks = trendTicks(shown, shown.length > 6 ? 2 : 1);
+  const atFirst = trendPage >= trendPageCount(list) - 1;
 
   return `
+    <div class="panel history-toolbar trends-toolbar">
+      <div class="history-week-nav">
+        <button type="button" class="history-week-arrow" data-action="trend-older" ${atFirst ? "disabled" : ""} aria-label="Earlier ${trendUnit}s">‹</button>
+        <h2>${escapeHtml(formatTrendRange(shown[0].start, trendPeriodEnd(shown[shown.length - 1].start)))}<span>${atFirst ? "From your first session" : trendUnitWord(shown.length)}</span></h2>
+        <button type="button" class="history-week-arrow" data-action="trend-newer" ${trendPage === 0 ? "disabled" : ""} aria-label="Later ${trendUnit}s">›</button>
+      </div>
+      <div class="history-seg" role="group" aria-label="Bars show">
+        <button type="button" class="${trendUnit === "week" ? "is-on" : ""}" aria-pressed="${trendUnit === "week"}" data-action="trend-unit" data-unit="week">Weeks</button>
+        <button type="button" class="${trendUnit === "month" ? "is-on" : ""}" aria-pressed="${trendUnit === "month"}" data-action="trend-unit" data-unit="month">Months</button>
+      </div>
+    </div>
     <div class="trends-grid">
       ${renderTrendCard({
         tone: "focus",
         title: "Focused time",
-        value: has(last) ? formatHours(last.focus_seconds) : "—",
-        compare: noLast || focus,
-        plot: renderWeekPlot(
-          weeks.map((week) => ({
-            weekStart: week.week_start,
-            value: week.session_count > 0 ? week.focus_seconds / 3600 : null,
-            chip: formatHours(week.focus_seconds),
-          })),
-          "Focused hours per week",
-          { unit: "HRS", width: 1040, height: 230, bars: true, partialLast: true },
-        ),
+        value: focusNow == null ? formatHours(shown[shown.length - 1].focus_seconds) : formatHours(focusNow),
+        suffix: focusNow == null ? "so far" : `a ${trendUnit}`,
+        pill: trendPill(focusNow, focusBefore, before.length, 60, formatHours, false),
+        line: `${formatHours(total)} total · ${sessions === 1 ? "1 session" : `${sessions} sessions`}`,
+        plot: renderTrendBars(shown, running, focusNow, ticks, animate),
       })}
       ${renderTrendCard({
         tone: "span",
         title: "Attention span",
         hint: "typical unbroken stretch of work",
-        value: has(last) ? formatMinutes(last.median_stretch_seconds) : "—",
-        compare: noLast || span,
-        plot: renderWeekPlot(
-          weeks.map((week) => ({
-            weekStart: week.week_start,
-            value: week.session_count > 0 ? week.median_stretch_seconds / 60 : null,
-            chip: formatStretchChip(week.median_stretch_seconds),
-          })),
-          "Attention span per week: the typical uninterrupted stretch",
-          { unit: "MIN", width: 440, height: 250, partialLast: true, emptyNote: "No stretch of work recorded yet" },
+        value: spanNow != null ? formatMinutes(spanNow) : spanSoFar != null ? formatMinutes(spanSoFar) : "—",
+        suffix: spanNow != null ? "typical" : spanSoFar != null ? "so far" : "",
+        pill: trendPill(spanNow, spanBefore, before.length, 60, formatMinutes, false),
+        plot: renderTrendLine(
+          shown.map((period) => ({ start: period.start, value: period.session_count > 0 ? period.median_stretch_seconds : null, label: formatMinutes(period.median_stretch_seconds) })),
+          running,
+          spanNow,
+          lineTicks,
+          "No stretch of work recorded yet",
         ),
       })}
       ${renderTrendCard({
         tone: "recovery",
         title: "Recovery",
         hint: "time back to work after a distraction · lower is better",
-        value: lastRecovery == null ? "—" : formatRecovery(lastRecovery),
-        compare: noLast || (lastRecovery == null ? { line: "No distractions last week" } : recovery),
-        plot: renderWeekPlot(
-          weeks.map((week) => ({
-            weekStart: week.week_start,
-            value: week.recovery_median_seconds == null ? null : week.recovery_median_seconds / 60,
-            chip: week.recovery_median_seconds == null ? "" : formatRecovery(week.recovery_median_seconds),
+        value: recoveryNow != null ? formatRecovery(recoveryNow) : recoverySoFar != null ? formatRecovery(recoverySoFar) : "—",
+        suffix: recoveryNow != null ? "typical" : recoverySoFar != null ? "so far" : "",
+        pill: trendPill(recoveryNow, recoveryBefore, before.length, 5, formatRecovery, true),
+        plot: renderTrendLine(
+          shown.map((period) => ({
+            start: period.start,
+            value: period.recovery_median_seconds,
+            label: period.recovery_median_seconds == null ? "" : formatRecovery(period.recovery_median_seconds),
           })),
-          "Typical time back to work after a distraction, per week",
-          { unit: "MIN", width: 440, height: 250, partialLast: true, emptyNote: "No distractions yet, so nothing to recover from" },
+          running,
+          recoveryNow,
+          lineTicks,
+          "No distractions yet, so nothing to recover from",
         ),
       })}
     </div>
   `;
-}
-
-interface TrendComparison {
-  /** Short change for the pill, e.g. "↑ 42m"; absent when there is nothing to compare. */
-  pill?: string;
-  good?: boolean;
-  line: string;
-}
-
-function trendCompare(
-  now: number | null,
-  before: number | null,
-  threshold: number,
-  format: (seconds: number) => string,
-  lowerIsBetter: boolean,
-): TrendComparison {
-  if (now == null) {
-    return { line: "No data last week" };
-  }
-  if (before == null) {
-    return { line: "First full week on record" };
-  }
-  // The pill carries the comparison; the line stays empty so the card reads once.
-  const change = now - before;
-  if (Math.abs(change) < threshold) {
-    return { pill: "Steady", good: true, line: "" };
-  }
-  const up = change > 0;
-  const amount = format(Math.abs(change));
-  const pill = lowerIsBetter ? `${amount} ${up ? "slower" : "faster"}` : `${up ? "↑" : "↓"} ${amount}`;
-  return { pill, good: lowerIsBetter ? !up : up, line: "" };
 }
 
 function renderTrendCard(card: {
@@ -4336,172 +4426,110 @@ function renderTrendCard(card: {
   title: string;
   hint?: string;
   value: string;
-  compare: TrendComparison | string;
+  suffix: string;
+  pill: TrendPill | null;
+  line?: string;
   plot: string;
 }): string {
-  const compare = typeof card.compare === "string" ? { line: card.compare } : card.compare;
   return `
     <section class="panel trend-card trend-${card.tone}">
       <div class="trend-head">
         <p class="eyebrow">${escapeHtml(card.title)}</p>
         ${card.hint ? `<p class="trend-hint">${escapeHtml(card.hint)}</p>` : ""}
         <div class="trend-figure">
-          <p class="trend-value">${escapeHtml(card.value)}</p>
-          ${compare.pill ? `<span class="trend-pill ${compare.good ? "is-good" : "is-bad"}">${escapeHtml(compare.pill)}</span>` : ""}
+          <p class="trend-value">${escapeHtml(card.value)}${card.suffix ? `<small>${escapeHtml(card.suffix)}</small>` : ""}</p>
+          ${card.pill ? `<span class="trend-pill ${card.pill.good ? "is-good" : "is-bad"}">${escapeHtml(card.pill.text)}</span>` : ""}
         </div>
-        <p class="trend-line">Last full week${compare.line ? ` · ${escapeHtml(compare.line)}` : ""}</p>
+        ${card.line ? `<p class="trend-line">${escapeHtml(card.line)}</p>` : ""}
       </div>
       ${card.plot}
     </section>
   `;
 }
 
-interface WeekPoint {
-  weekStart: string;
-  /** In axis units (minutes, hours); null when the week has nothing to plot. */
-  value: number | null;
-  chip: string;
-}
-
-interface WeekPlotOptions {
-  unit?: string;
-  height?: number;
-  width?: number;
-  /** Volumes (hours) read better as bars; rates and durations as a line. */
-  bars?: boolean;
-  /** Draw the running week as a hollow, unconnected dot so a partial week never looks like a drop. */
-  partialLast?: boolean;
-  /** Shown over the grid when no week has a value. */
-  emptyNote?: string;
-}
-
-function renderWeekPlot(weeks: WeekPoint[], ariaLabel: string, options: WeekPlotOptions = {}): string {
-  const { unit = "", height = 268, width = 680, bars = false, partialLast = false, emptyNote = "Nothing to plot yet" } = options;
-  const left = 64;
-  const right = 22;
-  const top = 36;
-  const bottom = 56;
-  const plotW = width - left - right;
-  const plotH = height - top - bottom;
-  const { max: axisMax, step } = niceAxis(Math.max(0, ...weeks.map((week) => week.value ?? 0)));
-  const ticks: number[] = [];
-  for (let tick = 0; tick <= axisMax + step / 1000; tick += step) {
-    ticks.push(tick);
-  }
-  const last = weeks.length - 1;
-  const xAt = (index: number) => left + ((index + 0.5) / weeks.length) * plotW;
-  const yAt = (value: number) => top + plotH - (value / axisMax) * plotH;
-  const points = weeks.map((week, index) => ({
-    x: xAt(index),
-    y: yAt(week.value ?? 0),
-    hasData: week.value != null,
-    current: index === last,
-    label: week.chip,
-    weekLabel: formatWeekStart(week.weekStart),
-  }));
-  const line = bars
-    ? ""
-    : spanLineRibbon(
-        points.map((point) => ({ ...point, hasData: point.hasData && !(partialLast && point.current) })),
-        8,
-      );
-  const baseline = yAt(0);
-  const barWidth = Math.min(46, (plotW / weeks.length) * 0.58);
-  // Eight labels crowd the axis; keep every other one, always ending on this week.
-  const showLabel = (index: number) => weeks.length <= 5 || (last - index) % 2 === 0;
-  const tickLabel = (tick: number) => (step < 1 ? tick.toFixed(1) : String(Math.round(tick)));
-  const grid = ticks
-    .map((tick) => {
-      const y = yAt(tick);
+/** Focused time, one bar per period, as the week chart in History draws its days: a hover nudges
+ *  the bar and its tag rises. A dashed line behind the bars marks the average of the finished
+ *  periods. */
+function renderTrendBars(shown: TrendPeriod[], running: string, average: number | null, ticks: string[], animate: boolean): string {
+  const max = Math.max(...shown.map((period) => period.focus_seconds), 1);
+  const columns = `grid-template-columns: repeat(${shown.length}, minmax(0, 1fr))`;
+  // Bars widen when there are few and slim down as the window fills: 116px for one, the full
+  // column at twelve (never wider than their column).
+  const barWidth = Math.round(Math.max(64, 120 - shown.length * 4.5));
+  const bars = shown
+    .map((period, index) => {
+      const on = period.focus_seconds > 0;
+      const now = period.start === running;
+      const sessions = period.session_count === 1 ? "1 session" : `${period.session_count} sessions`;
+      const tip = on ? `${formatHours(period.focus_seconds)}${now ? " so far" : ""} · ${sessions}` : "No sessions";
       return `
-        <line class="span-grid" x1="${left}" y1="${y.toFixed(1)}" x2="${width - right}" y2="${y.toFixed(1)}" />
-        <text class="span-axis" x="${left - 10}" y="${y.toFixed(1)}" text-anchor="end" dominant-baseline="middle">${tickLabel(tick)}</text>
+        <button type="button" class="recap-bar-col" aria-label="${attr(`${trendPeriodName(period.start)}: ${tip}`)}">
+          <span class="recap-bar-track">
+            <span class="recap-bar ${on ? "is-on" : ""} ${now ? "is-now" : ""}" style="--i: ${index}; ${on ? `height: ${smartBarHeight(period.focus_seconds, max, 14)}%` : ""}">
+              <span class="week-tip">${escapeHtml(tip)}</span>
+            </span>
+          </span>
+        </button>
       `;
     })
     .join("");
-  const unitLabel = unit
-    ? `<text class="span-axis-sub" x="${left - 10}" y="${top - 22}" text-anchor="end">${escapeHtml(unit)}</text>`
-    : "";
-  const xLabels = points
-    .map((point, index) => {
-      // The unfinished week is always labelled, so its hollow mark is never left unexplained.
-      if (!showLabel(index) && !point.current) {
-        return "";
-      }
-      const currentNote = point.current
-        ? `<text class="span-axis-sub" x="${point.x.toFixed(1)}" y="${height - 8}" text-anchor="middle">so far</text>`
-        : "";
-      return `
-        <text class="span-axis" x="${point.x.toFixed(1)}" y="${height - 26}" text-anchor="middle">${escapeHtml(point.weekLabel)}</text>
-        ${currentNote}
-      `;
-    })
-    .join("");
-  const hits = points
-    .filter((point) => point.hasData)
-    .map((point) => {
-      const tipY = point.y - 28;
-      const tipWidth = Math.max(44, point.label.length * 9 + 16);
-      const partial = partialLast && point.current ? "is-partial" : "";
-      const mark = bars
-        ? `<rect class="span-bar ${partial}" x="${(point.x - barWidth / 2).toFixed(1)}" y="${Math.min(point.y, baseline - 3).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${Math.max(3, baseline - point.y).toFixed(1)}" rx="3" />`
-        : `<rect class="span-dot ${partial}" x="${(point.x - 7).toFixed(1)}" y="${(point.y - 7).toFixed(1)}" width="14" height="14" />`;
-      return `
-        <g class="span-hit" tabindex="0">
-          <circle class="span-hotspot" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="22" />
-          ${mark}
-          <g class="span-tip" transform="translate(${point.x.toFixed(1)} ${tipY.toFixed(1)})">
-            <rect x="${-tipWidth / 2}" y="-16" width="${tipWidth}" height="24" rx="6" />
-            <text y="1" text-anchor="middle" dominant-baseline="middle">${escapeHtml(point.label)}</text>
-          </g>
-        </g>
-      `;
-    })
-    .join("");
-
+  const line =
+    average != null && average > 0
+      ? `<div class="trend-avg" style="bottom: calc(var(--axis-gap) + var(--track) * ${(smartBarHeight(average, max, 14) / 100).toFixed(3)})"><b>Avg ${escapeHtml(formatHours(average))}</b></div>`
+      : "";
   return `
-    <svg class="span-plot" viewBox="0 0 ${width} ${height}" role="img" aria-label="${attr(ariaLabel)}">
-      ${grid}
-      ${unitLabel}
-      ${line ? `<path class="span-line" d="${line}" />` : ""}
-      ${xLabels}
-      ${hits}
-      ${points.some((point) => point.hasData) ? "" : `<text class="span-empty" x="${(left + plotW / 2).toFixed(1)}" y="${(top + plotH / 2).toFixed(1)}" text-anchor="middle" dominant-baseline="middle">${escapeHtml(emptyNote)}</text>`}
-    </svg>
+    <div class="trend-bars-plot" style="--bar-w: ${barWidth}px">
+      ${line}
+      <div class="recap-bars trend-bars ${animate ? "is-animated" : ""}" style="${columns}">${bars}</div>
+    </div>
+    <div class="trend-ticks ${shown.length > 8 ? "is-crowded" : ""}" style="${columns}" aria-hidden="true">${ticks.map((tick) => `<span>${escapeHtml(tick)}</span>`).join("")}</div>
   `;
 }
 
-function spanLineRibbon(points: { x: number; y: number; hasData: boolean }[], width: number): string {
-  const r = width / 2;
-  const p = (x: number, y: number) => `${x.toFixed(2)} ${y.toFixed(2)}`;
-  const parts: string[] = [];
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const a = points[i];
-    const b = points[i + 1];
-    if (!a.hasData || !b.hasData) {
-      continue;
-    }
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const len = Math.hypot(dx, dy);
-    if (len < 0.01) {
-      continue;
-    }
-    const nx = (-dy / len) * r;
-    const ny = (dx / len) * r;
-    parts.push(
-      `M${p(a.x + nx, a.y + ny)}L${p(b.x + nx, b.y + ny)}A${r} ${r} 0 0 1 ${p(b.x - nx, b.y - ny)}L${p(a.x - nx, a.y - ny)}A${r} ${r} 0 0 1 ${p(a.x + nx, a.y + ny)}Z`,
-    );
+/** A line through the finished periods with a dashed typical line; the period in progress is a
+ *  hollow point off the line, so a part-period never reads as a drop. The scale starts at zero, so
+ *  a small change looks small, and each point sits over its label, in the bars' columns. */
+function renderTrendLine(
+  points: { start: string; value: number | null; label: string }[],
+  running: string,
+  typical: number | null,
+  ticks: string[],
+  emptyNote: string,
+): string {
+  const known = points.flatMap((point, index) => (point.value == null ? [] : [{ ...point, value: point.value, index }]));
+  if (!known.length) {
+    return `<p class="trend-empty">${escapeHtml(emptyNote)}</p>`;
   }
-  return parts.join("");
-}
-
-/** Three even steps that cover `max`, on round numbers (0.25, 0.5, 1, 2, 5, 10…). */
-function niceAxis(max: number): { max: number; step: number } {
-  const raw = Math.max(max, 0.0001) / 3;
-  const steps = [0.25, 0.5, 1, 2, 5, 10, 15, 20, 30, 60, 120];
-  const step = steps.find((candidate) => candidate >= raw) ?? Math.ceil(raw / 60) * 60;
-  return { max: step * 3, step };
+  const W = 400;
+  const H = 120;
+  const top = Math.max(...known.map((point) => point.value), typical ?? 0) * 1.2 || 1;
+  const x = (index: number) => ((index + 0.5) / points.length) * W;
+  // A zero sits 12 units above the axis, so no point ever touches it.
+  const y = (value: number) => 8 + (H - 20) * (1 - value / top);
+  const finished = known.filter((point) => point.start !== running);
+  const path = finished.map((point) => `${x(point.index).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ");
+  const dots = known
+    .map((point) => {
+      const now = point.start === running;
+      const tip = `${point.label}${now ? " so far" : ""}`;
+      return `
+        <span class="trend-point ${now ? "is-now" : ""}" tabindex="0" role="img" aria-label="${attr(`${trendPeriodName(point.start)}: ${tip}`)}" style="left: ${((x(point.index) / W) * 100).toFixed(2)}%; top: ${((y(point.value) / H) * 100).toFixed(2)}%">
+          <span class="week-tip">${escapeHtml(tip)}</span>
+        </span>
+      `;
+    })
+    .join("");
+  return `
+    <div class="trend-line-plot">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+        <line class="trend-baseline" x1="0" x2="${W}" y1="${H}" y2="${H}" />
+        ${typical != null ? `<line class="trend-typical" x1="0" x2="${W}" y1="${y(typical).toFixed(1)}" y2="${y(typical).toFixed(1)}" />` : ""}
+        ${finished.length > 1 ? `<polyline class="trend-path" points="${path}" />` : ""}
+      </svg>
+      ${dots}
+    </div>
+    <div class="trend-ticks" style="grid-template-columns: repeat(${points.length}, minmax(0, 1fr))" aria-hidden="true">${ticks.map((tick) => `<span>${escapeHtml(tick)}</span>`).join("")}</div>
+  `;
 }
 
 /** The report's bar in miniature: each run of a state at its real place and length, gaps left bare. */
@@ -5400,7 +5428,28 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     sessionReport = null;
     editingRecapNames = false;
     historyRename = null;
+    trendPage = 0;
+    pendingAnimations.add("trends");
     await refreshTrends(false);
+    await refreshTrendPeriods();
+    render();
+    return;
+  }
+
+  if (action === "trend-unit" || action === "trend-older" || action === "trend-newer") {
+    if (action === "trend-unit") {
+      const unit = source?.dataset.unit === "month" ? "month" : "week";
+      if (unit === trendUnit) {
+        return;
+      }
+      trendUnit = unit;
+      trendPage = 0;
+    } else {
+      const pages = trendPageCount(trendPeriods?.[trendUnit] ?? []);
+      trendPage = Math.max(0, Math.min(pages - 1, trendPage + (action === "trend-older" ? 1 : -1)));
+    }
+    // New numbers rise in, as a new week does in History.
+    pendingAnimations.add("trends");
     render();
     return;
   }
@@ -8260,6 +8309,19 @@ function formValue(form: HTMLFormElement, name: string): string {
   return "";
 }
 
+/** Every week and month since the first session, for Trends; it pages through them itself. */
+async function refreshTrendPeriods(): Promise<void> {
+  try {
+    const [week, month] = await Promise.all([
+      invoke<TrendPeriod[]>("get_trend_periods", { unit: "week" }),
+      invoke<TrendPeriod[]>("get_trend_periods", { unit: "month" }),
+    ]);
+    trendPeriods = { week, month };
+  } catch (error) {
+    lastError = errorText(error);
+  }
+}
+
 async function refreshTrends(shouldRender = true): Promise<void> {
   try {
     trends = await invoke<TrendsData>("get_trends");
@@ -8268,6 +8330,10 @@ async function refreshTrends(shouldRender = true): Promise<void> {
     lastError = errorText(error);
   }
   trendsLoaded = true;
+  // A finished session changes the open Trends page too.
+  if (appView === "main" && activeTab === "history" && historyView === "trends") {
+    await refreshTrendPeriods();
+  }
   if (shouldRender) {
     render();
   }
@@ -8589,7 +8655,7 @@ function streakDays(asOf = dayKey(new Date())): number {
  * first draw that shows the calendar or the week's charts plays it, and every later redraw
  * leaves them standing.
  */
-const pendingAnimations = new Set<"calendar" | "history">(["calendar"]);
+const pendingAnimations = new Set<"calendar" | "history" | "trends">(["calendar"]);
 
 function animateOnArrival(tab: Tab): void {
   if (tab === "session") {
@@ -8599,7 +8665,7 @@ function animateOnArrival(tab: Tab): void {
   }
 }
 
-function takeAnimation(name: "calendar" | "history"): boolean {
+function takeAnimation(name: "calendar" | "history" | "trends"): boolean {
   return pendingAnimations.delete(name);
 }
 

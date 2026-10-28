@@ -33,7 +33,7 @@
           const fs = Math.round(hours*3600*perDay[d]);
           if (fs > 0) { total += fs; count += 1; daily.push({date:key(day), focus_percent:72, focus_seconds:fs, session_count:1}); }
         }
-        weeks.push({week_start:key(start), session_count:count, focus_seconds:total, median_stretch_seconds: 60*(9+w*2), recovery_median_seconds: 40+w*12});
+        weeks.push({start:key(start), session_count:count, focus_seconds:total, median_stretch_seconds: 60*(9+w*2), recovery_median_seconds: 40+w*12});
       }
       const thisWeek = weeks[weeks.length-1];
       const sessions = [];
@@ -61,8 +61,8 @@
       const rules = [{id:1,target:"app",value:"Slack",source:"user"},{id:2,target:"website",value:"youtube.com",source:"starter"}];
       if (q.get("many") === "1") rules.push(...["netflix.com","tiktok.com","instagram.com","reddit.com","twitter.com","news.ycombinator.com","twitch.tv","discord.com"].map((v,i)=>({id:10+i,target:"website",value:v,source:"starter"})), {id:50,target:"app",value:"Steam",source:"user"});
       const hist = empty ? [] : sessions;
-      const trendsData = empty ? {daily_focus:[],weeks:[],full_weeks:0,week_recap:{start:key(monday),end:key(addDays(monday,6)),focus_seconds:0,session_count:0}} : {daily_focus:daily, weeks, full_weeks: q.get("first") === "1" ? 0 : 5, week_recap:{start:thisWeek.week_start,end:key(addDays(monday,6)),focus_seconds:thisWeek.focus_seconds,session_count:thisWeek.session_count}};
-      const weekRecap = start => { const ws = weeks.find(w=>w.week_start===start) || thisWeek; const buckets = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((l,i)=>{const d=daily.find(x=>x.date===key(addDays(new Date(start),i))); return {label:l, focus_seconds:d?d.focus_seconds:0};}); return {start, end:key(addDays(new Date(start),6)), focus_seconds:ws.focus_seconds, session_count:ws.session_count, buckets, median_stretch_seconds:ws.median_stretch_seconds, longest_stretch_seconds:1500, recovery_median_seconds:ws.recovery_median_seconds, recovery_count:7, unrecovered_count:1, previous_recovery_median_seconds:ws.recovery_median_seconds+9, apps: report(sessions[0]||{}).apps}; };
+      const trendsData = empty ? {daily_focus:[],weeks:[],week_recap:{start:key(monday),end:key(addDays(monday,6)),focus_seconds:0,session_count:0}} : {daily_focus:daily, weeks, week_recap:{start:thisWeek.start,end:key(addDays(monday,6)),focus_seconds:thisWeek.focus_seconds,session_count:thisWeek.session_count}};
+      const weekRecap = start => { const ws = weeks.find(w=>w.start===start) || thisWeek; const buckets = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((l,i)=>{const d=daily.find(x=>x.date===key(addDays(new Date(start),i))); return {label:l, focus_seconds:d?d.focus_seconds:0};}); return {start, end:key(addDays(new Date(start),6)), focus_seconds:ws.focus_seconds, session_count:ws.session_count, buckets, median_stretch_seconds:ws.median_stretch_seconds, longest_stretch_seconds:1500, recovery_median_seconds:ws.recovery_median_seconds, recovery_count:7, unrecovered_count:1, previous_recovery_median_seconds:ws.recovery_median_seconds+9, apps: report(sessions[0]||{}).apps}; };
       const dl = { polls: 0 };
       const clipFor = (phraseId) => ({clip_id: "mum_" + phraseId, phrase_id: phraseId, file_name: phraseId + ".wav", path: "c:/clips/" + phraseId + ".wav", bytes: 4096});
       const profiles = [
@@ -102,6 +102,20 @@
         get_site_names: () => ({}), get_app_names: () => ({}),
         get_session_snapshot: () => ({status: q.get("live") === "1" ? "active" : "idle", settings, current: q.get("live") === "1" ? {id:1, goal:"Mock session", duration_seconds:1800, elapsed_seconds:liveElapsed, remaining_seconds:1800-liveElapsed, strictness:"normal", status: q.get("pomo") && q.get("pomo") !== "work" ? "paused" : "active", snoozed_until_seconds:null, metrics:{focused_seconds:60,distracted_seconds:0,idle_seconds:0,phone_seconds:0,nudges:0}, evidence:[], focus: q.get("drift") === "1" ? {sample:{captured_at:"", platform:"windows", app_name:"chrome", app_label:"Google Chrome", process_path:"", app_identity:"", app_key:null, process_id:1, window_title:null, window_id:"w1", bounds:{x:0,y:0,width:1,height:1}, idle_seconds:0, permissions:{screen_recording:"granted"}, shell_surface:false, browser:null, media_playing:false}, activity:{kind:"website", key:"youtube.com", label:"YouTube", app_id:"chrome", app_label:"Google Chrome"}, markable:true, state:"distracted", distracting:true, matched_rule:{target:"website", value:"youtube.com"}, seconds_on_current_window:70, interrupt:true, should_nudge:false, next_nudge_in_seconds:null} : null, exceptions: q.get("allowed") === "1" ? [{target:"website", value:"youtube.com"}] : [], pomodoro: q.get("pomo") ? {round: 2, rounds: 4, work_seconds: 1500, break_seconds: 300, phase: q.get("pomo"), phase_remaining_seconds: q.get("pomo") === "work" ? 754 : q.get("pomo") === "break" ? 192 : 0, rounds_focused_seconds: [1500, 1380], moments: q.get("pomo") === "work" ? 2 : q.get("pomo") === "break" ? 3 : 4} : null, camera: q.get("phone") === "1" ? {live:true,present:true,phone:true,phone_seconds:12,phone_distracted:true} : {live:false,present:false,phone:false,phone_seconds:0,phone_distracted:false}} : null, history:hist}),
         get_trends: () => trendsData,
+        // Every week since the first session, and the same summed by month. ?longtrends=1 adds about
+        // seven months of older weeks to page through; ?first=1 leaves one running week (locked).
+        get_trend_periods: a => {
+          if (empty) return [];
+          const all = [...weeks];
+          if (q.get("longtrends") === "1") for (let i = 1; i <= 30; i++) { const start = addDays(new Date(weeks[0].start + "T00:00:00"), -7 * i); const h = i === 9 ? 0 : 1 + ((i * 7) % 5) * 0.6; all.unshift({start:key(start), session_count: h ? 3 + (i % 4) : 0, focus_seconds: Math.round(h * 3600), median_stretch_seconds: 60 * (6 + (i % 6)), recovery_median_seconds: h ? 50 + (i % 5) * 15 : null}); }
+          // ?weeks=3: only the last three weeks have happened (two full ones and this one).
+          if (q.get("weeks")) all.splice(0, all.length - Number(q.get("weeks")));
+          if (a.unit === "week") return all;
+          const months = [];
+          for (const w of all) { const k = w.start.slice(0, 8) + "01"; let m = months.find(x => x.start === k); if (!m) months.push(m = {start:k, session_count:0, focus_seconds:0, stretches:[], recoveries:[]}); m.session_count += w.session_count; m.focus_seconds += w.focus_seconds; if (w.session_count) m.stretches.push(w.median_stretch_seconds); if (w.recovery_median_seconds != null) m.recoveries.push(w.recovery_median_seconds); }
+          const mid = xs => { const s = [...xs].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : 0; };
+          return months.map(m => ({start:m.start, session_count:m.session_count, focus_seconds:m.focus_seconds, median_stretch_seconds: mid(m.stretches), recovery_median_seconds: m.recoveries.length ? mid(m.recoveries) : null}));
+        },
         get_focus_days: a => daily.filter(d => d.date >= a.start && d.date < a.end),
         get_history_week: a => { const ws = a.weekStart; return {week_start:ws, sessions: hist.filter(s=>{const d=new Date(s.started_at); const m=new Date(d); m.setHours(0,0,0,0); m.setDate(m.getDate()-((m.getDay()+6)%7)); return key(m)===ws;}), oldest_day: hist.length? hist[hist.length-1].started_at.slice(0,10):null}; },
         get_session_report: a => a.id === 1 && q.get("live") === "1" ? liveReport() : report(hist.find(s=>s.id===a.id) || hist[0]),

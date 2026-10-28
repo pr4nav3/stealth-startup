@@ -6,7 +6,7 @@ use crate::focus::{
 };
 use crate::storage::{
     focus_state_from_key, focus_state_key, open_or_reset, DailyFocus, HistoryWeek, WeekRecap, SessionReport,
-    SessionStorage, StorageNotice, TrendsData,
+    SessionStorage, StorageNotice, TrendPeriod, TrendUnit, TrendsData,
 };
 use crate::website;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,10 @@ impl SessionManager {
 
     pub fn trends(&self) -> Result<TrendsData, String> {
         self.storage()?.get_trends()
+    }
+
+    pub fn trend_periods(&self, unit: TrendUnit) -> Result<Vec<TrendPeriod>, String> {
+        self.storage()?.get_trend_periods(unit)
     }
 
     pub fn focus_days(&self, start: String, end: String) -> Result<Vec<DailyFocus>, String> {

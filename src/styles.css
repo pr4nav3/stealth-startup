@@ -4205,6 +4205,7 @@ button.wp-day.is-future:disabled {
 /* Bars rise from the baseline once, left to right; `backwards` keeps them flat through the delay
    and leaves hover transforms alone once done. */
 .week-hero-bars.is-animated .recap-bar.is-on,
+.trend-bars.is-animated .recap-bar.is-on,
 .trend-spark.is-animated .trend-spark-bar {
   transform-origin: bottom;
   animation: bar-rise 600ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
@@ -4222,6 +4223,7 @@ button.wp-day.is-future:disabled {
 
 @media (prefers-reduced-motion: reduce) {
   .week-hero-bars.is-animated .recap-bar.is-on,
+  .trend-bars.is-animated .recap-bar.is-on,
   .trend-spark.is-animated .trend-spark-bar {
     animation: none;
   }
@@ -4361,14 +4363,6 @@ button.wp-day.is-future:disabled {
 .trend-door-caption {
   color: var(--sv-muted);
   font-size: var(--sv-type-3);
-}
-
-.span-empty {
-  fill: var(--sv-muted);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 button.trend-door-go {
@@ -4515,83 +4509,6 @@ button.trend-door-go {
 .span-caption {
   margin: 0 0 8px;
   font-size: var(--sv-type-3);
-}
-
-.span-plot {
-  display: block;
-  width: 100%;
-  height: auto;
-  overflow: visible;
-}
-
-.span-line {
-  fill: #141410;
-  stroke: none;
-}
-
-.span-grid {
-  stroke: #141410;
-  stroke-width: 1.5;
-  opacity: 0.18;
-}
-
-.span-axis,
-.span-axis-sub {
-  fill: #141410;
-  font-family: var(--font-mono);
-  font-size: 18px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.span-axis-sub {
-  font-size: 12px;
-  letter-spacing: 0.06em;
-}
-
-.span-hotspot {
-  fill: transparent;
-}
-
-.span-dot {
-  fill: var(--acid);
-  stroke: #141410;
-  stroke-width: 2;
-}
-
-.span-dot.is-partial {
-  fill: transparent;
-  stroke-dasharray: 4 3;
-}
-
-.span-tip {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.span-tip rect {
-  fill: var(--white-soft);
-  stroke: var(--ink);
-  stroke-width: 2;
-}
-
-.span-tip text {
-  fill: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.span-hit:hover .span-tip,
-.span-hit:focus-visible .span-tip {
-  opacity: 1;
-}
-
-.span-hit:focus {
-  outline: none;
 }
 
 .recap-head {
@@ -4787,6 +4704,237 @@ button.recap-bar-col:active .recap-bar {
   line-height: 1;
 }
 
+.trend-value small {
+  margin-left: 6px;
+  font-size: var(--sv-type-3);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* The range: the History toolbar's arrows and title, with a compact Weeks / Months beside them,
+   on one line at the default window size. */
+.trends-toolbar {
+  flex-wrap: nowrap;
+  justify-content: space-between;
+}
+
+.trends-toolbar .history-week-nav {
+  min-width: 0;
+}
+
+.trends-toolbar .history-week-nav h2 {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 1.05rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trends-toolbar .history-seg {
+  flex: none;
+  gap: 8px;
+}
+
+.trends-toolbar .history-seg button {
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: var(--sv-type-4);
+}
+
+/* Bars: the week chart in History. The cards' ink, a paler bar for the period in progress, a
+   short outline for one with no sessions, and a dashed average with its tag on the right. */
+/* An ink axis under the bars, like the line charts, with a gap so no bar ever touches it. */
+.trend-bars-plot {
+  --track: 170px;
+  --axis-gap: 6px;
+  position: relative;
+  /* Room for the widest Avg tag, a month of three-digit hours ("Avg 744h 59m", 102px). */
+  padding-right: 108px;
+  padding-bottom: var(--axis-gap);
+  border-bottom: 2.5px solid #141410;
+}
+
+/* A tighter gap than the week chart, so twelve bars still read as wide; the labels match it. */
+.recap-bars.trend-bars {
+  min-height: 0;
+  margin-top: 0;
+  padding-top: 34px;
+  gap: 6px;
+}
+
+.trend-bars .recap-bar-track {
+  justify-content: center;
+  height: var(--track);
+}
+
+/* Width follows the count (--bar-w, set in renderTrendBars), never wider than its column. */
+.trend-bars .recap-bar {
+  width: min(100%, var(--bar-w));
+  height: 12px;
+  min-height: 0;
+  border: 2px solid rgba(20, 20, 16, 0.35);
+  border-radius: 5px;
+  background: transparent;
+}
+
+.trend-bars .recap-bar.is-on {
+  border-color: #141410;
+  background: #fff7df;
+}
+
+.trend-bars .recap-bar.is-on.is-now {
+  background: color-mix(in srgb, #fff7df 55%, var(--sv-green));
+}
+
+.trend-bars .week-tip {
+  color: var(--ink);
+}
+
+/* Placed at the same height a bar of the average would reach (see renderTrendBars), and drawn
+   first so every bar sits in front of it. */
+.trend-avg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 2px dashed #141410;
+  pointer-events: none;
+}
+
+.trend-avg b {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: #141410;
+  color: var(--sv-green);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  transform: translateY(-50%);
+}
+
+/* Labels sit just under the axis line. */
+.trend-ticks {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  padding-right: 108px;
+}
+
+/* A label may spill into a neighbour's room; only where that neighbour's label is hidden. */
+.trend-ticks span {
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+/* Lines: the finished periods joined, a dashed typical line, the period in progress hollow. */
+.trend-line-plot {
+  position: relative;
+  height: 120px;
+  margin-top: 4px;
+  color: var(--plot-ink);
+}
+
+.trend-line-plot svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.trend-path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.trend-typical {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Points sit above the lines, solid, so a line never shows through one. */
+.trend-point {
+  position: absolute;
+  z-index: 1;
+  width: 11px;
+  height: 11px;
+  border: 2px solid #141410;
+  border-radius: 2px;
+  background: #fff7df;
+  transform: translate(-50%, -50%);
+  transition: transform 100ms ease-out;
+  cursor: default;
+}
+
+.trend-recovery .trend-point {
+  background: var(--sv-coral);
+}
+
+/* The period in progress: filled like the others, with a dashed edge to say it isn't done. */
+.trend-point.is-now {
+  border-style: dashed;
+}
+
+.trend-point:hover,
+.trend-point:focus-visible {
+  z-index: 2;
+  outline: none;
+  transform: translate(calc(-50% - 2px), calc(-50% - 2px));
+}
+
+.trend-point .week-tip {
+  color: var(--ink);
+  transform: translate(-50%, 6px);
+  transition: opacity 100ms ease-out, transform 100ms ease-out;
+}
+
+.trend-point:hover .week-tip,
+.trend-point:focus-visible .week-tip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* Line charts have no Avg tag to make room for. */
+.trend-line-plot + .trend-ticks {
+  padding-right: 0;
+}
+
+.trend-baseline {
+  stroke: currentColor;
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.trend-empty {
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
 .trend-pill {
   padding: 3px 9px;
   border: var(--border);
@@ -4819,45 +4967,30 @@ button.recap-bar-col:active .recap-bar {
   opacity: 0.85;
 }
 
-.trend-card .span-line {
-  fill: var(--plot-ink);
-}
-
-.trend-card .span-grid {
-  stroke: var(--plot-ink);
-}
-
-.trend-card :is(.span-axis, .span-axis-sub) {
-  fill: var(--plot-ink);
-}
-
-.trend-card .span-dot {
-  stroke: var(--plot-ink);
-}
-
-.trend-recovery .span-dot {
-  fill: #ff684f;
-  stroke: #141410;
-}
-
-.trend-card .span-dot.is-partial {
-  fill: transparent;
-}
-
-.span-bar {
-  fill: var(--plot-ink, #141410);
-}
-
-.span-bar.is-partial {
-  fill: transparent;
-  stroke: var(--plot-ink, #141410);
-  stroke-width: 2;
-  stroke-dasharray: 5 4;
-}
-
 @container history (max-width: 620px) {
   .trends-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .trends-toolbar {
+    flex-wrap: wrap;
+  }
+
+  /* Twelve labels crowd a narrow card; every other one reads. */
+  .trend-ticks.is-crowded span:nth-child(even) {
+    visibility: hidden;
+  }
+
+  .trend-bars-plot,
+  .trend-ticks {
+    padding-right: 0;
+  }
+
+  .trend-avg b {
+    top: -26px;
+    right: auto;
+    left: 0;
+    transform: none;
   }
 }
 

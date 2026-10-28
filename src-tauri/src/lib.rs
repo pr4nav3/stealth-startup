@@ -16,7 +16,7 @@ use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
-use storage::{DailyFocus, HistoryWeek, WeekRecap, SessionReport, StoredPhraseLibrary, TrendsData};
+use storage::{DailyFocus, HistoryWeek, WeekRecap, SessionReport, StoredPhraseLibrary, TrendPeriod, TrendUnit, TrendsData};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -177,6 +177,11 @@ fn get_session_report(id: u64, state: State<'_, AppState>) -> Result<SessionRepo
 #[tauri::command]
 fn get_trends(state: State<'_, AppState>) -> Result<TrendsData, String> {
     lock_sessions(&state)?.trends()
+}
+
+#[tauri::command]
+fn get_trend_periods(unit: TrendUnit, state: State<'_, AppState>) -> Result<Vec<TrendPeriod>, String> {
+    lock_sessions(&state)?.trend_periods(unit)
 }
 
 #[tauri::command]
@@ -688,6 +693,7 @@ pub fn run() {
             search_sessions,
             get_session_report,
             get_trends,
+            get_trend_periods,
             get_focus_days,
             delete_session,
             delete_all_history,

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: i32 = 14;
 /// Weeks of history the Trends page and the attention-span chart can draw.
+/// Weeks the History card and the home page read; Trends itself reads every week.
 const TREND_WEEK_COUNT: usize = 8;
 const PHRASE_LIBRARY_KEY: &str = "voice.phrase_library";
 /// Apps and sites the user said were work after a session, so they are never asked about again.
@@ -189,14 +190,44 @@ pub struct DailyFocus {
     pub session_count: u64,
 }
 
-/// One calendar week, from every span recorded in it (not averages of session averages).
+/// One calendar week (from Monday) or month (from the 1st), from every span recorded in it,
+/// not averages of session averages. `start` is its first local day.
 #[derive(Clone, Debug, Serialize)]
-pub struct TrendWeek {
-    pub week_start: String,
+pub struct TrendPeriod {
+    pub start: String,
     pub session_count: u64,
     pub focus_seconds: u64,
     pub median_stretch_seconds: u64,
     pub recovery_median_seconds: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TrendUnit {
+    Week,
+    Month,
+}
+
+impl TrendUnit {
+    fn start_of(self, day: time::Date) -> time::Date {
+        match self {
+            TrendUnit::Week => monday_on_or_before(day),
+            TrendUnit::Month => day.replace_day(1).unwrap_or(day),
+        }
+    }
+
+    fn next(self, start: time::Date) -> time::Date {
+        match self {
+            TrendUnit::Week => start.saturating_add(time::Duration::days(7)),
+            TrendUnit::Month => {
+                let (year, month) = match start.month() {
+                    time::Month::December => (start.year() + 1, time::Month::January),
+                    month => (start.year(), month.next()),
+                };
+                time::Date::from_calendar_date(year, month, 1).unwrap_or(start)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -210,10 +241,9 @@ pub struct FocusRecap {
 #[derive(Clone, Debug, Serialize)]
 pub struct TrendsData {
     pub daily_focus: Vec<DailyFocus>,
-    /// Oldest first, ending with the current week; starts at the first week with data.
-    pub weeks: Vec<TrendWeek>,
-    /// Completed weeks (not this one) that have at least one session.
-    pub full_weeks: u64,
+    /// The last eight weeks, oldest first, ending with the current week; starts at the first of
+    /// them with data.
+    pub weeks: Vec<TrendPeriod>,
     pub week_recap: FocusRecap,
 }
 
@@ -1682,15 +1712,11 @@ impl SessionStorage {
         }
 
         let monday = this_monday();
-        let weeks = self.trend_weeks(monday)?;
-        let full_weeks = weeks
-            .iter()
-            .filter(|week| week.session_count > 0 && week.week_start < format_day(monday))
-            .count() as u64;
+        let oldest = monday.saturating_sub(time::Duration::days(((TREND_WEEK_COUNT - 1) * 7) as i64));
+        let weeks = self.trend_periods(TrendUnit::Week, local_today(), Some(oldest))?;
         Ok(TrendsData {
             daily_focus,
             weeks,
-            full_weeks,
             week_recap: self.focus_recap(
                 monday,
                 monday.saturating_add(time::Duration::days(7)),
@@ -1879,27 +1905,71 @@ impl SessionStorage {
         Ok(stats)
     }
 
-    fn trend_weeks(&self, monday: time::Date) -> Result<Vec<TrendWeek>, String> {
-        let oldest = monday.saturating_sub(time::Duration::days(((TREND_WEEK_COUNT - 1) * 7) as i64));
-        let mut weeks = Vec::with_capacity(TREND_WEEK_COUNT);
-        for index in 0..TREND_WEEK_COUNT {
-            let start = oldest.saturating_add(time::Duration::days(index as i64 * 7));
-            let end = start.saturating_add(time::Duration::days(7));
-            let sessions = self.recap_sessions(&format_day(start), &format_day(end))?;
-            let mut stats = SpanStats::default();
-            for session in &sessions {
-                stats.add(&self.load_spans_for_session(session.id)?);
+    /// Every week or month from the first one with a session through the current one, empty ones
+    /// between included, oldest first. Trends pages through these itself.
+    pub fn get_trend_periods(&self, unit: TrendUnit) -> Result<Vec<TrendPeriod>, String> {
+        self.trend_periods(unit, local_today(), None)
+    }
+
+    /// The periods from the first with a session (on or after `since`) through the one holding
+    /// `today`. One pass over the sessions; each session's spans feed its period's figures.
+    fn trend_periods(
+        &self,
+        unit: TrendUnit,
+        today: time::Date,
+        since: Option<time::Date>,
+    ) -> Result<Vec<TrendPeriod>, String> {
+        let since_day = since.map(format_day);
+        let from = since_day
+            .as_deref()
+            .map(|day| padded_day_bounds(day, day).0)
+            .unwrap_or_default();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, started_at, focused_seconds
+                 FROM session
+                 WHERE ended_at IS NOT NULL AND substr(started_at, 1, 10) >= ?1",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([from], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut buckets = std::collections::BTreeMap::<time::Date, (u64, u64, SpanStats)>::new();
+        for row in rows {
+            let (id, started_at, focused_seconds) = row.map_err(|error| error.to_string())?;
+            let day = local_day(&started_at);
+            if since_day.as_deref().is_some_and(|since| day.as_str() < since) {
+                continue;
             }
-            weeks.push(TrendWeek {
-                week_start: format_day(start),
-                session_count: sessions.len() as u64,
-                focus_seconds: sessions.iter().map(|session| session.focused_seconds).sum(),
+            let Ok(day) = parse_day(&day) else {
+                continue;
+            };
+            let entry = buckets.entry(unit.start_of(day)).or_default();
+            entry.0 += 1;
+            entry.1 += focused_seconds.max(0) as u64;
+            entry.2.add(&self.load_spans_for_session(id as u64)?);
+        }
+        let Some(&first) = buckets.keys().next() else {
+            return Ok(Vec::new());
+        };
+        let last = unit.start_of(today).max(*buckets.keys().next_back().unwrap_or(&first));
+        let mut periods = Vec::new();
+        let mut start = first;
+        while start <= last {
+            let (session_count, focus_seconds, stats) = buckets.remove(&start).unwrap_or_default();
+            periods.push(TrendPeriod {
+                start: format_day(start),
+                session_count,
+                focus_seconds,
                 median_stretch_seconds: median(&stats.stretches),
                 recovery_median_seconds: stats.recovery_median(),
             });
+            start = unit.next(start);
         }
-        let first = weeks.iter().position(|week| week.session_count > 0);
-        Ok(first.map(|index| weeks.split_off(index)).unwrap_or_default())
+        Ok(periods)
     }
 
     fn focus_recap(
@@ -3111,7 +3181,6 @@ mod tests {
         let storage = SessionStorage::open_in_memory().expect("open db");
         let empty = storage.get_trends().expect("empty trends");
         assert!(empty.weeks.is_empty());
-        assert_eq!(empty.full_weeks, 0);
 
         let started = utc_now();
         let id = storage
@@ -3128,8 +3197,42 @@ mod tests {
         assert_eq!(trends.weeks.len(), 1);
         assert_eq!(trends.weeks[0].session_count, 1);
         assert_eq!(trends.weeks[0].median_stretch_seconds, 600);
-        // This week is not a full week yet.
-        assert_eq!(trends.full_weeks, 0);
+    }
+
+    #[test]
+    fn trend_periods_run_from_the_first_session_through_today_with_gaps_kept() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let today = parse_day("2026-10-28").unwrap();
+        assert!(storage.trend_periods(TrendUnit::Week, today, None).unwrap().is_empty());
+        // Noon UTC is the same local day in every real zone.
+        for (started, focused) in [("2026-03-03T12:00:00Z", 600), ("2026-03-05T12:00:00Z", 300), ("2026-05-20T12:00:00Z", 900)] {
+            let id = storage.insert_session("Work", Strictness::Normal, started, 3600).unwrap();
+            storage.insert_span(id, &app("Code"), "focused", 0, focused).unwrap();
+            storage.close_session(id, started, "stopped", focused).unwrap();
+        }
+
+        let months = storage.trend_periods(TrendUnit::Month, today, None).unwrap();
+        let starts: Vec<&str> = months.iter().map(|month| month.start.as_str()).collect();
+        assert_eq!(starts, ["2026-03-01", "2026-04-01", "2026-05-01", "2026-06-01", "2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01"]);
+        assert_eq!((months[0].session_count, months[0].focus_seconds), (2, 900));
+        assert_eq!(months[0].median_stretch_seconds, 450);
+        assert_eq!(months[1].session_count, 0);
+        assert_eq!(months[2].focus_seconds, 900);
+
+        let weeks = storage.trend_periods(TrendUnit::Week, today, None).unwrap();
+        assert_eq!(weeks.first().unwrap().start, "2026-03-02");
+        assert_eq!(weeks.last().unwrap().start, "2026-10-26");
+        assert_eq!(weeks.len(), 35);
+        assert_eq!(weeks[0].session_count, 2);
+        assert_eq!(weeks.iter().map(|week| week.session_count).sum::<u64>(), 3);
+
+        // `since` starts at the first period with data on or after it.
+        let recent = storage.trend_periods(TrendUnit::Week, today, parse_day("2026-05-01").ok()).unwrap();
+        assert_eq!(recent.first().unwrap().start, "2026-05-18");
+        assert_eq!(recent.last().unwrap().start, "2026-10-26");
+
+        // A December runs into the next year's January.
+        assert_eq!(TrendUnit::Month.next(parse_day("2026-12-01").unwrap()), parse_day("2027-01-01").unwrap());
     }
 
     #[test]
