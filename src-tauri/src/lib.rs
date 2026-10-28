@@ -132,9 +132,16 @@ fn snooze_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String>
 #[tauri::command]
 fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
     let now = state.started_at.elapsed();
-    let snapshot = lock_sessions(&state)?.stop(now);
+    let mut sessions = lock_sessions(&state)?;
+    let ended = sessions.has_current();
+    let snapshot = sessions.stop(now);
+    drop(sessions);
 
-    hide_status_window(&app);
+    if ended {
+        session_ended(&app);
+    } else {
+        hide_status_window(&app);
+    }
     sync_session_webcam(&app);
     Ok(snapshot)
 }
@@ -515,6 +522,15 @@ fn set_voice_tone(
 }
 
 #[tauri::command]
+fn rename_voice_profile(
+    app: AppHandle,
+    profile_id: String,
+    display_name: String,
+) -> Result<voice::VoiceProfileSummary, String> {
+    voice::rename_profile(&app, profile_id, display_name)
+}
+
+#[tauri::command]
 fn delete_voice_profile_clips(
     app: AppHandle,
     profile_id: String,
@@ -658,6 +674,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_session,
             get_session_snapshot,
+            quit_app,
             pause_session,
             resume_session,
             snooze_session,
@@ -711,6 +728,7 @@ pub fn run() {
             delete_voice_profile,
             delete_voice_profile_clips,
             set_voice_tone,
+            rename_voice_profile,
             delete_voice_clip,
             start_webcam_preview,
             stop_webcam_preview,
@@ -749,6 +767,10 @@ pub fn run() {
             // voice worker here; outside Windows nothing else kills it when the app exits.
             tauri::RunEvent::Exit => {
                 let state = app.state::<AppState>();
+                // Quitting mid-session ends it as stopped, saving its last seconds, rather than
+                // leaving it open for the next launch to mark abandoned.
+                let now = state.started_at.elapsed();
+                state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).stop(now);
                 // Cancel first: a release alone waits for a running clip to finish.
                 voice::cancel_generation(&state.voice_worker);
                 voice::release_worker(&state.voice_worker);
@@ -866,12 +888,18 @@ fn tray_action(app: &AppHandle, id: &str) {
             sessions.snooze(now, 5 * 60);
         }),
         "stop" => {
+            let mut ended = false;
             with_sessions(app, |sessions, now| {
+                ended = sessions.has_current();
                 sessions.stop(now);
             });
-            hide_status_window(app);
+            if ended {
+                session_ended(app);
+            } else {
+                hide_status_window(app);
+            }
         }
-        "quit" => app.exit(0),
+        "quit" => quit(app),
         _ => {}
     }
 }
@@ -1051,6 +1079,36 @@ fn hide_status_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
         let _ = window.hide();
     }
+}
+
+/// A session ended, run out or stopped: the status window goes, and the main window plays a
+/// closing line. Sent once per session, from wherever it ended.
+const SESSION_END_EVENT: &str = "session-end";
+
+fn session_ended(app: &AppHandle) {
+    hide_status_window(app);
+    let _ = app.emit(SESSION_END_EVENT, ());
+}
+
+/// Quit while a session is running asks first, in the main window ("End this session and
+/// quit?"); its answer comes back as `quit_app`. With no session it quits at once.
+const QUIT_REQUESTED_EVENT: &str = "quit-requested";
+
+fn quit(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let running = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).has_current();
+    if !running {
+        app.exit(0);
+        return;
+    }
+    show_main_window(app);
+    let _ = app.emit(QUIT_REQUESTED_EVENT, ());
+}
+
+/// "End and quit": the exit handler ends the session as stopped, without a closing line.
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -1280,7 +1338,7 @@ fn start_session_ticker(app: AppHandle) {
             )
         };
         if ended_after_tick {
-            hide_status_window(&app);
+            session_ended(&app);
         }
         sync_session_webcam(&app);
         if !should_poll {
@@ -1299,7 +1357,7 @@ fn start_session_ticker(app: AppHandle) {
             let had_current = sessions.has_current();
             let snapshot = sessions.tick(now);
             if had_current && matches!(snapshot.status, session::SessionStatus::Idle) {
-                hide_status_window(&app);
+                session_ended(&app);
             }
             continue;
         };
@@ -1323,7 +1381,7 @@ fn start_session_ticker(app: AppHandle) {
         };
 
         if ended {
-            hide_status_window(&app);
+            session_ended(&app);
         }
     });
 }

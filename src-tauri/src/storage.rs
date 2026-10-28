@@ -68,9 +68,17 @@ pub struct StoredPhraseLibrary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoredPhrase {
     pub id: String,
+    /// The personality the line belongs to.
     pub tone: String,
     pub text: String,
+    /// When the line plays: `nudge`, `phone`, `roundover` or `sessionover`. Older libraries
+    /// have none and kept those moments as tones of their own; cleaning moves them.
+    #[serde(default)]
+    pub moment: String,
 }
+
+/// When a line plays. Back to work (`nudge`) covers drifting and a break ending.
+pub const PHRASE_MOMENTS: [&str; 4] = ["nudge", "phone", "roundover", "sessionover"];
 
 pub struct StoredState {
     pub settings: SessionSettings,
@@ -803,21 +811,22 @@ impl SessionStorage {
             // now: each one goes and everything after it moves back by its length. Latest
             // first, so an earlier pause's offset is never moved before it is cut.
             let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
-            let pauses: Vec<(i64, i64, i64)> = {
+            // A span that began inside a pause (its stored length ran past the resume) moves
+            // back only as far as the pause's start, like an event.
+            let pauses: Vec<(i64, i64, i64, i64)> = {
                 let mut stmt = self.conn
-                    .prepare("SELECT session_id, started_offset_seconds, seconds FROM span
-                              WHERE state = 'paused' ORDER BY session_id, started_offset_seconds DESC")
+                    .prepare("SELECT id, session_id, started_offset_seconds, seconds FROM span
+                              WHERE state = 'paused' ORDER BY session_id, started_offset_seconds DESC, id DESC")
                     .map_err(|error| error.to_string())?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
                     .map_err(|error| error.to_string())?;
                 rows.collect::<Result<_, _>>().map_err(|error| error.to_string())?
             };
-            for (session, start, seconds) in pauses {
-                tx.execute("DELETE FROM span WHERE session_id = ?1 AND state = 'paused' AND started_offset_seconds = ?2",
-                    params![session, start]).map_err(|error| error.to_string())?;
-                tx.execute("UPDATE span SET started_offset_seconds = started_offset_seconds - ?3
-                            WHERE session_id = ?1 AND started_offset_seconds >= ?2",
-                    params![session, start + seconds, seconds]).map_err(|error| error.to_string())?;
+            for (id, session, start, seconds) in pauses {
+                tx.execute("DELETE FROM span WHERE id = ?1", params![id]).map_err(|error| error.to_string())?;
+                tx.execute("UPDATE span SET started_offset_seconds = MAX(?2, started_offset_seconds - ?3)
+                            WHERE session_id = ?1 AND started_offset_seconds > ?2",
+                    params![session, start, seconds]).map_err(|error| error.to_string())?;
                 tx.execute("UPDATE event SET at_offset_seconds = MAX(?2, at_offset_seconds - ?3)
                             WHERE session_id = ?1 AND at_offset_seconds > ?2",
                     params![session, start, seconds]).map_err(|error| error.to_string())?;
@@ -2481,6 +2490,27 @@ fn clean_phrase_library(library: StoredPhraseLibrary) -> StoredPhraseLibrary {
     }
 }
 
+/// A line's personality and moment. Lines saved before personalities kept the app's moments as
+/// tones of their own (`phone`, `roundover`, `breakover`, `sessionover`); those were shared by
+/// every voice, so they move to Gentle, the first personality. A break ending now plays the back
+/// to work lines.
+fn phrase_moment(tone: String, moment: &str) -> (String, String) {
+    if let Some(known) = PHRASE_MOMENTS.iter().find(|item| item.eq_ignore_ascii_case(moment)) {
+        return (tone, (*known).to_string());
+    }
+    let old = match tone.to_ascii_lowercase().as_str() {
+        "phone" => Some("phone"),
+        "roundover" => Some("roundover"),
+        "breakover" => Some("nudge"),
+        "sessionover" => Some("sessionover"),
+        _ => None,
+    };
+    match old {
+        Some(moment) => ("gentle".to_string(), moment.to_string()),
+        None => (tone, "nudge".to_string()),
+    }
+}
+
 fn clean_stored_phrases(phrases: Vec<StoredPhrase>) -> Vec<StoredPhrase> {
     let mut cleaned = Vec::new();
     for phrase in phrases {
@@ -2493,6 +2523,7 @@ fn clean_stored_phrases(phrases: Vec<StoredPhrase>) -> Vec<StoredPhrase> {
             .collect();
         let tone: String = phrase.tone.trim().chars().take(80).collect();
         let text: String = phrase.text.trim().chars().take(140).collect();
+        let (tone, moment) = phrase_moment(tone, phrase.moment.trim());
         if !id.is_empty()
             && !tone.is_empty()
             && !text.is_empty()
@@ -2500,7 +2531,7 @@ fn clean_stored_phrases(phrases: Vec<StoredPhrase>) -> Vec<StoredPhrase> {
                 .iter()
                 .any(|item: &StoredPhrase| item.id.eq_ignore_ascii_case(&id))
         {
-            cleaned.push(StoredPhrase { id, tone, text });
+            cleaned.push(StoredPhrase { id, tone, text, moment });
         }
         if cleaned.len() == 100 {
             break;
@@ -3587,6 +3618,33 @@ mod tests {
                 ("Work".to_string(), "code".to_string(), 480),
             ]
         );
+    }
+
+    #[test]
+    fn old_moment_tones_become_gentle_lines_with_a_moment() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        let old: StoredPhraseLibrary = serde_json::from_str(
+            r#"{"custom_tones":["coach"],"custom_phrases":[
+                {"id":"a","tone":"phone","text":"Phone away."},
+                {"id":"b","tone":"breakover","text":"Break's over."},
+                {"id":"c","tone":"coach","text":"Next rep."},
+                {"id":"d","tone":"coach","text":"Rest.","moment":"roundover"},
+                {"id":"e","tone":"mom","text":"Huh.","moment":"bogus"}
+            ],"phrase_overrides":[{"id":"sessionover_session_done","tone":"sessionover","text":"Done."}]}"#,
+        )
+        .expect("old shape");
+        let saved = storage.save_phrase_library(old).expect("save");
+        let got: Vec<(&str, &str)> = saved
+            .custom_phrases
+            .iter()
+            .map(|phrase| (phrase.tone.as_str(), phrase.moment.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("gentle", "phone"), ("gentle", "nudge"), ("coach", "nudge"), ("coach", "roundover"), ("mom", "nudge")]
+        );
+        assert_eq!(saved.phrase_overrides[0].tone, "gentle");
+        assert_eq!(saved.phrase_overrides[0].moment, "sessionover");
     }
 
     #[test]

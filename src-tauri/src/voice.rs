@@ -1192,6 +1192,33 @@ pub fn set_profile_tone(
     profile_summary(&dir, &profile_id)
 }
 
+/// Renames a voice. Starter voices included: the name is the user's, and reseeding keeps it.
+pub fn rename_profile(
+    app: &AppHandle,
+    profile_id: String,
+    display_name: String,
+) -> Result<VoiceProfileSummary, String> {
+    let root = voice_root(app)?;
+    let profile_id = clean_id(&profile_id)?;
+    let dir = profile_dir(&root, &profile_id);
+    if !dir.exists() {
+        return Err(format!("voice profile not found: {profile_id}"));
+    }
+    let name = display_name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err("voice name must be 1 to 80 characters".to_string());
+    }
+    let mut metadata = read_profile_metadata(&dir).unwrap_or_else(|| VoiceProfileMetadata {
+        profile_id: profile_id.clone(),
+        display_name: profile_id.clone(),
+        reference_retained: dir.join("reference.wav").exists(),
+        tone: None,
+    });
+    metadata.display_name = name.to_string();
+    write_json(&dir.join("profile.json"), &metadata)?;
+    profile_summary(&dir, &profile_id)
+}
+
 pub fn delete_profile_clips(
     app: &AppHandle,
     profile_id: String,
@@ -2900,13 +2927,20 @@ fn seed_starter_profiles(root: &Path, app: Option<&AppHandle>) {
             continue;
         }
         seed_starter_clips(&dir, id, app);
+        // A rename and a picked personality are the user's; only a missing name is filled in.
+        let existing = read_profile_metadata(&dir);
         let _ = write_json(
             &dir.join("profile.json"),
             &VoiceProfileMetadata {
                 profile_id: (*id).to_string(),
-                display_name: (*name).to_string(),
+                display_name: existing
+                    .as_ref()
+                    .map(|existing| existing.display_name.trim())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(name)
+                    .to_string(),
                 reference_retained: true,
-                tone: read_profile_metadata(&dir).and_then(|existing| existing.tone),
+                tone: existing.and_then(|existing| existing.tone),
             },
         );
     }
@@ -3290,7 +3324,7 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_keeps_its_tone_through_reseeding_and_metadata_rewrites() {
+    fn a_profile_keeps_its_tone_and_name_through_reseeding_and_metadata_rewrites() {
         let root = test_dir("tone-keeps");
         let dir = profile_dir(&root, "derek");
         fs::create_dir_all(&dir).unwrap();
@@ -3308,6 +3342,7 @@ mod tests {
         seed_starter_profiles(&root, None);
         let summary = profile_summary(&dir, "derek").unwrap();
         assert_eq!(summary.tone.as_deref(), Some("stern"));
+        assert_eq!(summary.display_name, "Starter Male");
 
         // A profile written before tones existed reads back without one.
         fs::write(

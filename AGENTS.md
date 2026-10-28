@@ -11,6 +11,6 @@ Supervisor-specific defaults:
 - Keep voice generation out of the main app process; focus mode should play cached audio only.
 - Add no new dependency unless the current phase needs it.
 - Leave one runnable check for non-trivial logic.
-- Words users see are plain, never internal names. Say line (not clip, phrase); Generate and Regenerate for making a line's audio; voice engine (not model pack, runtime, worker); recording (not reference); Allow once / Always allow (not exception, Not today, Never a distraction); start screen (not preflight). GPU and vision models stay as they are. Code identifiers keep their names.
+- Words users see are plain, never internal names. Say line (not clip, phrase); personality (not tone); Generate and Regenerate for making a line's audio; voice engine (not model pack, runtime, worker); recording (not reference); Allow once / Always allow (not exception, Not today, Never a distraction); start screen (not preflight). GPU and vision models stay as they are. Code identifiers keep their names.
 
 Baseline branch: `app-v2-simplified-rules` (`main` is an ancestor; fast-forward it when ready). Tracker: `plans/STATUS.md`. Agent starter bugs: `plans/known-issues.md`. Mac work: `plans/mac-handoff.md`.

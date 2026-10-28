@@ -73,9 +73,12 @@ pass from Windows, and what is left for a release, is
       round N. The backend emits `session-moment`; the main window plays a line
       from the new Round over / Break over sets (system sets like Phone, never
       a speaking tone; starter voices ship them)
-- [ ] Not built yet: Pomodoro in the report (rounds count), a closing line when
-      the last round ends, the voice page's Nudges / Moments grouping, the
-      practice run
+- [x] Session over line: every session, Timer or Pomodoro, run out or ended
+      early, closes with a line from the new Session over set. The backend
+      emits `session-end` from each place a session ends; starter voices ship
+      three lines
+- [ ] Not built yet: Pomodoro in the report (rounds count), the voice page's
+      Nudges / Moments grouping, the practice run
 
 ## macOS pass (2026-10-25)
 

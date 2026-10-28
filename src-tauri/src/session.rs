@@ -327,6 +327,8 @@ impl SessionManager {
     /// The ticker went silent from `from` to `now` (sleep or a freeze): nobody observed it.
     pub fn record_lost_time(&mut self, from: Duration, now: Duration) {
         if let Some(session) = self.current.as_mut() {
+            // A sleep that ran past the timer counts only up to its end.
+            let now = session.capped_at_end(now);
             if session.is_recording() && now > from {
                 session.record_lost_time(from, now, self.storage.as_ref());
             }
@@ -511,11 +513,7 @@ impl SessionManager {
             return;
         };
         // A delayed tick (for example after sleep) must not credit time beyond the timer.
-        let now = if session.is_expired(now) {
-            Duration::from_secs(session.started_at_seconds + session.timer_held_seconds + session.duration_seconds)
-        } else {
-            now
-        };
+        let now = session.capped_at_end(now);
         session.finish(now, self.storage.as_ref());
         if session.id != 0 {
             let ended_at = utc_now();
@@ -1228,6 +1226,15 @@ impl Session {
 
     fn is_expired(&self, now: Duration) -> bool {
         self.raw_timer_elapsed_seconds(now) >= self.duration_seconds
+    }
+
+    /// `now`, or the moment the timer ran out if that came first.
+    fn capped_at_end(&self, now: Duration) -> Duration {
+        if self.is_expired(now) {
+            Duration::from_secs(self.started_at_seconds + self.timer_held_seconds + self.duration_seconds)
+        } else {
+            now
+        }
     }
 
     /// Credits time up to `now` to whatever was in front (or the phone in hand).
@@ -2494,6 +2501,18 @@ mod tests {
             .map(|span| span.seconds).sum();
         assert_eq!(lost, 600);
         assert_eq!(report.distracted_seconds, 20);
+    }
+
+    #[test]
+    fn a_sleep_past_the_end_counts_only_up_to_the_end() {
+        let mut manager = test_manager();
+        manager.start(input("Focus", Strictness::Normal), seconds(0));
+        record(&mut manager, sample("Code", "Plan", 0.0), seconds(0));
+        record(&mut manager, sample("Code", "Plan", 0.0), seconds(1200));
+        manager.record_lost_time(seconds(1200), seconds(7200));
+        let metrics = manager.snapshot(seconds(7200)).current.expect("still current").metrics;
+
+        assert_eq!(metrics.focused_seconds + metrics.distracted_seconds + metrics.idle_seconds, 1500);
     }
 
     /// The core promise of the report: from Start to Stop, every unpaused second belongs to exactly one

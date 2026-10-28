@@ -323,6 +323,8 @@ interface RuleEditor {
   name: string;
   nameTouched: boolean;
   preview: RulePreview;
+  /** Delete was pressed once; the actions ask before the rule goes. */
+  confirmDelete?: boolean;
 }
 
 type RulePreview = { target: RuleTarget; value: string } | { error: string } | null;
@@ -426,16 +428,24 @@ interface VoiceOption {
   profile: VoiceProfileSummary | null;
 }
 
+/** When a line plays. `nudge` is Back to work: drifting, and a break ending. */
+type PhraseMoment = "nudge" | "phone" | "roundover" | "sessionover";
+
+/** One line. `tone` is the personality it belongs to. */
 interface PhraseDefinition {
   id: string;
   tone: VoiceTone;
+  moment: PhraseMoment;
   text: string;
 }
 
 interface PhraseEditor {
   phraseId: string | null;
   tone: VoiceTone;
+  moment: PhraseMoment;
   text: string;
+  /** Delete was pressed once; the action row asks before the line goes. */
+  confirmDelete?: boolean;
 }
 
 interface PhraseLibraryState {
@@ -502,6 +512,7 @@ window.addEventListener("storage", (event) => {
   }
   theme = event.newValue === "dark" ? "dark" : "light";
   applyTheme();
+  bindVoiceWaveforms();
 });
 window.addEventListener("resize", fitQuote);
 window.addEventListener("keydown", (event) => {
@@ -519,47 +530,61 @@ const starterRules: AppRule[] = ["youtube.com", "netflix.com", "tiktok.com", "in
   }),
 );
 
-/** The lines a phone nudge plays: a set every voice can have, never a voice's speaking tone. */
-const PHONE_TONE: VoiceTone = "phone";
-/** Lines for the end of a Pomodoro round and the end of its break. */
-const ROUND_OVER_TONE: VoiceTone = "roundover";
-const BREAK_OVER_TONE: VoiceTone = "breakover";
-/** Sets the app plays at its own moments: every voice can have them, none speaks them as its tone. */
-const MOMENT_TONES: VoiceTone[] = [PHONE_TONE, ROUND_OVER_TONE, BREAK_OVER_TONE];
-const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern", ...MOMENT_TONES];
-/** The editor's "New set…" choice. */
+/** Every personality has lines for each moment. The two that repeat all session want a few. */
+const MOMENTS: { id: PhraseMoment; label: string; when: string; often: boolean }[] = [
+  { id: "nudge", label: "Back to work", when: "When you get distracted", often: true },
+  { id: "phone", label: "Phone down", when: "When the camera sees your phone", often: true },
+  { id: "roundover", label: "Take a break", when: "When a Pomodoro round ends", often: false },
+  { id: "sessionover", label: "Session done", when: "When a session ends", often: false },
+];
+const toneOrder: VoiceTone[] = ["gentle", "mom", "genz", "stern"];
 
 const phraseBank: PhraseDefinition[] = [
-  { id: "gentle_back_to_it", tone: "gentle", text: "Hey. Back to it." },
-  { id: "gentle_that_can_wait", tone: "gentle", text: "That can wait. This can't." },
-  { id: "gentle_you_drifted", tone: "gentle", text: "You drifted. It happens. Come back." },
-  { id: "gentle_one_more_push", tone: "gentle", text: "One more push on the real thing." },
-  { id: "gentle_pick_up_where", tone: "gentle", text: "Close that, and pick up where you were." },
-  { id: "mom_i_can_see", tone: "mom", text: "Beta, I can see the screen." },
-  { id: "mom_what_is_this", tone: "mom", text: "Arre, what is this now? Finish your work first." },
-  { id: "mom_again", tone: "mom", text: "Again? Close it. Then we'll talk." },
-  { id: "mom_did_you_finish", tone: "mom", text: "Did you finish? No? Then why is this open." },
-  { id: "mom_two_minutes", tone: "mom", text: "Two minutes becomes two hours. I know you." },
-  { id: "genz_bro_the_tab", tone: "genz", text: "Bro. The tab." },
-  { id: "genz_not_the_assignment", tone: "genz", text: "That's not the assignment." },
-  { id: "genz_lock_in", tone: "genz", text: "Lock in. Like, now." },
-  { id: "genz_why_behind", tone: "genz", text: "This is why you're behind." },
-  { id: "genz_not_today", tone: "genz", text: "We're not doing this today. Back." },
-  { id: "stern_not_the_task", tone: "stern", text: "This isn't the task." },
-  { id: "stern_close_it_now", tone: "stern", text: "Close it. Now." },
-  { id: "stern_you_picked_this", tone: "stern", text: "You picked this. Finish it." },
-  { id: "stern_no_negotiating", tone: "stern", text: "Back to work. No negotiating." },
-  { id: "stern_want_it_back", tone: "stern", text: "Every minute here is one you'll want back." },
-  { id: "phone_down_back_to_it", tone: "phone", text: "Phone down. Back to it." },
-  { id: "phone_it_can_wait", tone: "phone", text: "Put the phone away. It can wait." },
-  { id: "phone_i_can_see_it", tone: "phone", text: "I can see your phone." },
-  { id: "phone_eyes_up", tone: "phone", text: "Wrong screen. Eyes up." },
-  { id: "roundover_good_round", tone: "roundover", text: "Good round. Stand up, drink some water." },
-  { id: "roundover_take_five", tone: "roundover", text: "That's one done. Take a break." },
-  { id: "roundover_eyes_off", tone: "roundover", text: "Nice work. Eyes off the screen for a bit." },
-  { id: "breakover_back_to_it", tone: "breakover", text: "Break's over. Back to it." },
-  { id: "breakover_lets_go", tone: "breakover", text: "Time's up. Let's go." },
-  { id: "breakover_next_round", tone: "breakover", text: "Next round. You've got this." },
+  { id: "gentle_back_to_it", tone: "gentle", moment: "nudge", text: "Hey. Back to it." },
+  { id: "gentle_that_can_wait", tone: "gentle", moment: "nudge", text: "That can wait. This can't." },
+  { id: "gentle_you_drifted", tone: "gentle", moment: "nudge", text: "You drifted. It happens. Come back." },
+  { id: "gentle_one_more_push", tone: "gentle", moment: "nudge", text: "One more push on the real thing." },
+  { id: "gentle_pick_up_where", tone: "gentle", moment: "nudge", text: "Close that, and pick up where you were." },
+  { id: "phone_down_back_to_it", tone: "gentle", moment: "phone", text: "Phone down. Back to it." },
+  { id: "phone_it_can_wait", tone: "gentle", moment: "phone", text: "Put the phone away. It can wait." },
+  { id: "phone_i_can_see_it", tone: "gentle", moment: "phone", text: "I can see your phone." },
+  { id: "phone_eyes_up", tone: "gentle", moment: "phone", text: "Wrong screen. Eyes up." },
+  { id: "roundover_good_round", tone: "gentle", moment: "roundover", text: "Good round. Stand up, drink some water." },
+  { id: "roundover_take_five", tone: "gentle", moment: "roundover", text: "That's one done. Take a break." },
+  { id: "roundover_eyes_off", tone: "gentle", moment: "roundover", text: "Nice work. Eyes off the screen for a bit." },
+  { id: "sessionover_thats_a_wrap", tone: "gentle", moment: "sessionover", text: "That's a wrap. Nice work." },
+  { id: "sessionover_session_done", tone: "gentle", moment: "sessionover", text: "Session done. Go take a breather." },
+  { id: "sessionover_see_you_next", tone: "gentle", moment: "sessionover", text: "That's it for this one. See you next time." },
+  { id: "mom_i_can_see", tone: "mom", moment: "nudge", text: "Beta, I can see the screen." },
+  { id: "mom_what_is_this", tone: "mom", moment: "nudge", text: "Arre, what is this now? Finish your work first." },
+  { id: "mom_again", tone: "mom", moment: "nudge", text: "Again? Close it. Then we'll talk." },
+  { id: "mom_did_you_finish", tone: "mom", moment: "nudge", text: "Did you finish? No? Then why is this open." },
+  { id: "mom_two_minutes", tone: "mom", moment: "nudge", text: "Two minutes becomes two hours. I know you." },
+  { id: "mom_phone_down", tone: "mom", moment: "phone", text: "Beta, phone down. Now." },
+  { id: "mom_phone_texting", tone: "mom", moment: "phone", text: "Who are you texting in the middle of work?" },
+  { id: "mom_phone_away", tone: "mom", moment: "phone", text: "I can see that phone. Put it away." },
+  { id: "mom_roundover", tone: "mom", moment: "roundover", text: "Good job, beta. Go drink some water." },
+  { id: "mom_sessionover", tone: "mom", moment: "sessionover", text: "All done? Good. I'm proud of you." },
+  { id: "genz_bro_the_tab", tone: "genz", moment: "nudge", text: "Bro. The tab." },
+  { id: "genz_not_the_assignment", tone: "genz", moment: "nudge", text: "That's not the assignment." },
+  { id: "genz_lock_in", tone: "genz", moment: "nudge", text: "Lock in. Like, now." },
+  { id: "genz_why_behind", tone: "genz", moment: "nudge", text: "This is why you're behind." },
+  { id: "genz_not_today", tone: "genz", moment: "nudge", text: "We're not doing this today. Back." },
+  { id: "genz_phone_down", tone: "genz", moment: "phone", text: "Phone down, bestie." },
+  { id: "genz_phone_wait", tone: "genz", moment: "phone", text: "The phone can wait. Lock in." },
+  { id: "genz_phone_scrolling", tone: "genz", moment: "phone", text: "Doomscrolling? Right now? Bro." },
+  { id: "genz_roundover", tone: "genz", moment: "roundover", text: "Round done. Go touch grass for five." },
+  { id: "genz_sessionover", tone: "genz", moment: "sessionover", text: "Session done. You ate that." },
+  { id: "stern_not_the_task", tone: "stern", moment: "nudge", text: "This isn't the task." },
+  { id: "stern_close_it_now", tone: "stern", moment: "nudge", text: "Close it. Now." },
+  { id: "stern_you_picked_this", tone: "stern", moment: "nudge", text: "You picked this. Finish it." },
+  { id: "stern_no_negotiating", tone: "stern", moment: "nudge", text: "Back to work. No negotiating." },
+  { id: "stern_want_it_back", tone: "stern", moment: "nudge", text: "Every minute here is one you'll want back." },
+  { id: "stern_phone_down", tone: "stern", moment: "phone", text: "Phone. Down." },
+  { id: "stern_phone_away", tone: "stern", moment: "phone", text: "Put it away. Now." },
+  { id: "stern_phone_task", tone: "stern", moment: "phone", text: "That phone isn't the task." },
+  { id: "stern_roundover", tone: "stern", moment: "roundover", text: "Round done. Five minutes. Then back." },
+  { id: "stern_sessionover", tone: "stern", moment: "sessionover", text: "Done. Same time tomorrow." },
 ];
 
 const noneVoice: VoiceOption = {
@@ -588,7 +613,7 @@ function starterVoiceCard(id: string, profileId: string, name: string, detail: s
   const ready = phrases.filter((phrase) => clipForPhraseId(profile?.clips ?? [], phrase.id)).length;
   return {
     id,
-    name,
+    name: profile?.display_name || name,
     kind: "Bundled",
     detail,
     coverage: `${ready}/${phrases.length} lines ready`,
@@ -625,6 +650,8 @@ const EMPTY_RECAP: FocusRecap = { start: "", end: "", focus_seconds: 0, session_
 /** Order of the groups `apps_from_spans` produces; they sum to the scores. */
 const APP_GROUPS = ["Distractions", "Work", "Away"];
 /** How the groups and scores are decided, under every Apps & sites list. */
+/** False until the first get_trends answers: the calendar waits for it before popping in. */
+let trendsLoaded = false;
 let trends: TrendsData = {
   daily_focus: [],
   weeks: [],
@@ -647,8 +674,6 @@ let historySearchTimer: number | null = null;
 let historySearchRequest = 0;
 /** The week (and data state) whose charts already played their entrance. */
 let historyChartsFor = "";
-/** Arriving on History opens a short window in which its charts rise, even across the data refresh. */
-let historyAnimateUntil = 0;
 /** The week picker under the toolbar: open, the month it shows (its first day), and that
  * month's days with sessions. */
 let weekPickerOpen = false;
@@ -657,6 +682,8 @@ let pickerMonth = "";
 let pickerDays: Record<string, DailyFocus> = {};
 let pickerRequest = 0;
 let historyConfirm: HistoryConfirm | null = null;
+/** Quit was picked from the tray while a session runs. */
+let quitConfirmOpen = false;
 let historyHydrated = false;
 const knownHistoryIds = new Set<number>();
 let permanentRules = cloneRules(starterRules);
@@ -695,13 +722,12 @@ let phraseEditor: PhraseEditor | null = null;
 let hiddenPhrases = new Set<string>();
 let clipsVoiceId = "starter-female";
 let clipsVoiceTouched = false;
-/** The tone whose lines the Clips panel shows; null means the voice's own tone. */
-let clipsTone: VoiceTone | null = null;
-/** The Tones popup: open, a rename in progress, a delete awaiting its confirm, a new name being typed. */
-let tonesOpen = false;
+/** The personality forms under the cards: a rename, a delete awaiting its confirm, a new name. */
 let toneRename: { from: VoiceTone; value: string } | null = null;
 let toneDeleteArmed: VoiceTone | null = null;
 let newToneDraft: string | null = null;
+/** The ⋯ menu on your own personality's card: Rename and Delete. */
+let toneMenuOpen = false;
 let clipQueue: ClipQueue | null = null;
 let clipQueueTicker: number | null = null;
 /** A one-line job started from the line popup reopens that line when its clip lands. */
@@ -743,6 +769,9 @@ let downloadPollInFlight = false;
 let nudgeAudio: HTMLAudioElement | null = null;
 /** The voice and line of the nudge playing or last played (main window). */
 let lastNudgeVoice: Omit<NudgeVoice, "speaking"> | null = null;
+/** The closing line that just played and the session it closed, shown over the report until
+ *  clicked away. */
+let sessionOver: { voice: NudgeVoice; session: SessionSummary | null } | null = null;
 /** The card's copy of it (overlay window), stamped when it arrived. */
 let overlayVoice: (NudgeVoice & { at: number }) | null = null;
 /** When the current distraction card first showed. */
@@ -794,9 +823,14 @@ async function init(): Promise<void> {
     permanentRules = loadedRules;
     customPhraseSets = loadedPhraseLibrary.custom_tones;
     hiddenPhrases = new Set(loadedPhraseLibrary.hidden_phrases);
-    customPhrases = loadedPhraseLibrary.custom_phrases;
+    // An edited line whose bundled original is gone (the old break-over set) stays the user's.
+    const bundled = new Set(phraseBank.map((phrase) => phrase.id));
+    customPhrases = [
+      ...loadedPhraseLibrary.custom_phrases,
+      ...loadedPhraseLibrary.phrase_overrides.filter((phrase) => !bundled.has(phrase.id)),
+    ];
     phraseOverrides = Object.fromEntries(
-      loadedPhraseLibrary.phrase_overrides.map((phrase) => [phrase.id, phrase]),
+      loadedPhraseLibrary.phrase_overrides.filter((phrase) => bundled.has(phrase.id)).map((phrase) => [phrase.id, phrase]),
     );
     history.forEach((item) => knownHistoryIds.add(item.id));
     void refreshCaptureAccess();
@@ -818,9 +852,20 @@ async function init(): Promise<void> {
       await refreshSnapshot();
       void playNudge(snapshot?.current ?? null);
     });
+    // These read the fresh snapshot, so they skip the poll's in-flight guard.
     await listen<string>("session-moment", async (event) => {
-      await refreshSnapshot();
+      await refreshSnapshotNow();
       void playMoment(event.payload);
+    });
+    // Sent once when a session ends, whether it ran out or was ended early.
+    await listen("session-end", async () => {
+      await refreshSnapshotNow();
+      void playSessionOver();
+    });
+    // Quit from the tray with a session running: ask first.
+    await listen("quit-requested", () => {
+      quitConfirmOpen = true;
+      paintModalLayer();
     });
     // The card's orb: stop the line, or hear it again.
     await listen<string>("nudge-control", (event) => {
@@ -838,8 +883,24 @@ async function init(): Promise<void> {
   if (appView === "overlay") {
     await listen<NudgeVoice>("nudge-voice", (event) => {
       overlayVoice = { ...event.payload, at: Date.now() };
-      if (distractionIsActive() || momentCardActive(snapshot?.current ?? null)) {
+      const moment = momentCardActive(snapshot?.current ?? null);
+      if (!moment && !distractionIsActive()) {
+        return;
+      }
+      // Speaking or done: swap the voice row alone, so the card's own entrance (a new tomato
+      // dropping in) doesn't replay. The row's first appearance needs the card rebuilt.
+      const row = document.querySelector(".interrupt-voice");
+      const html = moment ? renderInterruptVoice(momentShownAt) : renderInterruptVoice();
+      if (!row || !html.trim()) {
         render();
+        return;
+      }
+      const holder = document.createElement("div");
+      holder.innerHTML = html;
+      const next = holder.firstElementChild;
+      if (next) {
+        row.replaceWith(next);
+        bindEvents(next);
       }
     });
   }
@@ -847,9 +908,9 @@ async function init(): Promise<void> {
   historyHydrated = true;
 
   if (appView === "main") {
-    void refreshTrends();
-    // Renders when the voice list arrives, so cards that read it are not stale.
-    void refreshVoiceStatus();
+    // One rebuild once the focus days and the voice list are both in, so the calendar pops in
+    // with its data, once.
+    void Promise.all([refreshTrends(false), refreshVoiceStatus(false)]).then(() => render());
     void refreshVoiceDownload(false);
   }
 }
@@ -928,6 +989,10 @@ async function refreshSnapshotNow(): Promise<void> {
       sessionRulesOpen = false;
       ruleEditor = null;
     }
+    // The session ended on its own while Quit was asking: there is nothing left to end.
+    if (!snapshot.current) {
+      quitConfirmOpen = false;
+    }
     const newest = noteNewHistory(history);
     if (appView === "main") {
       ensureSelectedVoice();
@@ -966,16 +1031,26 @@ function closeTopLayer(): void {
     dismissDownloadModal();
     return;
   }
+  if (sessionOver) {
+    sessionOver = null;
+    paintModalLayer();
+    return;
+  }
   if (voiceHelpOpen || modelInfoOpen || memoryInfoOpen) {
     voiceHelpOpen = false;
     modelInfoOpen = false;
     memoryInfoOpen = false;
-    render();
+    paintVoiceLayer();
     return;
   }
-  if (tonesOpen) {
-    closeTonesPopup();
-    render();
+  if (newToneDraft !== null) {
+    newToneDraft = null;
+    paintVoiceLayer();
+    return;
+  }
+  if (toneMenuOpen || toneRename || toneDeleteArmed) {
+    closeToneForms();
+    paintClipsPanel();
     return;
   }
   if (voiceBusy) {
@@ -988,32 +1063,37 @@ function closeTopLayer(): void {
   }
   if (ruleEditor) {
     ruleEditor = null;
-    render();
+    paintRuleEditorHost();
     return;
   }
   if (phraseEditor) {
     phraseEditor = null;
-    render();
+    paintVoiceLayer();
+    return;
+  }
+  if (quitConfirmOpen) {
+    quitConfirmOpen = false;
+    paintModalLayer();
     return;
   }
   if (historyConfirm) {
     historyConfirm = null;
-    render();
+    paintModalLayer();
     return;
   }
   if (voiceDeleteTargetId) {
     voiceDeleteTargetId = null;
-    render();
+    paintVoiceLayer();
     return;
   }
   if (voiceInfoId) {
     dismissVoiceInfo();
-    render();
+    paintVoiceLayer();
     return;
   }
   if (modelDeleteOpen) {
     modelDeleteOpen = false;
-    render();
+    paintVoiceLayer();
     return;
   }
   if (recordingOpen) {
@@ -1023,7 +1103,7 @@ function closeTopLayer(): void {
   if (sessionRulesOpen) {
     sessionRulesOpen = false;
     ruleEditor = null;
-    render();
+    paintSessionRulesLayer();
     return;
   }
   if (onboardingOpen) {
@@ -1034,24 +1114,35 @@ function closeTopLayer(): void {
   if (preflightOpen) {
     preflightOpen = false;
     ruleEditor = null;
-    animateCalendarSoon();
+    animateOnArrival("session");
     render();
+    return;
+  }
+  if (sessionReview) {
+    // Like Ask me later: nothing saved.
+    sessionReview = null;
+    paintReviewLayer();
     return;
   }
   if (historyView === "report" || historyView === "trends") {
     historyView = "list";
     sessionReport = null;
     historyConfirm = null;
+    animateOnArrival("history");
     void refreshHistoryWeek();
     return;
   }
   if (weekPickerOpen) {
     closeWeekPicker();
-    render();
+    paintWeekPicker();
     return;
   }
   if (activeTab === "history" && historySearch) {
     historySearch = "";
+    const input = document.querySelector<HTMLInputElement>("#history-search");
+    if (input) {
+      input.value = "";
+    }
     scheduleHistorySearch();
     return;
   }
@@ -1072,9 +1163,11 @@ function editorIsOpen(): boolean {
     ruleEditor !== null ||
     historyRename !== null ||
     phraseEditor !== null ||
-    tonesOpen ||
+    newToneDraft !== null ||
+    toneRename !== null ||
     recordingOpen ||
     historyConfirm !== null ||
+    quitConfirmOpen ||
     voiceDeleteTargetId !== null ||
     voiceInfoId !== null ||
     clipQueue?.phase === "working" ||
@@ -1281,7 +1374,7 @@ function render(): void {
       ${activeTab === "settings" ? renderSettings() : ""}
       ${activeTab === "history" ? renderHistory() : ""}
       <div id="voice-layer">${renderVoiceDialogs()}</div>
-      ${renderHistoryConfirm()}
+      <div id="modal-layer" class="slot">${renderModalLayer()}</div>
     </main>
   `;
 
@@ -1331,7 +1424,7 @@ function renderSession(current: CurrentSession | null): string {
               <blockquote>“${escapeHtml(note.text)}”</blockquote>
               <p class="quote-by">— ${escapeHtml(note.by)}</p>
             </article>
-            ${renderDayCard(streak.days)}
+            <div id="day-card-slot" class="slot">${renderDayCard(streak.days)}</div>
           </div>
         </div>
         ${renderStartAction()}
@@ -1379,7 +1472,7 @@ function renderSession(current: CurrentSession | null): string {
 
       ${renderActiveSessionControls(current)}
     </section>
-    ${sessionRulesOpen ? renderSessionRulesModal() : ""}
+    <div id="session-rules-layer" class="slot">${sessionRulesOpen ? renderSessionRulesModal() : ""}</div>
   `;
 }
 
@@ -1618,7 +1711,7 @@ async function saveSessionReview(): Promise<void> {
   } catch (error) {
     review.saving = false;
     showFeedback(errorText(error));
-    render();
+    paintReviewLayer();
   }
 }
 
@@ -1629,9 +1722,15 @@ function bindSessionReview(root: ParentNode): void {
   }
   root.querySelectorAll<HTMLButtonElement>("[data-review-toggle]").forEach((button) => {
     button.addEventListener("click", () => {
+      // Tapping away keeps a name being typed, as its tick would.
+      root.querySelectorAll<HTMLInputElement>("[data-review-name]").forEach((input) => {
+        const open = review.items[Number(input.dataset.reviewName)];
+        open.name = input.value.trim() || open.label;
+        open.renaming = false;
+      });
       const item = review.items[Number(button.dataset.reviewToggle)];
       item.distraction = !item.distraction;
-      render();
+      paintReviewLayer();
     });
   });
   const finishRename = (item: ReviewItem, input: HTMLInputElement | null, keep: boolean) => {
@@ -1639,7 +1738,7 @@ function bindSessionReview(root: ParentNode): void {
       item.name = input.value.trim() || item.label;
     }
     item.renaming = false;
-    render();
+    paintReviewLayer();
   };
   root.querySelectorAll<HTMLButtonElement>("[data-review-rename]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1651,7 +1750,7 @@ function bindSessionReview(root: ParentNode): void {
       }
       review.items.forEach((other) => (other.renaming = false));
       item.renaming = true;
-      render();
+      paintReviewLayer();
       root.querySelector<HTMLInputElement>(`[data-review-name="${index}"]`)?.select();
     });
   });
@@ -1662,7 +1761,9 @@ function bindSessionReview(root: ParentNode): void {
         event.preventDefault();
         finishRename(item, input, true);
       } else if (event.key === "Escape") {
+        // Escape drops the rename, not the popup behind it.
         event.preventDefault();
+        event.stopPropagation();
         finishRename(item, null, false);
       }
     });
@@ -1820,6 +1921,11 @@ function renderInterruptVoice(since = distractionLatchedAt): string {
   if (!voice || voice.at < since - 5000) {
     return "";
   }
+  return renderVoiceRow(voice);
+}
+
+/** The orb (play, or bars while speaking) and the line under the speaker's name. */
+function renderVoiceRow(voice: NudgeVoice): string {
   const speaking = voice.speaking;
   return `
     <div class="interrupt-voice ${speaking ? "is-speaking" : ""}">
@@ -2465,15 +2571,19 @@ function renderRuleEditor(editor: RuleEditor): string {
       </label>
       <p class="rule-entry-help">Paste a web address to match every page on that site, or enter an app name to match its windows. Check the match below before saving.</p>
       <p class="rule-preview" id="rule-preview" aria-live="polite">${renderRulePreview(editor)}</p>
-      <div class="rule-editor-actions">
-        <button class="primary" type="submit">Save</button>
-        ${
-          editor.index === null
-            ? ""
-            : `<button class="danger" type="button" data-rule-action="delete" data-rule-index="${editor.index}">Delete</button>`
-        }
-        <button type="button" data-rule-action="cancel">Cancel</button>
-      </div>
+      ${
+        editor.index !== null && editor.confirmDelete
+          ? `<div class="rule-editor-actions">
+              <span class="rule-editor-ask">Stop counting ${escapeHtml(permanentRules[editor.index] ? ruleName(permanentRules[editor.index]) : "this")} as a distraction?</span>
+              <button class="danger" type="button" data-rule-action="delete" data-rule-index="${editor.index}">Delete</button>
+              <button type="button" data-rule-action="keep">Keep it</button>
+            </div>`
+          : `<div class="rule-editor-actions">
+              <button class="primary" type="submit">Save</button>
+              ${editor.index === null ? "" : `<button class="danger" type="button" data-rule-action="delete" data-rule-index="${editor.index}">Delete</button>`}
+              <button type="button" data-rule-action="cancel">Cancel</button>
+            </div>`
+      }
     </form>
   `;
 }
@@ -2504,12 +2614,11 @@ function renderVoiceSettings(): string {
         </section>
 
         ${renderVoiceTiles()}
-        ${renderVoiceClipsPanel()}
+        <div class="slot" id="voice-lines">${renderVoiceLinesArea()}</div>
       </section>
     </section>
   `;
 }
-
 /** The biggest quote that still fits its card: short quotes grow, long ones shrink. */
 /** A stat value never wraps or clips: it steps down (to a floor) until it fits its tile. */
 window.addEventListener("resize", () =>
@@ -2586,32 +2695,36 @@ function renderVoiceCard(voice: VoiceOption): string {
   const selected = draft.voiceId === voice.id;
   const profile = voice.profile;
   const needsGeneration = voice.source === "custom" && Boolean(profile?.reference_retained) && !voice.selectable;
-  const canUse = voice.selectable && voiceBusy === null;
+  // The selected card still presses like the others; clicking it again changes nothing.
+  const pickable = voiceBusy === null && (selected || needsGeneration || voice.selectable);
   const action = needsGeneration ? "set-up-clips" : "select-voice";
-  const disabled = needsGeneration ? voiceBusy !== null : !canUse || selected;
-
+  const label = needsGeneration ? `Generate ${voice.name}'s lines` : selected ? `${voice.name}, selected` : `Select ${voice.name}`;
+  const card = `class="voice-card ${selected ? "selected" : ""} ${pickable ? "is-pickable" : ""}" role="button" tabindex="0" data-action="${action}" data-voice-id="${attr(voice.id)}" aria-pressed="${selected}" aria-disabled="${!pickable}" aria-label="${attr(label)}"`;
+  if (voice.source === "none") {
+    return `
+      <article ${card}>
+        <strong>${escapeHtml(voice.name)}</strong>
+        <span class="voice-card-quiet">Stays quiet</span>
+      </article>
+    `;
+  }
+  const preview = previewClipForVoice(voice);
   return `
-    <article class="voice-card ${selected ? "selected" : ""}">
-      <strong>${escapeHtml(voice.name)}</strong>
-      ${voiceCardMark(voice)}
-      <div class="voice-actions ${voice.source === "none" ? "" : "has-info"}">
-        ${
-          voice.source === "none"
-            ? ""
-            : `<button class="voice-info" type="button" data-action="voice-info" data-voice-id="${escapeHtml(voice.id)}">Info</button>`
-        }
-        <button class="voice-select" type="button" data-action="${action}" data-voice-id="${escapeHtml(voice.id)}" ${disabled ? "disabled" : ""}>${selected ? "Selected" : needsGeneration ? "Generate its lines" : "Select"}</button>
+    <article ${card}>
+      <div class="voice-card-top">
+        <strong>${escapeHtml(voice.name)}</strong>
+        ${voice.source === "starter" ? `<span class="voice-card-tag">Starter</span>` : ""}
+      </div>
+      <span class="voice-card-speaks">speaks like <b>${escapeHtml(toneLabel(voiceTone(voice)))}</b></span>
+      ${needsGeneration ? `<span class="voice-card-note">Lines not generated yet</span>` : ""}
+      <div class="voice-card-foot">
+        <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(preview?.path ?? "")}" ${preview ? "" : "disabled"} aria-label="Play ${attr(voice.name)}'s recording">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>${MINI_ORB}
+        </button>
+        <button class="voice-card-more" type="button" data-action="voice-info" data-voice-id="${attr(voice.id)}" aria-label="Edit ${attr(voice.name)}" aria-haspopup="dialog">⋯</button>
       </div>
     </article>
   `;
-}
-
-function voiceCardMark(voice: VoiceOption): string {
-  if (voice.source === "none") {
-    return `<svg class="voice-card-mute" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h3.2L12 5v14l-4.8-4H4V9z" fill="currentColor"/><path d="M15.2 9.2l5.6 5.6M20.8 9.2l-5.6 5.6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="square"/></svg>`;
-  }
-  const path = voice.profile?.reference_path ?? previewClipForVoice(voice)?.path ?? "";
-  return `<canvas class="voice-card-wave" width="88" height="32" data-wave-path="${attr(path)}" data-wave-bars="11"></canvas>`;
 }
 
 /** The first clip waits for the worker to load the model and the voice (about 90 s on a typical
@@ -2628,53 +2741,27 @@ function clipQueueSeconds(count: number, started = 0): number {
   return started === 0 ? FIRST_CLIP_SECONDS + (count - 1) * NEXT_CLIP_SECONDS : count * NEXT_CLIP_SECONDS;
 }
 
-/** Redraws the Clips panel alone. Picking a tone or toggling editing changes nothing outside it,
- * so the voices, the tiles and the page scroll stay put and the swap takes a few milliseconds. */
+/** Redraws the personality and lines panels alone, so the voices, the tiles and the page scroll
+ *  stay put. */
 function paintClipsPanel(): void {
-  const panel = document.querySelector(".phrase-panel");
-  if (!panel) {
+  if (!paintSlot("voice-lines", renderVoiceLinesArea())) {
     render();
-    return;
   }
-  const holder = document.createElement("div");
-  holder.innerHTML = renderVoiceClipsPanel();
-  const next = holder.firstElementChild;
-  if (!next) {
-    render();
-    return;
-  }
-  panel.replaceWith(next);
-  next.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void runAction(button.dataset.action || "", button);
-    });
-  });
-  bindClipsControls(next);
 }
 
-/** The voice select and the tone-rename form, inside `root`. */
+/** After a line or personality change: the lines panel and any open voice dialog. Voice cards don't show
+ *  lines, so the rest of the page stays; an error shows above the page, so it needs the page. */
+function paintLines(): void {
+  if (voiceError) {
+    render();
+    return;
+  }
+  paintClipsPanel();
+  paintVoiceLayer();
+}
+
+/** The personality forms and the voice rename form, inside `root`. */
 function bindClipsControls(root: ParentNode): void {
-  // A click anywhere on a row that is not on one of its buttons opens the line.
-  root.querySelectorAll<HTMLElement>(".line-row.is-openable").forEach((row) => {
-    row.addEventListener("click", (event) => {
-      if ((event.target as Element).closest("button")) {
-        return;
-      }
-      row.querySelector<HTMLButtonElement>(".line-open")?.click();
-    });
-  });
-  root.querySelector<HTMLSelectElement>("#voice-clips-voice")?.addEventListener("change", (event) => {
-    const voiceId = (event.target as HTMLSelectElement).value;
-    if (!availableVoices().some((item) => item.id === voiceId)) {
-      return;
-    }
-    clearFailedQueue();
-    clipsVoiceId = voiceId;
-    clipsVoiceTouched = true;
-    clipsTone = null;
-    phraseEditor = null;
-    paintClipsPanel();
-  });
   root.querySelector<HTMLFormElement>("#tone-rename")?.addEventListener("submit", (event) => {
     event.preventDefault();
     void renameTone();
@@ -2691,8 +2778,12 @@ function bindClipsControls(root: ParentNode): void {
   root.querySelector<HTMLInputElement>("#new-tone-input")?.addEventListener("input", (event) => {
     newToneDraft = (event.target as HTMLInputElement).value;
   });
+  root.querySelector<HTMLFormElement>("#voice-rename")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    (document.getElementById("voice-rename-input") as HTMLInputElement | null)?.blur();
+  });
+  root.querySelector<HTMLInputElement>("#voice-rename-input")?.addEventListener("blur", () => void renameVoice());
 }
-
 function bindPhraseEditor(root: ParentNode): void {
   const phraseForm = root.querySelector<HTMLFormElement>("#phrase-editor");
   phraseForm?.addEventListener("submit", (event) => {
@@ -2700,9 +2791,17 @@ function bindPhraseEditor(root: ParentNode): void {
     void saveLine(true);
   });
   const text = phraseForm?.querySelector<HTMLTextAreaElement>('textarea[name="text"]');
+  if (text) {
+    fitLineBox(text);
+  }
   text?.addEventListener("input", () => {
+    fitLineBox(text);
     if (phraseEditor) {
       phraseEditor.text = text.value;
+      const count = document.querySelector(".line-count");
+      if (count) {
+        count.textContent = `${text.value.length}/140`;
+      }
       paintLinePopupButtons();
     }
   });
@@ -2713,48 +2812,41 @@ function bindPhraseEditor(root: ParentNode): void {
       phraseForm?.requestSubmit();
     }
   });
-  phraseForm?.querySelector<HTMLSelectElement>('select[name="tone"]')?.addEventListener("change", (event) => {
+  phraseForm?.querySelector<HTMLSelectElement>('select[name="moment"]')?.addEventListener("change", (event) => {
     if (phraseEditor) {
-      phraseEditor.tone = (event.target as HTMLSelectElement).value;
+      phraseEditor.moment = (event.target as HTMLSelectElement).value as PhraseMoment;
+      paintLinePopupButtons();
     }
   });
 }
 
-/** Typing changes which buttons make sense; redraw just the popup's action row. */
-function paintLinePopupButtons(): void {
-  const actions = document.querySelector(".line-popup-actions");
-  if (!actions) {
-    return;
-  }
-  const holder = document.createElement("div");
-  holder.innerHTML = renderLinePopup();
-  const next = holder.querySelector(".line-popup-actions");
-  if (!next) {
-    return;
-  }
-  actions.replaceWith(next);
-  next.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void runAction(button.dataset.action || "", button);
-    });
-  });
+/** The line box starts one row tall and grows with the words. */
+function fitLineBox(text: HTMLTextAreaElement): void {
+  text.style.height = "auto";
+  text.style.height = `${text.scrollHeight + text.offsetHeight - text.clientHeight}px`;
 }
 
-/** A line or tones popup opening or closing repaints only the dialog layer; the page under it stays put. */
-function paintVoiceLayer(): void {
-  const layer = document.getElementById("voice-layer");
-  if (!layer) {
-    render();
-    return;
-  }
-  layer.innerHTML = renderVoiceDialogs();
-  layer.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void runAction(button.dataset.action || "", button);
+/** Typing changes which buttons make sense; redraw just the popup's action row and audio note. */
+function paintLinePopupButtons(): void {
+  const holder = document.createElement("div");
+  holder.innerHTML = renderLinePopup();
+  for (const selector of [".line-popup-actions", ".line-audio-note"]) {
+    const now = document.querySelector(selector);
+    const next = holder.querySelector(selector);
+    if (!now || !next) {
+      continue;
+    }
+    now.replaceWith(next);
+    next.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        void runAction(button.dataset.action || "", button);
+      });
     });
-  });
-  bindClipsControls(layer);
-  bindPhraseEditor(layer);
+  }
+}
+/** A voice popup opening or closing repaints only the dialog layer; the page under it stays put. */
+function paintVoiceLayer(): void {
+  paintSlot("voice-layer", renderVoiceDialogs());
 }
 
 /** Model and memory, the two things that can stop a clip being made. Each tile opens its numbers. */
@@ -2788,90 +2880,141 @@ function memoryTileValue(): string {
   return ramGenerationLocked() ? `${formatBytes(free)} free, needs ${formatBytes(need)}` : `${formatBytes(free)} free`;
 }
 
-/** Clips for one voice: its tones on the left, the viewed tone's lines on the right. */
-function renderVoiceClipsPanel(): string {
+/** "Derek speaks like Mom": the personality cards, then that personality's lines by moment. */
+function renderVoiceLinesArea(): string {
+  return `${renderPersonalityPanel()}${renderVoiceClipsPanel()}`;
+}
+
+function renderPersonalityPanel(): string {
   const voice = clipsVoice();
   const speaks = voiceTone(voice);
-  const tones = phraseToneOrder();
-  const viewed = viewedTone(voice);
-  const viewedPhrases = tonePhrases(viewed);
-  const speaksPhrases = tonePhrases(speaks);
-  const summary = `· speaks ${toneLabel(speaks)} · ${readyClipCount(voice, speaksPhrases)} of ${speaksPhrases.length} lines ready`;
+  const locked = !voice.profile || voiceBusy !== null || clipQueue?.phase === "working";
+  const cards = phraseToneOrder()
+    .map((tone) => {
+      const on = sameTone(tone, speaks);
+      const card = `<button class="personality-card ${on ? "is-on" : ""}" type="button" data-action="use-tone" data-tone="${attr(tone)}" aria-pressed="${on}" title="${attr(toneLabel(tone))}" ${locked ? "disabled" : ""}><span>${escapeHtml(toneLabel(tone))}</span></button>`;
+      if (!on || !isCustomTone(tone)) {
+        return card;
+      }
+      const menu = toneMenuOpen
+        ? `<div class="personality-menu" role="menu">
+            <button type="button" role="menuitem" data-action="rename-tone" data-tone="${attr(tone)}">Rename</button>
+            <button class="danger" type="button" role="menuitem" data-action="arm-delete-tone" data-tone="${attr(tone)}">Delete</button>
+          </div>`
+        : "";
+      return `
+        <div class="personality-own">
+          ${card}
+          <button class="personality-more" type="button" data-action="toggle-tone-menu" aria-label="Rename or delete ${attr(toneLabel(tone))}" aria-haspopup="menu" aria-expanded="${toneMenuOpen}" ${locked ? "disabled" : ""}>⋯</button>
+          ${menu}
+        </div>`;
+    })
+    .join("");
+  let form = "";
+  if (toneRename) {
+    form = `
+      <form class="personality-form" id="tone-rename">
+        <input id="tone-rename-input" maxlength="80" value="${attr(toneRename.value)}" aria-label="Personality name" autocomplete="off" />
+        <button class="primary small-button" type="submit">Save</button>
+        <button class="small-button" type="button" data-action="cancel-rename-tone">Cancel</button>
+      </form>`;
+  } else if (toneDeleteArmed) {
+    const count = tonePhrases(toneDeleteArmed).length;
+    form = `
+      <div class="personality-form">
+        <span>Delete ${escapeHtml(toneLabel(toneDeleteArmed))}${count ? ` and its ${count === 1 ? "1 line" : `${count} lines`}` : ""}? Voices that speak like it go back to ${escapeHtml(toneLabel(toneOrder[0]))}.</span>
+        <button class="small-button danger" type="button" data-action="delete-tone" data-tone="${attr(toneDeleteArmed)}">Delete</button>
+        <button class="small-button" type="button" data-action="cancel-delete-tone">Cancel</button>
+      </div>`;
+  }
   return `
-    <section class="panel phrase-panel">
-      <div class="clips-strip">
-        <div class="clips-for">
-          <p class="eyebrow">Lines</p>
-          <span class="clips-for-word">for</span>
-          <select id="voice-clips-voice" aria-label="Voice to make lines for" ${clipQueue?.phase === "working" ? "disabled" : ""}>${voiceOptions(voice.id, true)}</select>
-          <span class="clips-summary">${escapeHtml(summary)}</span>
-        </div>
+    <section class="panel personality-panel">
+      <p class="eyebrow">Personality</p>
+      <div class="personality-head">
+        <h2 class="speaks-like"><span class="speaks-voice" title="${attr(voice.name)}">${escapeHtml(voice.name)}</span> speaks like <span class="speaks-tone" title="${attr(toneLabel(speaks))}">${escapeHtml(toneLabel(speaks))}</span></h2>
+        <button class="small-button" type="button" data-action="new-tone" aria-haspopup="dialog" ${canEditPhrases() ? "" : "disabled"}>+ New personality</button>
       </div>
-      <div class="clips-grid">
-        <div class="clips-card">
-          <div class="clips-card-head">
-            <p class="eyebrow">Tone</p>
-            <span class="clips-card-tools"><span>${tones.length === 1 ? "1 tone" : `${tones.length} tones`}</span><button class="small-button" type="button" data-action="open-tones" aria-haspopup="dialog" ${canEditPhrases() ? "" : "disabled"}>Manage</button></span>
-          </div>
-          <div class="tone-list" aria-label="Tones">
-            ${tones.map((tone) => renderToneRow(voice, tone, sameTone(tone, viewed), sameTone(tone, speaks))).join("")}
-          </div>
-        </div>
-        <div class="clips-card clips-lines">${renderLinesCard(voice, viewed)}</div>
-      </div>
+      <div class="personality-list">${cards}</div>
+      ${form}
     </section>
   `;
 }
 
-function renderLinesCard(voice: VoiceOption, viewed: VoiceTone): string {
-  const viewedPhrases = tonePhrases(viewed);
+/** A name, and where its lines start: a copy of one you like, or nothing. */
+function renderNewPersonalityModal(): string {
+  if (newToneDraft === null) {
+    return "";
+  }
+  const speaks = voiceTone(clipsVoice());
   return `
-    <div class="clips-card-head">
-      <p class="eyebrow">${escapeHtml(toneLabel(viewed))} lines</p>
-      <span>${readyClipCount(voice, viewedPhrases)} of ${viewedPhrases.length} ready</span>
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel voice-popup new-personality-popup" role="dialog" aria-modal="true" aria-labelledby="new-personality-title">
+        <h2 id="new-personality-title">New personality</h2>
+        <p>A personality is what your voices say. Start from one you like and change a few of its lines, or start with nothing and write your own.</p>
+        <form class="phrase-editor" id="new-tone">
+          <label>
+            <span>Name</span>
+            <input id="new-tone-input" maxlength="80" value="${attr(newToneDraft)}" placeholder="Coach, dry humor, drill sergeant…" autocomplete="off" />
+          </label>
+          <label>
+            <span>Start from</span>
+            <select id="new-tone-from">
+              ${phraseToneOrder().map((tone) => `<option value="${attr(tone)}" ${sameTone(tone, speaks) ? "selected" : ""}>${escapeHtml(toneLabel(tone))}</option>`).join("")}
+              <option value="">Nothing</option>
+            </select>
+          </label>
+          <div class="modal-actions">
+            <button type="button" data-action="cancel-new-tone">Cancel</button>
+            <button class="primary" type="submit">Create</button>
+          </div>
+        </form>
+      </section>
     </div>
-    <div class="line-list">
-      ${viewedPhrases.length ? viewedPhrases.map((phrase) => renderLineRow(voice, phrase)).join("") : `<p class="empty">No lines in this tone yet. Add one below.</p>`}
-    </div>
-    ${renderClipsFooter(voice, viewed, viewedPhrases)}
   `;
 }
 
-/** A tone pick: the chosen row lights up and the lines card is refilled. Nothing else moves. */
-function paintTonePick(): void {
-  const panel = document.querySelector(".phrase-panel");
-  const card = panel?.querySelector(".clips-lines");
-  if (!panel || !card) {
-    paintClipsPanel();
-    return;
-  }
+/** The voice's personality, one card per moment. */
+function renderVoiceClipsPanel(): string {
   const voice = clipsVoice();
-  const viewed = viewedTone(voice);
-  panel.querySelectorAll<HTMLButtonElement>(".tone-row[data-tone]").forEach((row) => {
-    const on = sameTone(row.dataset.tone ?? "", viewed);
-    row.classList.toggle("is-on", on);
-    row.setAttribute("aria-pressed", String(on));
-  });
-  card.innerHTML = renderLinesCard(voice, viewed);
-  card.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void runAction(button.dataset.action || "", button);
-    });
-  });
-  bindClipsControls(card);
+  const tone = voiceTone(voice);
+  return `
+    <section class="panel phrase-panel">
+      <h3 class="lines-title">What ${escapeHtml(voice.name)} says as ${escapeHtml(toneLabel(tone))}</h3>
+      <div class="moment-grid">
+        ${MOMENTS.map((moment) => renderMomentCard(voice, tone, moment)).join("")}
+      </div>
+      ${renderClipsFooter(voice, tonePhrases(tone))}
+    </section>
+  `;
 }
 
-function renderToneRow(voice: VoiceOption, tone: VoiceTone, viewed: boolean, speaks: boolean): string {
-  const phrases = tonePhrases(tone);
-  const ready = readyClipCount(voice, phrases);
-  const complete = phrases.length > 0 && ready === phrases.length;
+function renderMomentCard(voice: VoiceOption, tone: VoiceTone, moment: (typeof MOMENTS)[number]): string {
+  const phrases = momentPhrases(tone, moment.id);
+  const count = phrases.length;
+  const quiet: Record<PhraseMoment, string> = {
+    nudge: `${voice.name} stays quiet when you get distracted.`,
+    phone: `${voice.name} says a back to work line instead.`,
+    roundover: `${voice.name} stays quiet when a round ends.`,
+    sessionover: `${voice.name} stays quiet when a session ends.`,
+  };
+  const more = 3 - count;
+  const nudge =
+    moment.often && more > 0
+      ? `<div class="moment-nudge" role="note"><strong>${count ? `Only ${count}? That gets old fast.` : "This one plays a lot."}</strong><span>We recommend 3 or more lines here. Trust us, you'll be hearing them all session. Write ${more} more and have some fun with it.</span></div>`
+      : "";
   return `
-    <button type="button" class="tone-row ${viewed ? "is-on" : ""}" data-action="pick-tone" data-tone="${attr(tone)}" aria-pressed="${viewed}">
-      <span class="tone-dot ${complete ? "is-ready" : ""}" aria-hidden="true"></span>
-      <span class="tone-name">${escapeHtml(toneLabel(tone))}</span>
-      ${speaks ? `<span class="tone-speaks">speaks</span>` : ""}
-      <span class="tone-count">${ready}/${phrases.length}</span>
-    </button>
+    <div class="clips-card moment-card">
+      <div class="moment-head">
+        <p class="eyebrow">${escapeHtml(moment.label)}</p>
+        <span>${count === 1 ? "1 line" : `${count} lines`}</span>
+        <span class="moment-when">${escapeHtml(moment.when)}</span>
+      </div>
+      ${count ? `<div class="line-list">${phrases.map((phrase) => renderLineRow(voice, phrase)).join("")}</div>` : `<p class="empty">No lines yet. ${escapeHtml(quiet[moment.id])}</p>`}
+      ${nudge}
+      <div class="moment-foot">
+        <button class="small-button" type="button" data-action="add-line" data-moment="${moment.id}" ${canEditPhrases() ? "" : "disabled"}>+ Add line</button>
+      </div>
+    </div>
   `;
 }
 
@@ -2882,32 +3025,32 @@ function renderLineRow(voice: VoiceOption, phrase: PhraseDefinition): string {
   const busy = Boolean(job && position === job.index && job.phase === "working");
   const failed = Boolean(job && position === job.index && job.phase === "error");
   const queued = Boolean(job && job.phase === "working" && position > job.index);
-  const openable = !busy && canEditPhrases();
-  const dot = `<span class="line-dot ${clip ? "is-ready" : ""}" aria-hidden="true"></span>`;
-  const text = `<button class="line-open" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${openable ? "" : "disabled"} title="Edit, regenerate or delete this line">${escapeHtml(phrase.text)}</button>`;
-  const hint = openable ? `<span class="line-edit-hint" aria-hidden="true">Edit ›</span>` : "";
+  const edit = `<button class="small-button" type="button" data-action="open-phrase-editor" data-phrase-id="${attr(phrase.id)}" ${!busy && canEditPhrases() ? "" : "disabled"}>Edit</button>`;
+  const play = clip
+    ? `<button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play">
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>${MINI_ORB}
+      </button>`
+    : "";
   let trail: string;
   if (busy) {
     trail = `<span class="line-state is-busy" data-clip-elapsed>${escapeHtml(clipElapsedText())}</span>`;
   } else if (failed) {
-    trail = `<span class="line-actions"><span class="line-state is-bad" title="${attr(job?.error ?? "")}">Failed</span><button class="small-button" type="button" data-action="generate-clip" data-phrase-id="${attr(phrase.id)}">Retry</button></span>`;
+    trail = `<span class="line-state is-bad" title="${attr(job?.error ?? "")}">Failed</span><button class="small-button" type="button" data-action="generate-clip" data-phrase-id="${attr(phrase.id)}">Retry</button>${edit}`;
   } else if (queued) {
-    trail = `<span class="line-actions"><span class="line-state">Queued</span>${hint}</span>`;
+    trail = `<span class="line-state">Queued</span>${edit}${play}`;
   } else if (clip) {
-    trail = `
-      <span class="line-actions">
-        ${hint}
-        <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play">
-          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>
-        </button>
-      </span>
-    `;
+    trail = `${edit}${play}`;
   } else {
-    trail = `<span class="line-actions"><span class="line-state">Not generated</span>${hint}</span>`;
+    trail = `<span class="line-state">Not generated</span>${edit}`;
   }
-  return `<div class="line-row ${clip ? "" : "is-missing"} ${busy ? "is-busy" : ""} ${openable ? "is-openable" : ""}">${dot}${text}${trail}</div>`;
+  return `
+    <div class="line-row ${clip ? "" : "is-missing"} ${busy ? "is-busy" : ""}">
+      <span class="line-dot ${clip ? "is-ready" : ""}" aria-hidden="true"></span>
+      <span class="line-text">${escapeHtml(phrase.text)}</span>
+      <span class="line-actions">${trail}</span>
+    </div>
+  `;
 }
-
 function clipElapsedText(): string {
   const seconds = clipQueue ? Math.max(0, Math.round((performance.now() - clipQueue.startedAt) / 1000)) : 0;
   const expected = clipQueue && clipQueue.index > 0 ? NEXT_CLIP_SECONDS : FIRST_CLIP_SECONDS;
@@ -2931,9 +3074,7 @@ function formatQueueTime(totalSeconds: number): string {
   return `${whole || ""}${halves % 2 ? "½" : ""} min`.replace(/^½/, "½").trim();
 }
 
-function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: PhraseDefinition[]): string {
-  const speaks = voiceTone(voice);
-  const addLine = `<button class="small-button" type="button" data-action="add-line" data-tone="${attr(viewed)}" ${canEditPhrases() ? "" : "disabled"}>+ Add line</button>`;
+function renderClipsFooter(voice: VoiceOption, phrases: PhraseDefinition[]): string {
   const job = clipQueue && clipQueue.voiceId === voice.id ? clipQueue : null;
   if (job && job.phase === "working") {
     const total = job.phraseIds.length;
@@ -2945,14 +3086,10 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
       </div>
     `;
   }
-  const useTone = sameTone(viewed, speaks) || isMomentTone(viewed)
-    ? ""
-    : `<button class="small-button" type="button" data-action="use-tone" data-tone="${attr(viewed)}" ${voice.profile && voiceBusy === null ? "" : "disabled"}>Use this tone</button>`;
   if (phrases.length === 0) {
     return `
       <div class="clips-foot">
-        <div class="clips-foot-actions">${addLine}${useTone}</div>
-        <span class="clips-hint">A tone needs at least one line before a voice can speak it.</span>
+        <span class="clips-hint">A personality needs at least one back to work line before a voice can use it.</span>
       </div>
     `;
   }
@@ -2960,33 +3097,23 @@ function renderClipsFooter(voice: VoiceOption, viewed: VoiceTone, phrases: Phras
   if (missing.length === 0) {
     return `
       <div class="clips-foot">
-        <div class="clips-foot-actions"><span class="clips-hint is-ready">All ${phrases.length} lines ready.</span>${useTone}${addLine}</div>
-        ${phoneHint(viewed)}
+        <span class="clips-hint is-ready">All ${phrases.length} lines ready.</span>
       </div>
     `;
   }
   const lock = clipGenerateLockTitle(voice);
-  const tileBad = !modelInstalled() || ramGenerationLocked();
   // A failed line says why here, where the eye already is; the row only says "Failed".
-  const failed = job?.phase === "error" ? job.error || "This line could not be generated." : "";
-  const hint = tileBad
-    ? "Fix the red card above first."
-    : failed
-      ? `Last line failed: ${failed}`
-      : lock || `The first line takes about ${FIRST_CLIP_SECONDS} s while the voice engine warms up, then about ${NEXT_CLIP_SECONDS} s each. Sounds off? Open the line and regenerate it.`;
+  const failed = job?.phase === "error" && !lock ? job.error || "This line could not be generated." : "";
+  const hint = lock || (failed ? `Last line failed: ${failed}` : `The first line takes about ${FIRST_CLIP_SECONDS} s while the voice engine warms up, then about ${NEXT_CLIP_SECONDS} s each.`);
   return `
     <div class="clips-foot">
       <div class="clips-foot-actions">
         <button class="primary small-button clips-generate" type="button" data-action="generate-missing" ${lock || clipQueue?.phase === "working" ? "disabled" : ""}>Generate ${missing.length} ${missing.length === 1 ? "line" : "lines"} · ~${escapeHtml(formatQueueTime(clipQueueSeconds(missing.length)))}</button>
-        ${useTone}
-        ${addLine}
+        <span class="clips-hint ${failed || lock ? "is-bad" : ""}" role="${failed ? "alert" : "status"}">${escapeHtml(hint)}</span>
       </div>
-      <span class="clips-hint ${failed && !tileBad ? "is-bad" : ""}" role="${failed ? "alert" : "status"}">${escapeHtml(hint)}</span>
-      ${phoneHint(viewed)}
     </div>
   `;
 }
-
 /** One popup per line: edit the words, move it, make its clip, or delete it. The primary button
  * says what it will do, and one click does all of it. */
 function renderLinePopup(): string {
@@ -2999,116 +3126,69 @@ function renderLinePopup(): string {
   const clip = existing ? clipForPhrase(voice, existing) : null;
   const text = editor.text.trim();
   const changed = existing ? text !== existing.text : text.length > 0;
+  const moved = Boolean(existing && existing.moment !== editor.moment);
   const lock = clipQueue?.phase === "working" ? "Wait for the current line to finish" : clipGenerateLockTitle(voice);
   const primary = !existing ? "Add and generate" : changed ? "Save and regenerate" : clip ? "Regenerate" : "Generate";
   const primaryDisabled = Boolean(lock) || !text || voiceBusy !== null;
-  const status = clip
-    ? `<span class="line-clip-status is-ready">Ready</span>
-       <button class="small-button line-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}">
-         <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>Play
-       </button>`
-    : `<span class="line-clip-status">Not generated yet</span>`;
+  const audio = clip
+    ? `<div class="line-audio-block">
+        <span class="line-audio-label">Audio</span>
+        <div class="line-audio ${changed ? "is-stale" : ""}">
+          <button class="voice-preview-play" type="button" data-action="play-clip" data-clip-path="${attr(clip.path)}" aria-label="Play"><span class="voice-preview-icon" aria-hidden="true"></span>${MINI_ORB}</button>
+          <canvas class="line-audio-wave" width="300" height="36" data-wave-path="${attr(clip.path)}" data-wave-bars="32"></canvas>
+        </div>
+        <p class="line-audio-note">${changed ? "This is the old wording until you regenerate." : ""}</p>
+      </div>`
+    : "";
   return `
     <div class="modal-backdrop" role="presentation">
       <section class="modal-panel voice-popup line-popup" role="dialog" aria-modal="true" aria-labelledby="line-popup-title">
         <div class="voice-info-head">
           <div>
-            <p class="eyebrow">${escapeHtml(voice.name)}</p>
-            <h2 id="line-popup-title">${existing ? "Line" : "New line"}</h2>
+            <p class="eyebrow">${escapeHtml(toneLabel(editor.tone))} · ${escapeHtml(voice.name)}</p>
+            <h2 id="line-popup-title">${existing ? "Edit line" : "New line"}</h2>
           </div>
           <button class="small-button" type="button" data-action="cancel-phrase-editor">Close</button>
         </div>
         <form class="phrase-editor" id="phrase-editor">
           <label>
-            <span>Line</span>
-            <textarea id="phrase-editor-text" name="text" rows="3" maxlength="140" placeholder="Back to the task." autocomplete="off">${escapeHtml(editor.text)}</textarea>
+            <textarea id="phrase-editor-text" aria-label="Line" name="text" rows="1" maxlength="140" placeholder="Back to the task." autocomplete="off">${escapeHtml(editor.text)}</textarea>
           </label>
+          <span class="line-count">${editor.text.length}/140</span>
           <label>
-            <span>Tone</span>
-            <select id="phrase-editor-tone" name="tone">${phraseToneOptions(editor.tone)}</select>
+            <span>Plays when</span>
+            <select id="phrase-editor-moment" name="moment">
+              ${MOMENTS.map((moment) => `<option value="${moment.id}" ${moment.id === editor.moment ? "selected" : ""}>${escapeHtml(moment.label)}: ${escapeHtml(moment.when.charAt(0).toLowerCase() + moment.when.slice(1))}</option>`).join("")}
+            </select>
           </label>
-          <div class="line-clip-row">${status}</div>
-          <div class="modal-actions line-popup-actions">
-            ${existing ? `<button class="danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(existing.id)}" ${canEditPhrases() ? "" : "disabled"}>Delete line</button>` : ""}
-            ${changed || !existing ? `<button type="button" data-action="save-line" ${text && canEditPhrases() ? "" : "disabled"}>${existing ? "Save only" : "Add only"}</button>` : ""}
-            <button class="primary" type="submit" ${primaryDisabled ? "disabled" : ""} title="${attr(lock)}">${primary}</button>
-          </div>
+          ${audio}
+          ${
+            existing && editor.confirmDelete
+              ? `<div class="modal-actions line-popup-actions">
+                  <span class="line-popup-ask">Delete this line?</span>
+                  <button type="button" data-action="keep-phrase">Keep it</button>
+                  <button class="danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(existing.id)}">Delete</button>
+                </div>`
+              : `<div class="modal-actions line-popup-actions">
+                  ${existing ? `<button class="danger" type="button" data-action="delete-phrase" data-phrase-id="${attr(existing.id)}" ${canEditPhrases() ? "" : "disabled"}>Delete</button>` : ""}
+                  <span class="line-popup-gap"></span>
+                  ${changed || moved || !existing ? `<button type="button" data-action="save-line" ${text && canEditPhrases() ? "" : "disabled"}>${existing ? "Save only" : "Add only"}</button>` : ""}
+                  <button class="primary" type="submit" ${primaryDisabled ? "disabled" : ""} title="${attr(lock)}">${primary}</button>
+                </div>`
+          }
         </form>
-        <p class="quiet">${escapeHtml(lock ? lock : `Up to ${FIRST_CLIP_SECONDS} seconds while the voice engine warms up, a few seconds after. A changed line keeps its old audio until you regenerate it.`)}</p>
+        ${lock ? `<p class="quiet">${escapeHtml(lock)}</p>` : ""}
       </section>
     </div>
   `;
 }
 
-/** Every tone in one place: rename or delete your own, add a new one. Built-in tones stay. */
-function renderTonesModal(): string {
-  const voice = clipsVoice();
-  const rows = phraseToneOrder()
-    .map((tone) => {
-      const count = tonePhrases(tone).length;
-      const lines = count === 1 ? "1 line" : `${count} lines`;
-      let tools: string;
-      if (!isCustomTone(tone)) {
-        tools = `<span class="tone-manage-note">Built in</span>`;
-      } else if (toneRename && sameTone(toneRename.from, tone)) {
-        tools = `
-          <form class="tone-rename" id="tone-rename">
-            <input id="tone-rename-input" maxlength="80" value="${attr(toneRename.value)}" aria-label="Tone name" autocomplete="off" />
-            <button class="primary small-button" type="submit">Save</button>
-            <button class="small-button" type="button" data-action="cancel-rename-tone">Cancel</button>
-          </form>`;
-      } else if (toneDeleteArmed && sameTone(toneDeleteArmed, tone)) {
-        tools = `
-          <span class="tone-manage-note">Delete ${escapeHtml(toneLabel(tone))} and its ${lines}?</span>
-          <button class="small-button danger" type="button" data-action="delete-tone" data-tone="${attr(tone)}">Delete</button>
-          <button class="small-button" type="button" data-action="cancel-delete-tone">Cancel</button>`;
-      } else {
-        tools = `
-          <button class="small-button" type="button" data-action="rename-tone" data-tone="${attr(tone)}" ${canEditPhrases() ? "" : "disabled"}>Rename</button>
-          <button class="small-button danger" type="button" data-action="arm-delete-tone" data-tone="${attr(tone)}" ${canEditPhrases() ? "" : "disabled"}>Delete</button>`;
-      }
-      const speaks = sameTone(tone, voiceTone(voice)) ? `<span class="tone-speaks">${escapeHtml(voice.name)} speaks</span>` : "";
-      return `
-        <div class="tone-manage-row">
-          <div class="tone-manage-name"><strong>${escapeHtml(toneLabel(tone))}</strong>${speaks}<span class="tone-count">${lines}</span></div>
-          <div class="tone-manage-tools">${tools}</div>
-        </div>
-      `;
-    })
-    .join("");
-  const adder =
-    newToneDraft === null
-      ? `<button class="small-button" type="button" data-action="new-tone" ${canEditPhrases() ? "" : "disabled"}>+ New tone</button>`
-      : `<form class="tone-rename" id="new-tone">
-          <input id="new-tone-input" maxlength="80" value="${attr(newToneDraft)}" placeholder="Coach, dry humor, drill sergeant…" aria-label="New tone name" autocomplete="off" />
-          <button class="primary small-button" type="submit">Create</button>
-          <button class="small-button" type="button" data-action="cancel-new-tone">Cancel</button>
-        </form>`;
-  return `
-    <div class="modal-backdrop" role="presentation">
-      <section class="modal-panel voice-popup tones-popup" role="dialog" aria-modal="true" aria-labelledby="tones-title">
-        <div class="voice-info-head">
-          <div>
-            <p class="eyebrow">Lines</p>
-            <h2 id="tones-title">Tones</h2>
-          </div>
-          <button class="small-button" type="button" data-action="close-tones">Close</button>
-        </div>
-        <p>A tone is a set of lines. A voice speaks one tone in sessions; renaming a tone follows it everywhere, deleting one removes its lines.</p>
-        <div class="tone-manage-list">${rows}</div>
-        <div class="modal-actions">${adder}</div>
-      </section>
-    </div>
-  `;
-}
-
-function closeTonesPopup(): void {
-  tonesOpen = false;
+function closeToneForms(): void {
   toneRename = null;
   toneDeleteArmed = null;
   newToneDraft = null;
+  toneMenuOpen = false;
 }
-
 function renderVoiceHelpModal(): string {
   return `
     <div class="modal-backdrop" role="presentation">
@@ -3123,10 +3203,11 @@ function renderVoiceHelpModal(): string {
         <p>Supervisor nudges you with short spoken lines. Record anyone for about twenty seconds, generate their lines once, and from then on they play instantly, offline.</p>
         <ol class="voice-help-steps">
           <li><strong>Record a voice.</strong> Press + New voice and read the prompt aloud. The starter voices come ready.</li>
-          <li><strong>Generate its lines.</strong> Under Lines, pick the voice and a tone, then press Generate. The first takes about ${FIRST_CLIP_SECONDS} seconds while the voice engine warms up, the rest about ${NEXT_CLIP_SECONDS} seconds each. It needs the voice engine installed and some free memory.</li>
-          <li><strong>Select it.</strong> A voice speaks one tone. Once every line in that tone is generated, select it under Voices.</li>
+          <li><strong>Pick a personality.</strong> It's what the voice says, from Gentle to Stern, or one you write. Each has lines for when you get distracted, when your phone shows up, and when a round or session ends.</li>
+          <li><strong>Generate its lines.</strong> Press Generate under the lines. The first takes about ${FIRST_CLIP_SECONDS} seconds while the voice engine warms up, the rest about ${NEXT_CLIP_SECONDS} seconds each. It needs the voice engine installed and some free memory.</li>
+          <li><strong>Select it.</strong> Once its back to work lines are generated, select the voice under Voices.</li>
         </ol>
-        <p class="quiet">Listen to each line. If one sounds off, open it and regenerate it.</p>
+        <p class="quiet">Listen to each line. If one sounds off, press Edit and regenerate it.</p>
       </section>
     </div>
   `;
@@ -3245,7 +3326,7 @@ function renderVoiceDialogs(): string {
     ${showVoiceDialog && memoryInfoOpen && !voiceBusy ? renderMemoryInfoModal() : ""}
     ${showVoiceDialog && voiceHelpOpen ? renderVoiceHelpModal() : ""}
     ${showVoiceDialog && phraseEditor && !voiceDeleteTargetId ? renderLinePopup() : ""}
-    ${showVoiceDialog && tonesOpen && !phraseEditor ? renderTonesModal() : ""}
+    ${showVoiceDialog && !phraseEditor ? renderNewPersonalityModal() : ""}
     ${voiceBusy && !clipQueue ? renderVoiceBusyModal() : ""}
   `;
 }
@@ -3307,6 +3388,54 @@ function renderHistoryConfirm(): string {
         <div class="modal-actions">
           <button type="button" data-action="cancel-history-confirm">${escapeHtml(copy.cancel)}</button>
           <button class="${copy.danger ? "danger" : "primary"}" type="button" data-action="confirm-history">${escapeHtml(copy.confirm)}</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderQuitConfirm(): string {
+  if (!quitConfirmOpen) {
+    return "";
+  }
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel confirm-panel" role="dialog" aria-modal="true" aria-labelledby="quit-confirm-title">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">QUIT</p>
+            <h2 id="quit-confirm-title">End this session and quit?</h2>
+          </div>
+        </div>
+        <p>The session so far is saved to History.</p>
+        <div class="modal-actions">
+          <button type="button" data-action="cancel-quit">Cancel</button>
+          <button class="danger" type="button" data-action="confirm-quit">End and quit</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+/** Session done (yellow, the round-over card's shape): the session's title and focused time,
+ *  the voice with its orb, and one button to the report under it. */
+function renderSessionOver(): string {
+  if (!sessionOver) {
+    return "";
+  }
+  const { voice, session } = sessionOver;
+  return `
+    <div class="modal-backdrop session-over-backdrop" role="presentation">
+      <section class="modal-panel session-over-card" role="dialog" aria-modal="true" aria-labelledby="session-over-title">
+        <section class="state-slab interrupt-alert moment-round-over">
+          <h2 class="moment-title" id="session-over-title">Session done.</h2>
+          ${session ? `<p class="moment-goal">${escapeHtml(session.goal)}</p>
+          <p class="moment-focused"><b>${Math.round(session.focus_seconds / 60)} min</b> focused</p>` : ""}
+          ${renderVoiceRow(voice)}
+          <div class="moment-gap"></div>
+        </section>
+        <div class="interrupt-actions moment-actions">
+          <button class="primary" type="button" data-action="close-session-over">See how it went</button>
         </div>
       </section>
     </div>
@@ -3390,38 +3519,51 @@ function renderVoiceInfoModal(): string {
 
   const clip = previewClipForVoice(voice);
   const profileId = voice.source === "custom" ? voice.profile?.profile_id ?? "" : "";
+  const canRename = Boolean(voice.profile) && voiceBusy === null;
 
   return `
     <div class="modal-backdrop" role="presentation">
       <section class="modal-panel voice-info-panel" role="dialog" aria-modal="true" aria-labelledby="voice-info-title">
         <div class="voice-info-head">
           <div>
-            <p class="eyebrow">Voice preview</p>
+            <p class="eyebrow">Edit voice</p>
             <h2 id="voice-info-title">${escapeHtml(voice.name)}</h2>
           </div>
-          <button class="small-button" type="button" data-action="close-voice-info">Close</button>
         </div>
-        <div class="voice-info-transport">
-          <button class="voice-preview-play" type="button" data-action="toggle-voice-preview" ${clip ? "" : "disabled"} aria-label="Play">
-            <span class="voice-preview-icon" aria-hidden="true"></span>
-          </button>
-          <div class="voice-info-wave">
-            <canvas id="voice-preview-wave" width="320" height="56" data-wave-path="${attr(clip?.path ?? "")}" data-wave-bars="40"></canvas>
-            <input id="voice-preview-bar" type="range" min="0" max="1" value="0" step="0.01" ${clip ? "" : "disabled"} aria-label="Playback" />
-            <div class="voice-info-times">
-              <span id="voice-preview-elapsed">0:00</span>
-              <span id="voice-preview-total">0:00</span>
+        <form class="voice-rename" id="voice-rename">
+          <label>
+            <span>Name <em class="voice-rename-status" aria-live="polite"></em></span>
+            <input id="voice-rename-input" maxlength="80" value="${attr(voice.name)}" autocomplete="off" ${canRename ? "" : "disabled"} />
+          </label>
+        </form>
+        <div>
+          <p class="eyebrow">Recording</p>
+          <div class="voice-info-transport">
+            <button class="voice-preview-play" type="button" data-action="toggle-voice-preview" ${clip ? "" : "disabled"} aria-label="Play">
+              <span class="voice-preview-icon" aria-hidden="true"></span>
+            </button>
+            <div class="voice-info-wave">
+              <canvas id="voice-preview-wave" width="320" height="56" data-wave-path="${attr(clip?.path ?? "")}" data-wave-bars="40"></canvas>
+              <input id="voice-preview-bar" type="range" min="0" max="1" value="0" step="0.01" ${clip ? "" : "disabled"} aria-label="Playback" />
+              <div class="voice-info-times">
+                <span id="voice-preview-elapsed">0:00</span>
+                <span id="voice-preview-total">0:00</span>
+              </div>
             </div>
           </div>
         </div>
         <div class="voice-info-foot">
-          <button class="danger" type="button" data-action="confirm-delete-voice" data-profile-id="${attr(profileId)}"${profileId ? "" : ' disabled title="Starter voices stay on this device."'}>Delete voice</button>
+          ${
+            profileId
+              ? `<button class="danger" type="button" data-action="confirm-delete-voice" data-profile-id="${attr(profileId)}">Delete voice</button>`
+              : `<p class="voice-info-note">Starter voices stay on this device.</p>`
+          }
+          <button class="primary" type="button" data-action="close-voice-info">Done</button>
         </div>
       </section>
     </div>
   `;
 }
-
 function renderDeleteVoiceModal(): string {
   const profile = voiceDeleteTargetId ? profileById(voiceDeleteTargetId) : null;
   if (!profile) {
@@ -3546,21 +3688,34 @@ function renderDownloadBusyModal(): string {
 
 function renderHistory(): string {
   if (historyView === "report" && sessionReport) {
-    return renderSessionReport(sessionReport) + (sessionReview?.id === sessionReport.id ? renderSessionReview(sessionReview) : "");
+    return `${renderSessionReport(sessionReport)}<div id="review-layer" class="slot">${renderReviewLayer()}</div>`;
   }
   if (historyView === "trends") {
     return renderTrends();
   }
+  return `
+    <section class="history-page">
+      ${renderHistoryToolbar(historyWeekShown())}
+      <div id="history-body" class="slot">${renderHistoryBody()}</div>
+    </section>
+  `;
+}
 
-  const weekStart = historyWeek?.week_start || historyWeekStart || thisMondayKey();
+function historyWeekShown(): string {
+  return historyWeek?.week_start || historyWeekStart || thisMondayKey();
+}
+
+/** Everything under the toolbar: search results, or the week's charts and lists. */
+function renderHistoryBody(): string {
+  if (historySearch.trim()) {
+    return renderSearchResults();
+  }
+  const weekStart = historyWeekShown();
   const sessions = historyWeek?.sessions ?? [];
   const recap = weekRecap && weekRecap.start === weekStart ? weekRecap : null;
-  const searching = historySearch.trim().length > 0;
-  // Both charts rise together on the first draw that has the week's data, and on arriving at the
-  // tab. The refresh that lands a moment after arrival redraws inside the window, so it restarts
-  // the rise a few ms in rather than cutting it short; a pane switch or a poll later leaves the
-  // bars standing.
-  const animate = recap !== null && (historyChartsFor !== weekStart || performance.now() < historyAnimateUntil);
+  // Both charts rise together on arriving at the tab and on the first draw of another week's
+  // data; a pane switch or a poll later leaves the bars standing.
+  const animate = recap !== null && (takeAnimation("history") || historyChartsFor !== weekStart);
   if (recap) {
     historyChartsFor = weekStart;
   }
@@ -3568,26 +3723,17 @@ function renderHistory(): string {
     ? "No sessions this week."
     : "Finish a session and its report shows up here. Nothing leaves this computer.";
   return `
-    <section class="history-page">
-      ${renderHistoryToolbar(weekStart)}
-      ${
-        searching
-          ? renderSearchResults()
-          : `
-        <div class="history-hero">
-          ${renderWeekHero(weekStart, recap, animate)}
-          ${renderTrendsDoor(weekStart, recap, animate)}
-        </div>
-        <div class="history-seg-row">
-          <div class="history-seg" role="group" aria-label="Show">
-            <button type="button" class="${historyPane === "sessions" ? "is-on" : ""}" aria-pressed="${historyPane === "sessions"}" data-action="history-pane" data-pane="sessions">Sessions · ${sessions.length}</button>
-            <button type="button" class="${historyPane === "apps" ? "is-on" : ""}" aria-pressed="${historyPane === "apps"}" data-action="history-pane" data-pane="apps">Apps &amp; sites · ${recap?.apps.length ?? 0}</button>
-          </div>
-        </div>
-        ${historyPane === "apps" ? renderWeekAppsPane(recap) : renderSessionsPane(sessions, emptyWeek)}
-      `
-      }
-    </section>
+    <div class="history-hero">
+      ${renderWeekHero(weekStart, recap, animate)}
+      ${renderTrendsDoor(weekStart, recap, animate)}
+    </div>
+    <div class="history-seg-row">
+      <div class="history-seg" role="group" aria-label="Show">
+        <button type="button" class="${historyPane === "sessions" ? "is-on" : ""}" aria-pressed="${historyPane === "sessions"}" data-action="history-pane" data-pane="sessions">Sessions · ${sessions.length}</button>
+        <button type="button" class="${historyPane === "apps" ? "is-on" : ""}" aria-pressed="${historyPane === "apps"}" data-action="history-pane" data-pane="apps">Apps &amp; sites · ${recap?.apps.length ?? 0}</button>
+      </div>
+    </div>
+    ${historyPane === "apps" ? renderWeekAppsPane(recap) : renderSessionsPane(sessions, emptyWeek)}
   `;
 }
 
@@ -3607,7 +3753,7 @@ function renderHistoryToolbar(weekStart: string): string {
         <button type="button" class="history-week-arrow" data-action="history-week-next" ${nextDisabled ? "disabled" : ""} aria-label="Next week">›</button>
         ${weekStart === current ? "" : `<button type="button" class="history-week-today" data-action="history-week-today">This week</button>`}
       </div>
-      ${weekPickerOpen ? renderWeekPicker(weekStart, oldestMonday) : ""}
+      <div id="week-picker-slot" class="slot">${weekPickerOpen ? renderWeekPicker(weekStart, oldestMonday) : ""}</div>
       <label class="history-search">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
         <input id="history-search" type="search" value="${attr(historySearch)}" placeholder="Search all sessions" aria-label="Search sessions by goal" autocomplete="off" spellcheck="false" />
@@ -3702,8 +3848,10 @@ async function loadPickerDays(): Promise<void> {
       return;
     }
     lastError = errorText(error);
+    render();
+    return;
   }
-  render();
+  paintWeekPicker();
 }
 
 function closeWeekPicker(): void {
@@ -4633,17 +4781,21 @@ function hoverTimeline(event: MouseEvent): void {
 
 document.addEventListener("mousemove", hoverTimeline);
 
-// Left and Right step through the parts one by one, however thin; Escape lets go.
+// Left and Right step through the parts one by one, however thin. Escape lets go of a part,
+// and only with none picked does it go on to close the report.
 document.addEventListener("keydown", (event) => {
   const wrap = (event.target as HTMLElement).closest?.<HTMLElement>(".timeline-wrap[data-runs]");
   if (!wrap || !["ArrowLeft", "ArrowRight", "Escape"].includes(event.key)) {
     return;
   }
-  event.preventDefault();
   if (event.key === "Escape") {
-    clearTimeline(wrap);
+    if (wrap.dataset.pick !== undefined) {
+      event.stopPropagation();
+      clearTimeline(wrap);
+    }
     return;
   }
+  event.preventDefault();
   const runs = JSON.parse(wrap.dataset.runs ?? "[]") as TimelineHoverRun[];
   const current = wrap.dataset.pick === undefined ? (event.key === "ArrowRight" ? -1 : runs.length) : Number(wrap.dataset.pick);
   const pick = Math.min(Math.max(current + (event.key === "ArrowRight" ? 1 : -1), 0), runs.length - 1);
@@ -4691,16 +4843,23 @@ function renderTimelineLegend(report: SessionReport, unrecorded: boolean): strin
   `;
 }
 
-function bindEvents(): void {
-  document.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
+/** Every listener for the markup inside `root`: the whole document after a full rebuild, or one
+ *  slot after paintSlot, so a partial redraw is wired exactly like a full one. */
+function bindEvents(root: ParentNode = document): void {
+  // The closing line's pop-up also goes away on a click outside it.
+  root.querySelector(".session-over-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      sessionOver = null;
+      paintModalLayer();
+    }
+  });
+  root.querySelectorAll<HTMLButtonElement>("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       const next = button.dataset.tab as Tab;
       if (next === activeTab) {
         return;
       }
-      if (next === "session") {
-        animateCalendarSoon();
-      }
+      animateOnArrival(next);
       const leavingWebcam = settingsView === "webcam";
       if (voiceInfoId) {
         dismissVoiceInfo();
@@ -4713,13 +4872,18 @@ function bindEvents(): void {
         settingsView = "home";
         ruleEditor = null;
       }
-      if (activeTab === "history") {
-        historyAnimateUntil = performance.now() + 500;
-      }
       closeWeekPicker();
       render();
       if (activeTab === "history") {
-        void refreshTrends(false).then(() => refreshHistoryWeek());
+        // Redraw only if the data moved: a redraw now would cut the charts' rise short.
+        const before = historyDataKey();
+        void refreshTrends(false)
+          .then(() => refreshHistoryWeek(false))
+          .then(() => {
+            if (activeTab === "history" && historyDataKey() !== before) {
+              render();
+            }
+          });
       }
       if (leavingWebcam) {
         void stopWebcamPreview();
@@ -4727,26 +4891,38 @@ function bindEvents(): void {
     });
   });
 
-  document.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
-    button.addEventListener("click", () => {
+  root.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      // A button inside an action card (a voice card) runs only its own action.
+      if ((event.target as Element).closest("[data-action]") !== button || button.getAttribute("aria-disabled") === "true") {
+        return;
+      }
       void runAction(button.dataset.action || "", button);
     });
+    if (button.tagName !== "BUTTON") {
+      button.addEventListener("keydown", (event) => {
+        if (event.target === button && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          button.click();
+        }
+      });
+    }
   });
 
-  document.querySelectorAll<HTMLButtonElement>("[data-rule-action]").forEach((button) => {
+  root.querySelectorAll<HTMLButtonElement>("[data-rule-action]").forEach((button) => {
     button.addEventListener("click", () => {
       void handleRuleAction(button);
     });
   });
 
-  document.querySelectorAll<HTMLFormElement>("[data-rule-form]").forEach((form) => {
+  root.querySelectorAll<HTMLFormElement>("[data-rule-form]").forEach((form) => {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       void saveRuleForm(form);
     });
   });
 
-  document.getElementById("rule-value")?.addEventListener("input", (event) => {
+  root.querySelector("#rule-value")?.addEventListener("input", (event) => {
     if (ruleEditor) {
       ruleEditor.value = (event.currentTarget as HTMLInputElement).value;
       paintRuleEditorLive();
@@ -4754,19 +4930,19 @@ function bindEvents(): void {
     }
   });
 
-  document.getElementById("rule-name")?.addEventListener("input", (event) => {
+  root.querySelector("#rule-name")?.addEventListener("input", (event) => {
     if (ruleEditor) {
       ruleEditor.name = (event.currentTarget as HTMLInputElement).value;
       ruleEditor.nameTouched = true;
     }
   });
 
-  document.querySelectorAll<HTMLButtonElement>("[data-history-rename]").forEach((button) => {
+  root.querySelectorAll<HTMLButtonElement>("[data-history-rename]").forEach((button) => {
     button.addEventListener("click", () => {
       const key = button.dataset.historyRename ?? "";
       const kind = button.dataset.renameKind as "app" | "website";
       historyRename = { kind, key, value: kind === "website" ? siteNames[key] ?? "" : appNames[key] ?? "" };
-      render();
+      paintHistoryBody();
       (document.getElementById("history-rename") as HTMLInputElement | null)?.select();
     });
   });
@@ -4782,15 +4958,15 @@ function bindEvents(): void {
         return;
       }
       closeWeekPicker();
-      render();
+      paintWeekPicker();
     });
   }
-  const searchInput = document.getElementById("history-search") as HTMLInputElement | null;
+  const searchInput = root.querySelector("#history-search") as HTMLInputElement | null;
   searchInput?.addEventListener("input", () => {
     historySearch = searchInput.value;
     scheduleHistorySearch();
   });
-  const renameInput = document.getElementById("history-rename") as HTMLInputElement | null;
+  const renameInput = root.querySelector("#history-rename") as HTMLInputElement | null;
   renameInput?.addEventListener("input", () => {
     if (historyRename) {
       historyRename.value = renameInput.value;
@@ -4806,9 +4982,9 @@ function bindEvents(): void {
     void saveHistoryRename();
   });
 
-  bindPhraseEditor(document);
+  bindPhraseEditor(root);
 
-  document.querySelector("details.overlay-more")?.addEventListener("toggle", (event) => {
+  root.querySelector("details.overlay-more")?.addEventListener("toggle", (event) => {
     const open = (event.currentTarget as HTMLDetailsElement).open;
     if (open === overlayMoreOpen) {
       return;
@@ -4818,15 +4994,15 @@ function bindEvents(): void {
     requestAnimationFrame(() => fitOverlayWindow());
   });
 
-  document.getElementById("overlay-snooze")?.addEventListener("change", (event) => {
+  root.querySelector("#overlay-snooze")?.addEventListener("change", (event) => {
     const mute = (event.target as HTMLInputElement).checked;
     void invokeSnapshot(mute ? "snooze_session" : "resume_session");
   });
 
-  bindPreflight(document);
-  bindClipsControls(document);
-  bindSessionReview(document);
-  document.querySelectorAll<HTMLButtonElement>("[data-stat-flip]").forEach((button) => {
+  bindPreflight(root);
+  bindClipsControls(root);
+  bindSessionReview(root);
+  root.querySelectorAll<HTMLButtonElement>("[data-stat-flip]").forEach((button) => {
     button.addEventListener("click", () => {
       const key = button.dataset.statFlip ?? "";
       const flipped = !flippedStats.has(key);
@@ -4840,34 +5016,40 @@ function bindEvents(): void {
     });
   });
 
-  document.getElementById("default-strictness")?.addEventListener("change", (event) => {
+  root.querySelector("#default-strictness")?.addEventListener("change", (event) => {
     void updateDefaultStrictness((event.target as HTMLSelectElement).value as Strictness);
   });
 
-  document.getElementById("status-window-enabled")?.addEventListener("change", (event) => {
+  root.querySelector("#status-window-enabled")?.addEventListener("change", (event) => {
     void updateStatusWindowEnabled((event.target as HTMLInputElement).checked);
   });
 
-  document.getElementById("webcam-phone-use")?.addEventListener("change", (event) => {
+  root.querySelector("#webcam-phone-use")?.addEventListener("change", (event) => {
     void setWebcamEnabled((event.target as HTMLInputElement).checked);
   });
 
-  document.getElementById("webcam-gpu")?.addEventListener("change", (event) => {
+  root.querySelector("#webcam-gpu")?.addEventListener("change", (event) => {
     void setWebcamGpu((event.target as HTMLInputElement).checked);
   });
 
-  document.getElementById("webcam-camera")?.addEventListener("change", (event) => {
+  root.querySelector("#webcam-camera")?.addEventListener("change", (event) => {
     void setWebcamCamera(Number((event.target as HTMLSelectElement).value));
   });
 
-  document.getElementById("voice-name")?.addEventListener("input", (event) => {
+  root.querySelector("#voice-name")?.addEventListener("input", (event) => {
     if (recordedVoice) {
       recordedVoice.name = (event.target as HTMLInputElement).value;
+      const canSave = Boolean(recordedVoice.bytes && recordedVoice.name.trim() && voiceBusy === null);
+      document.querySelector<HTMLButtonElement>('[data-action="save-recorded-voice"]')?.toggleAttribute("disabled", !canSave);
     }
   });
 
-  bindVoicePreview();
-  bindVoiceWaveforms();
+  // The preview transport lives in the voice dialogs; another slot's paint leaves it playing.
+  if (root === document || (root as Element).id === "voice-layer") {
+    bindVoicePreview();
+  }
+  bindVoiceWaveforms(root);
+  paintPlayingClip(root);
 }
 
 /** The preflight's own controls, inside `root`: the whole document after a rebuild, or just the layer. */
@@ -4910,26 +5092,110 @@ function bindPreflight(root: ParentNode): void {
  * Opening or closing the preflight repaints only its layer. Home underneath keeps its calendar,
  * quote and scroll position instead of being rebuilt behind the modal.
  */
+/**
+ * Redraws one slot and wires it with the same bindEvents a full render uses; the rest of the page
+ * stays as it is (its animations, hover and focus). A slot that isn't on the page has nothing to
+ * redraw: the next full render draws it from the same state.
+ */
+function paintSlot(id: string, html: string): HTMLElement | null {
+  const slot = document.getElementById(id);
+  if (!slot) {
+    return null;
+  }
+  const ui = captureUiState();
+  slot.innerHTML = html;
+  bindEvents(slot);
+  restoreUiState(ui);
+  return slot;
+}
+
 function paintPreflightLayer(): void {
-  const layer = document.getElementById("preflight-layer");
-  if (!layer) {
+  // The name field takes focus when the start screen opens, not on every rebuild after a click.
+  const opening = !document.querySelector("#preflight-layer #preflight-goal");
+  const layer = paintSlot("preflight-layer", preflightOpen ? renderPreflightModal() : "");
+  if (layer && preflightOpen && opening) {
+    layer.querySelector<HTMLTextAreaElement>("#preflight-goal")?.focus();
+  }
+}
+
+/** The confirm boxes and the session-over card, over whatever page is showing. */
+function renderModalLayer(): string {
+  return renderHistoryConfirm() + renderQuitConfirm() + renderSessionOver();
+}
+
+function paintModalLayer(): void {
+  paintSlot("modal-layer", renderModalLayer());
+}
+
+function renderReviewLayer(): string {
+  return sessionReview && sessionReview.id === sessionReport?.id ? renderSessionReview(sessionReview) : "";
+}
+
+function paintReviewLayer(): void {
+  paintSlot("review-layer", renderReviewLayer());
+}
+
+function paintSessionRulesLayer(): void {
+  paintSlot("session-rules-layer", sessionRulesOpen ? renderSessionRulesModal() : "");
+}
+
+/** The History list under its toolbar; anywhere else in History, the whole page. */
+function paintHistoryBody(): void {
+  if (!paintSlot("history-body", renderHistoryBody())) {
     render();
+  }
+}
+
+// A click anywhere but the ⋯ menu closes it.
+window.addEventListener("pointerdown", (event) => {
+  if (toneMenuOpen && !(event.target as Element | null)?.closest(".personality-own")) {
+    toneMenuOpen = false;
+    paintClipsPanel();
+  }
+});
+
+/** Whether a mouse or pen is held down, so a rebuild can wait for its click. */
+let pointerHeld = false;
+window.addEventListener("pointerdown", () => (pointerHeld = true), true);
+window.addEventListener("pointerup", () => (pointerHeld = false), true);
+window.addEventListener("pointercancel", () => (pointerHeld = false), true);
+
+/**
+ * Runs `paint` now, or once the held pointer is released and its click has landed. A field's blur
+ * fires on the press, so a rebuild it starts would replace the button before the release and
+ * swallow the click.
+ */
+function afterPointer(paint: () => void): void {
+  if (!pointerHeld) {
+    paint();
     return;
   }
-  layer.innerHTML = preflightOpen ? renderPreflightModal() : "";
-  layer.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void runAction(button.dataset.action || "", button);
-    });
-  });
-  layer.querySelectorAll<HTMLButtonElement>("[data-rule-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      void handleRuleAction(button);
-    });
-  });
-  bindPreflight(layer);
+  const release = () => {
+    window.removeEventListener("pointerup", release);
+    window.removeEventListener("pointercancel", release);
+    window.setTimeout(paint);
+  };
+  window.addEventListener("pointerup", release);
+  window.addEventListener("pointercancel", release);
+}
+
+/** The picker and the toolbar button that opens it. */
+function paintWeekPicker(): void {
+  const oldestMonday = historyWeek?.oldest_day ? mondayKey(historyWeek.oldest_day) : null;
+  paintSlot("week-picker-slot", weekPickerOpen ? renderWeekPicker(historyWeekShown(), oldestMonday) : "");
+  const label = document.querySelector<HTMLElement>(".history-week-label");
+  label?.classList.toggle("is-open", weekPickerOpen);
+  label?.setAttribute("aria-expanded", String(weekPickerOpen));
+}
+
+/** The rule editor shows on the start screen, in the session's distractions box, or in Settings. */
+function paintRuleEditorHost(): void {
   if (preflightOpen) {
-    layer.querySelector<HTMLTextAreaElement>("#preflight-goal")?.focus();
+    paintPreflightLayer();
+  } else if (sessionRulesOpen) {
+    paintSessionRulesLayer();
+  } else {
+    render();
   }
 }
 
@@ -4983,6 +5249,8 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     theme = theme === "dark" ? "light" : "dark";
     localStorage.setItem("supervisor-theme", theme);
     applyTheme();
+    // Waves are drawn in the theme's ink; the drawn key includes the theme, so they redraw.
+    bindVoiceWaveforms();
     const button = document.querySelector(".theme-toggle");
     if (button) {
       button.textContent = theme === "dark" ? "Dark" : "Light";
@@ -5034,7 +5302,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
       preflightExceptions = preflightExceptions.some((exception) => sameRule(exception, rule))
         ? preflightExceptions.filter((exception) => !sameRule(exception, rule))
         : [...preflightExceptions, { ...rule }];
-      render();
+      paintPreflightLayer();
     }
     return;
   }
@@ -5043,7 +5311,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     if (snapshot?.current) {
       sessionRulesOpen = true;
       ruleEditor = null;
-      render();
+      paintSessionRulesLayer();
     }
     return;
   }
@@ -5051,7 +5319,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "close-session-rules") {
     sessionRulesOpen = false;
     ruleEditor = null;
-    render();
+    paintSessionRulesLayer();
     return;
   }
 
@@ -5104,10 +5372,12 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  // Cancel goes back to the session screen, so the calendar pops in again, as on Escape.
   if (action === "close-preflight") {
     preflightOpen = false;
     ruleEditor = null;
-    paintPreflightLayer();
+    animateOnArrival("session");
+    render();
     return;
   }
 
@@ -5139,6 +5409,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     historyView = "list";
     editingRecapNames = false;
     historyRename = null;
+    animateOnArrival("history");
     await refreshHistoryWeek();
     return;
   }
@@ -5146,12 +5417,12 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "toggle-week-picker") {
     if (weekPickerOpen) {
       closeWeekPicker();
-      render();
+      paintWeekPicker();
       return;
     }
     weekPickerOpen = true;
     pickerMonth = monthKey(historyWeekStart || thisMondayKey());
-    render();
+    paintWeekPicker();
     await loadPickerDays();
     return;
   }
@@ -5159,7 +5430,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "picker-month-prev" || action === "picker-month-next") {
     pickerMonth = addMonthsKey(pickerMonth || monthKey(historyWeekStart || thisMondayKey()), action === "picker-month-prev" ? -1 : 1);
     pickerDays = {};
-    render();
+    paintWeekPicker();
     await loadPickerDays();
     return;
   }
@@ -5186,14 +5457,14 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     historyPane = source?.dataset.pane === "apps" ? "apps" : "sessions";
     editingRecapNames = false;
     historyRename = null;
-    render();
+    paintHistoryBody();
     return;
   }
 
   if (action === "toggle-recap-names") {
     editingRecapNames = !editingRecapNames;
     historyRename = null;
-    render();
+    paintHistoryBody();
     return;
   }
 
@@ -5227,6 +5498,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     historyView = "list";
     sessionReport = null;
     historyConfirm = null;
+    animateOnArrival("history");
     await refreshHistoryWeek();
     return;
   }
@@ -5235,7 +5507,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     const id = Number(source?.dataset.sessionId);
     if (Number.isInteger(id) && id > 0) {
       historyConfirm = { kind: "delete-session", id };
-      render();
+      paintModalLayer();
     }
     return;
   }
@@ -5243,13 +5515,13 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "ask-delete-all") {
     const bytes = await invoke<number>("get_history_size").catch(() => null);
     historyConfirm = { kind: "delete-all", bytes };
-    render();
+    paintModalLayer();
     return;
   }
 
   if (action === "cancel-history-confirm") {
     historyConfirm = null;
-    render();
+    paintModalLayer();
     return;
   }
 
@@ -5295,18 +5567,19 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     if (!voiceId) {
       return;
     }
-    await refreshVoiceStatus(false);
+    // Redraws the voice page itself only if the voices changed under it.
+    await refreshVoiceStatus();
     if (voiceInfoId !== voiceId) {
       stopVoicePreview();
     }
     voiceInfoId = voiceId;
-    render();
+    paintVoiceLayer();
     return;
   }
 
   if (action === "close-voice-info") {
     dismissVoiceInfo();
-    render();
+    paintVoiceLayer();
     return;
   }
 
@@ -5330,32 +5603,27 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "open-memory-info" || action === "close-memory-info") {
     memoryInfoOpen = action === "open-memory-info";
-    render();
+    paintVoiceLayer();
     return;
   }
 
   if (action === "open-model-info" || action === "close-model-info") {
     modelInfoOpen = action === "open-model-info";
-    render();
+    paintVoiceLayer();
     return;
   }
 
   if (action === "open-voice-help" || action === "close-voice-help") {
     voiceHelpOpen = action === "open-voice-help";
-    render();
-    return;
-  }
-
-  if (action === "pick-tone") {
-    clearFailedQueue();
-    clipsTone = source?.dataset.tone ?? null;
-    paintTonePick();
+    paintVoiceLayer();
     return;
   }
 
   if (action === "use-tone") {
     const tone = source?.dataset.tone;
     if (tone) {
+      clearFailedQueue();
+      closeToneForms();
       await setVoiceTone(clipsVoice(), tone);
     }
     return;
@@ -5363,7 +5631,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "generate-missing") {
     const voice = clipsVoice();
-    const missing = tonePhrases(viewedTone(voice)).filter((phrase) => !clipForPhrase(voice, phrase));
+    const missing = tonePhrases(voiceTone(voice)).filter((phrase) => !clipForPhrase(voice, phrase));
     await runClipQueue(missing.map((phrase) => phrase.id));
     return;
   }
@@ -5376,17 +5644,13 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "open-tones" || action === "close-tones") {
-    closeTonesPopup();
-    tonesOpen = action === "open-tones";
-    paintVoiceLayer();
-    return;
-  }
-
   if (action === "new-tone" || action === "cancel-new-tone") {
+    const hadForm = toneMenuOpen || toneRename !== null || toneDeleteArmed !== null;
+    closeToneForms();
     newToneDraft = action === "new-tone" ? "" : null;
-    toneRename = null;
-    toneDeleteArmed = null;
+    if (hadForm) {
+      paintClipsPanel();
+    }
     paintVoiceLayer();
     if (action === "new-tone") {
       document.getElementById("new-tone-input")?.focus();
@@ -5394,9 +5658,17 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "toggle-tone-menu") {
+    const open = !toneMenuOpen;
+    closeToneForms();
+    toneMenuOpen = open;
+    paintClipsPanel();
+    return;
+  }
+
   if (action === "add-line") {
     if (canEditPhrases()) {
-      openPhraseEditor(null, source?.dataset.tone || viewedTone(clipsVoice()));
+      openPhraseEditor(null, voiceTone(clipsVoice()), (source?.dataset.moment as PhraseMoment | undefined) ?? "nudge");
     }
     return;
   }
@@ -5409,10 +5681,9 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "rename-tone") {
     const tone = source?.dataset.tone ?? "";
     if (isCustomTone(tone)) {
+      closeToneForms();
       toneRename = { from: tone, value: tone };
-      toneDeleteArmed = null;
-      newToneDraft = null;
-      paintVoiceLayer();
+      paintClipsPanel();
       (document.getElementById("tone-rename-input") as HTMLInputElement | null)?.select();
     }
     return;
@@ -5420,16 +5691,15 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "cancel-rename-tone") {
     toneRename = null;
-    paintVoiceLayer();
+    paintClipsPanel();
     return;
   }
 
   if (action === "arm-delete-tone" || action === "cancel-delete-tone") {
     const tone = source?.dataset.tone ?? "";
+    closeToneForms();
     toneDeleteArmed = action === "arm-delete-tone" && isCustomTone(tone) ? tone : null;
-    toneRename = null;
-    newToneDraft = null;
-    paintVoiceLayer();
+    paintClipsPanel();
     return;
   }
 
@@ -5441,8 +5711,14 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "select-voice") {
     const voiceId = source?.dataset.voiceId;
     const voice = voiceId ? availableVoices().find((item) => item.id === voiceId) : null;
-    if (voiceId && voice?.selectable) {
+    if (voiceId && voice?.selectable && voiceId !== draft.voiceId) {
       draft.voiceId = voiceId;
+      // The lines below follow the voice picked; No voice leaves them on the last one.
+      if (voiceId !== "none") {
+        clipsVoiceId = voiceId;
+        clipsVoiceTouched = true;
+        closeToneForms();
+      }
       render();
       void updateSelectedVoice(voiceId).then((saved) => {
         if (saved) {
@@ -5480,13 +5756,13 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "ask-delete-model") {
     dismissVoiceInfo();
     modelDeleteOpen = true;
-    render();
+    paintVoiceLayer();
     return;
   }
 
   if (action === "cancel-delete-model") {
     modelDeleteOpen = false;
-    render();
+    paintVoiceLayer();
     return;
   }
 
@@ -5506,15 +5782,30 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "open-phrase-editor") {
     if (canEditPhrases()) {
       dismissVoiceInfo();
-      openPhraseEditor(source?.dataset.phraseId || null, viewedTone(clipsVoice()));
+      openPhraseEditor(source?.dataset.phraseId || null, voiceTone(clipsVoice()), "nudge");
     }
     return;
   }
 
   if (action === "delete-phrase") {
     const phraseId = source?.dataset.phraseId;
-    if (phraseId && canEditPhrases()) {
-      await deletePhrase(phraseId);
+    if (!phraseId || !canEditPhrases() || !phraseEditor) {
+      return;
+    }
+    // The first press asks; the second, on the question, deletes.
+    if (!phraseEditor.confirmDelete) {
+      phraseEditor.confirmDelete = true;
+      paintLinePopupButtons();
+      return;
+    }
+    await deletePhrase(phraseId);
+    return;
+  }
+
+  if (action === "keep-phrase") {
+    if (phraseEditor) {
+      phraseEditor.confirmDelete = false;
+      paintLinePopupButtons();
     }
     return;
   }
@@ -5523,7 +5814,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     clearFailedQueue();
     clipsVoiceId = source?.dataset.voiceId ?? clipsVoiceId;
     clipsVoiceTouched = true;
-    clipsTone = null;
+    closeToneForms();
     render();
     document.querySelector(".phrase-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
@@ -5565,13 +5856,13 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "confirm-delete-voice") {
     voicePreviewAudio?.pause();
     voiceDeleteTargetId = source?.dataset.profileId || null;
-    render();
+    paintVoiceLayer();
     return;
   }
 
   if (action === "cancel-delete-voice") {
     voiceDeleteTargetId = null;
-    render();
+    paintVoiceLayer();
     return;
   }
 
@@ -5598,10 +5889,24 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     await saveSessionReview();
     return;
   }
+  if (action === "close-session-over") {
+    sessionOver = null;
+    paintModalLayer();
+    return;
+  }
+  if (action === "cancel-quit") {
+    quitConfirmOpen = false;
+    paintModalLayer();
+    return;
+  }
+  if (action === "confirm-quit") {
+    await invoke("quit_app");
+    return;
+  }
   if (action === "review-later") {
     // Nothing saved: the same apps come up after the next session.
     sessionReview = null;
-    render();
+    paintReviewLayer();
     return;
   }
 
@@ -5652,14 +5957,22 @@ async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
 
   if (action === "add") {
     ruleEditor = { index: null, target: "website", value: "", name: "", nameTouched: false, preview: null };
-    render();
+    paintRuleEditorHost();
     document.getElementById("rule-value")?.focus();
     return;
   }
 
   if (action === "cancel") {
     ruleEditor = null;
-    render();
+    paintRuleEditorHost();
+    return;
+  }
+
+  if (action === "keep") {
+    if (ruleEditor) {
+      ruleEditor.confirmDelete = false;
+      paintRuleEditorHost();
+    }
     return;
   }
 
@@ -5678,11 +5991,17 @@ async function handleRuleAction(button: HTMLButtonElement): Promise<void> {
       nameTouched: false,
       preview: { target: rule.target, value: rule.value },
     };
-    render();
+    paintRuleEditorHost();
     return;
   }
 
   if (action === "delete") {
+    // The first press asks; the second, on the question, deletes.
+    if (ruleEditor && !ruleEditor.confirmDelete) {
+      ruleEditor.confirmDelete = true;
+      paintRuleEditorHost();
+      return;
+    }
     const previous = cloneRules(rules);
     rules.splice(index, 1);
     ruleEditor = null;
@@ -5819,7 +6138,7 @@ async function saveHistoryRename(): Promise<void> {
   } catch (error) {
     showFeedback(errorText(error));
   }
-  render();
+  afterPointer(paintHistoryBody);
 }
 
 async function persistPermanentRuleChanges(previous: AppRule[]): Promise<void> {
@@ -5858,6 +6177,7 @@ async function saveLine(regenerate: boolean): Promise<void> {
   }
   const text = editor.text.replace(/\s+/g, " ").trim();
   const tone = phraseToneOrder().find((item) => sameTone(item, editor.tone)) ?? editor.tone;
+  const moment = editor.moment;
   if (!text) {
     showFeedback("The line needs words");
     return;
@@ -5872,22 +6192,21 @@ async function saveLine(regenerate: boolean): Promise<void> {
     id = existing.id;
     const index = customPhrases.findIndex((phrase) => phrase.id === existing.id);
     if (index >= 0) {
-      customPhrases[index] = { id, tone, text };
+      customPhrases[index] = { id, tone, moment, text };
     } else {
-      phraseOverrides[id] = { id, tone, text };
+      phraseOverrides[id] = { id, tone, moment, text };
     }
   } else {
     id = uniqueCustomPhraseId(text);
-    customPhrases.push({ id, tone, text });
+    customPhrases.push({ id, tone, moment, text });
   }
   if (!(await persistPhraseLibrary())) {
     restoreLibrary(backup);
     render();
     return;
   }
-  clipsTone = tone;
   phraseEditor = null;
-  render();
+  paintLines();
   if (regenerate) {
     reopenLineAfterQueue = id;
     if (!(await runClipQueue([id]))) {
@@ -5896,33 +6215,36 @@ async function saveLine(regenerate: boolean): Promise<void> {
     }
     return;
   }
-  const moved = existing && existing.text === text && !sameTone(existing.tone, tone);
-  showFeedback(moved ? `Moved to ${toneLabel(tone)}` : existing ? "Line saved" : "Line added");
+  const moved = existing && existing.text === text && existing.moment !== moment;
+  const label = MOMENTS.find((item) => item.id === moment)?.label ?? "";
+  showFeedback(moved ? `Moved to ${label}` : existing ? "Line saved" : "Line added");
 }
 
-/** A new, empty tone. Its first line comes next, through the Line popup. */
+/** A new personality, empty or with a copy of another's lines, that the viewed voice takes on. */
 async function createTone(): Promise<void> {
   const name = (newToneDraft ?? "").trim().slice(0, 80);
   if (!name) {
-    showFeedback("Name the tone");
+    showFeedback("Name the personality");
     return;
   }
   if (phraseToneOrder().some((tone) => sameTone(tone, name))) {
-    showFeedback(`There is already a ${toneLabel(name)} tone`);
+    showFeedback(`There is already a ${toneLabel(name)} personality`);
     return;
   }
+  const from = (document.getElementById("new-tone-from") as HTMLSelectElement | null)?.value ?? "";
   const backup = libraryBackup();
   customPhraseSets.push(name);
+  for (const phrase of from ? tonePhrases(from) : []) {
+    customPhrases.push({ id: uniqueCustomPhraseId(phrase.text), tone: name, moment: phrase.moment, text: phrase.text });
+  }
   if (!(await persistPhraseLibrary())) {
     restoreLibrary(backup);
     render();
     return;
   }
-  closeTonesPopup();
-  clipsTone = name;
-  openPhraseEditor(null, name);
+  closeToneForms();
+  await setVoiceTone(clipsVoice(), name);
 }
-
 /** Custom phrases go; bundled ones are hidden, so they stay deletable without a clip cleanup. */
 async function deletePhrase(phraseId: string): Promise<void> {
   const backup = libraryBackup();
@@ -5938,7 +6260,7 @@ async function deletePhrase(phraseId: string): Promise<void> {
     return;
   }
   phraseEditor = null;
-  render();
+  paintLines();
   showFeedback("Line deleted");
 }
 
@@ -6184,7 +6506,8 @@ function applyDownloadSnapshot(download: VoiceDownloadSnapshot): void {
   }
 }
 
-async function runVoiceBusy(kind: Exclude<VoiceBusy, null>, task: () => Promise<void>): Promise<boolean> {
+/** `redrawAfter` false: the caller redraws once it has settled what comes after. */
+async function runVoiceBusy(kind: Exclude<VoiceBusy, null>, task: () => Promise<void>, redrawAfter = true): Promise<boolean> {
   if (voiceBusy !== null) {
     return false;
   }
@@ -6206,7 +6529,9 @@ async function runVoiceBusy(kind: Exclude<VoiceBusy, null>, task: () => Promise<
   } finally {
     ignoreVoiceWorkerError = false;
     voiceBusy = null;
-    render();
+    if (redrawAfter) {
+      render();
+    }
   }
 }
 
@@ -6215,7 +6540,7 @@ function openRecordingDialog(): void {
   recordingOpen = true;
   recordingState = recordedVoice ? "recorded" : "idle";
   recordingError = "";
-  render();
+  paintVoiceLayer();
 }
 
 async function closeRecordingDialog(): Promise<void> {
@@ -6225,7 +6550,7 @@ async function closeRecordingDialog(): Promise<void> {
   recordingState = "idle";
   recordingError = "";
   resetRecordedVoice();
-  render();
+  paintVoiceLayer();
 }
 
 async function startVoiceRecording(): Promise<void> {
@@ -6247,7 +6572,7 @@ async function startVoiceRecording(): Promise<void> {
     recordingError = errorText(error);
   }
 
-  render();
+  paintVoiceLayer();
 }
 
 async function stopVoiceRecording(keepClip = true): Promise<void> {
@@ -6270,7 +6595,7 @@ async function stopVoiceRecording(keepClip = true): Promise<void> {
     recordingError = errorText(error);
   }
 
-  render();
+  paintVoiceLayer();
 }
 
 async function saveRecordedVoice(): Promise<void> {
@@ -6303,7 +6628,7 @@ async function saveRecordedVoice(): Promise<void> {
     document.querySelector(".phrase-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     recordingError = errorText(error); // the dialog is still open; a banner would sit behind it
-    render();
+    paintVoiceLayer();
   }
 }
 
@@ -6332,7 +6657,6 @@ async function runClipQueue(phraseIds: string[]): Promise<boolean> {
   dismissVoiceInfo();
   clipQueue = { voiceId: voice.id, phraseIds, index: 0, phase: "working", error: "", startedAt: performance.now(), stopAfter: false };
   clipQueueTicker = window.setInterval(paintClipQueue, 1000);
-  paintClipsPanel();
   await runVoiceBusy("generate-clips", async () => {
     while (clipQueue && clipQueue.phase === "working" && clipQueue.index < clipQueue.phraseIds.length) {
       const phraseId = clipQueue.phraseIds[clipQueue.index];
@@ -6374,7 +6698,7 @@ async function runClipQueue(phraseIds: string[]): Promise<boolean> {
         break;
       }
     }
-  });
+  }, false);
   if (clipQueueTicker !== null) {
     window.clearInterval(clipQueueTicker);
     clipQueueTicker = null;
@@ -6401,7 +6725,7 @@ async function runClipQueue(phraseIds: string[]): Promise<boolean> {
   const phrase = reopen ? effectivePhrases().find((item) => item.id === reopen) : null;
   if (done && onPage && phrase && !editorIsOpen() && clipForPhrase(clipsVoice(), phrase)) {
     render();
-    openPhraseEditor(phrase.id, phrase.tone);
+    openPhraseEditor(phrase.id, phrase.tone, phrase.moment);
     return true;
   }
   render();
@@ -6415,16 +6739,46 @@ async function setVoiceTone(voice: VoiceOption, tone: VoiceTone): Promise<void> 
   }
   try {
     upsertProfile(await invoke<VoiceProfileSummary>("set_voice_tone", { profileId: profile.profile_id, tone }));
-    clipsTone = tone;
     voiceError = "";
-    showFeedback(`${voice.name} speaks ${toneLabel(tone)}`);
+    showFeedback(`${voice.name} speaks like ${toneLabel(tone)}`);
   } catch (error) {
     voiceError = errorText(error);
   }
+  // The voice cards say who speaks like what, so the page redraws.
   render();
 }
 
-/** Renames a custom tone everywhere it is written: its lines, its set, and the voices that speak it. */
+/** Saves the name in Edit voice as the field is left. An empty name puts the old one back. */
+async function renameVoice(): Promise<void> {
+  const voice = availableVoices().find((item) => item.id === voiceInfoId);
+  const input = document.getElementById("voice-rename-input") as HTMLInputElement | null;
+  if (!voice?.profile || !input) {
+    return;
+  }
+  const name = input.value.trim().slice(0, 80);
+  if (!name || name === voice.name) {
+    input.value = voice.name;
+    return;
+  }
+  let saved = false;
+  try {
+    upsertProfile(await invoke<VoiceProfileSummary>("rename_voice_profile", { profileId: voice.profile.profile_id, displayName: name }));
+    voiceError = "";
+    saved = true;
+  } catch (error) {
+    voiceError = errorText(error);
+  }
+  // Leaving the field by clicking Done or Delete: the redraw waits for that click to land.
+  afterPointer(() => {
+    render();
+    const status = document.querySelector(".voice-rename-status");
+    if (status && saved) {
+      status.textContent = "Saved";
+    }
+  });
+}
+
+/** Renames a custom personality everywhere it is written: its lines, its set, and the voices that speak like it. */
 async function renameTone(): Promise<void> {
   const edit = toneRename;
   if (!edit || !canEditPhrases()) {
@@ -6432,16 +6786,16 @@ async function renameTone(): Promise<void> {
   }
   const next = edit.value.trim().slice(0, 80);
   if (!next) {
-    showFeedback("Name the tone");
+    showFeedback("Name the personality");
     return;
   }
   if (sameTone(next, edit.from)) {
     toneRename = null;
-    render();
+    paintLines();
     return;
   }
   if (phraseToneOrder().some((tone) => sameTone(tone, next))) {
-    showFeedback(`There is already a ${toneLabel(next)} tone`);
+    showFeedback(`There is already a ${toneLabel(next)} personality`);
     return;
   }
   const backup = libraryBackup();
@@ -6466,17 +6820,16 @@ async function renameTone(): Promise<void> {
       }
     }
   }
-  clipsTone = next;
   toneRename = null;
   render();
   showFeedback(`Renamed to ${toneLabel(next)}`);
 }
 
-/** Removes a custom tone and its lines. Voices that spoke it fall back to the first tone. */
+/** Removes a custom personality and its lines. Voices that spoke like it fall back to the first. */
 async function deleteTone(tone: VoiceTone): Promise<void> {
   toneDeleteArmed = null;
   if (!isCustomTone(tone) || !canEditPhrases()) {
-    render();
+    paintLines();
     return;
   }
   const backup = libraryBackup();
@@ -6493,7 +6846,6 @@ async function deleteTone(tone: VoiceTone): Promise<void> {
     render();
     return;
   }
-  clipsTone = null;
   render();
   showFeedback(`${toneLabel(tone)} deleted`);
 }
@@ -7035,24 +7387,40 @@ async function playNudge(current: CurrentSession | null): Promise<void> {
   await playLine(selectedNudgeClip(current.metrics.nudges, current.camera.phone));
 }
 
-/** A Pomodoro round or its break ended: the voice says a line from that moment's set, if the
- *  voice has one. Breaks are pauses, so this plays whatever the session's status. */
+/** A Pomodoro round ended (Take a break) or its break did (Back to work). Breaks are pauses, so
+ *  this plays whatever the session's status. */
 async function playMoment(phase: string): Promise<void> {
-  if (draft.voiceId === "none") {
-    return;
-  }
-  const tone = phase === "break_over" ? BREAK_OVER_TONE : ROUND_OVER_TONE;
-  const voice = selectedVoice();
-  const ready = tonePhrases(tone)
-    .map((phrase) => clipForPhrase(voice, phrase))
-    .filter((clip): clip is VoiceClipSummary => Boolean(clip));
   const moments = snapshot?.current?.pomodoro?.moments ?? 1;
-  await playLine(ready.length ? ready[(moments - 1) % ready.length] : null);
+  await playMomentLine(phase === "break_over" ? "nudge" : "roundover", moments - 1);
 }
 
-async function playLine(clip: VoiceClipSummary | null): Promise<void> {
+/** A session ended: a closing line, taking turns by the session's id (newest in history). */
+async function playSessionOver(): Promise<void> {
+  if ((await playMomentLine("sessionover", history[0]?.id ?? 0)) && lastNudgeVoice?.line) {
+    sessionOver = { voice: { ...lastNudgeVoice, speaking: !nudgeAudio?.paused }, session: history[0] ?? null };
+    paintModalLayer();
+  }
+}
+
+/** The `turn`th ready line the voice's personality has for a moment, if any. True if it played. */
+async function playMomentLine(moment: PhraseMoment, turn: number): Promise<boolean> {
+  if (draft.voiceId === "none") {
+    return false;
+  }
+  const voice = selectedVoice();
+  const ready = momentPhrases(voiceTone(voice), moment)
+    .map((phrase) => clipForPhrase(voice, phrase))
+    .filter((clip): clip is VoiceClipSummary => Boolean(clip));
+  return playLine(ready.length ? ready[turn % ready.length] : null);
+}
+
+/** The bars of the speaking orb, for a play button while its clip plays. */
+const MINI_ORB = `<span class="mini-orb" aria-hidden="true"><i></i><i></i><i></i><i></i></span>`;
+
+/** Plays a line; true if it started. */
+async function playLine(clip: VoiceClipSummary | null): Promise<boolean> {
   if (!clip) {
-    return;
+    return false;
   }
   try {
     nudgeAudio?.pause();
@@ -7072,29 +7440,35 @@ async function playLine(clip: VoiceClipSummary | null): Promise<void> {
     await audio.play();
     announceNudge(true);
     voiceError = "";
+    return true;
   } catch (error) {
     voiceError = `Could not play the line: ${errorText(error)}`;
     render();
+    return false;
   }
 }
 
 /** Tells the distraction card (another window) whether the voice is speaking, and what. */
 function announceNudge(speaking: boolean): void {
+  if (sessionOver && sessionOver.voice.speaking !== speaking) {
+    sessionOver.voice.speaking = speaking;
+    paintModalLayer();
+  }
   if (lastNudgeVoice) {
     void emit("nudge-voice", { speaking, ...lastNudgeVoice } satisfies NudgeVoice);
   }
 }
 
-/** Lines from the voice's own tone (for a phone, its Phone lines first); any clip at all only
- *  when that tone has none ready. */
+/** Back to work lines from the voice's personality (for a phone, its Phone down lines first); any
+ *  clip at all only when it has none ready. */
 function selectedNudgeClip(nudgeCount: number, phone = false): VoiceClipSummary | null {
   const voice = selectedVoice();
-  const readyIn = (tone: VoiceTone) =>
-    tonePhrases(tone)
+  const readyIn = (moment: PhraseMoment) =>
+    momentPhrases(voiceTone(voice), moment)
       .map((phrase) => clipForPhrase(voice, phrase))
       .filter((clip): clip is VoiceClipSummary => Boolean(clip));
-  const phoneReady = phone ? readyIn(PHONE_TONE) : [];
-  const ready = phoneReady.length > 0 ? phoneReady : readyIn(voiceTone(voice));
+  const phoneReady = phone ? readyIn("phone") : [];
+  const ready = phoneReady.length > 0 ? phoneReady : readyIn("nudge");
   if (ready.length === 0) {
     const clips = voice.profile?.clips ?? [];
     if (clips.length === 0) {
@@ -7148,19 +7522,46 @@ function readyClipCount(voice: VoiceOption, phrases: PhraseDefinition[]): number
   return phrases.filter((phrase) => clipForPhrase(voice, phrase)).length;
 }
 
+/** The clip a play button started, so that button shows the speaking orb; a second click stops it. */
+let playingClipPath: string | null = null;
+
 async function playClip(path: string): Promise<void> {
+  if (path === playingClipPath && nudgeAudio && !nudgeAudio.paused) {
+    nudgeAudio.pause();
+    return;
+  }
   try {
     voicePreviewAudio?.pause();
     paintVoicePreview();
     nudgeAudio?.pause();
-    nudgeAudio = new Audio(clipAssetUrl(path));
-    nudgeAudio.preload = "auto";
-    await nudgeAudio.play();
+    const audio = new Audio(clipAssetUrl(path));
+    nudgeAudio = audio;
+    audio.preload = "auto";
+    const done = () => {
+      if (playingClipPath === path && nudgeAudio === audio) {
+        playingClipPath = null;
+        paintPlayingClip();
+      }
+    };
+    audio.addEventListener("ended", done);
+    audio.addEventListener("pause", done);
+    await audio.play();
+    playingClipPath = path;
+    paintPlayingClip();
     voiceError = "";
   } catch (error) {
     voiceError = `Could not play the line: ${errorText(error)}`;
     render();
   }
+}
+
+/** Play buttons follow the clip playing, without a redraw. */
+function paintPlayingClip(root: ParentNode = document): void {
+  root.querySelectorAll<HTMLButtonElement>("button[data-action='play-clip']").forEach((button) => {
+    const on = playingClipPath !== null && button.dataset.clipPath === playingClipPath;
+    button.classList.toggle("is-playing", on);
+    button.setAttribute("aria-pressed", String(on));
+  });
 }
 
 function dismissVoiceInfo(): void {
@@ -7260,8 +7661,8 @@ function endPreviewBarDrag(): void {
 
 const waveformFailed = new Set<string>();
 
-function bindVoiceWaveforms(): void {
-  document.querySelectorAll<HTMLCanvasElement>("canvas[data-wave-path]").forEach((canvas) => {
+function bindVoiceWaveforms(root: ParentNode = document): void {
+  root.querySelectorAll<HTMLCanvasElement>("canvas[data-wave-path]").forEach((canvas) => {
     const path = canvas.dataset.wavePath ?? "";
     const bars = Number(canvas.dataset.waveBars) || 11;
     if (!path || waveformFailed.has(path)) {
@@ -7511,14 +7912,18 @@ function tonePhrases(tone: VoiceTone): PhraseDefinition[] {
   return effectivePhrases().filter((phrase) => sameTone(phrase.tone, tone));
 }
 
-/** Bundled tones keep their names; only the user's own sets can be renamed or deleted. */
+function momentPhrases(tone: VoiceTone, moment: PhraseMoment): PhraseDefinition[] {
+  return tonePhrases(tone).filter((phrase) => phrase.moment === moment);
+}
+
+/** Bundled personalities keep their names; only the user's own can be renamed or deleted. */
 function isCustomTone(tone: VoiceTone): boolean {
   return !toneOrder.some((item) => sameTone(item, tone));
 }
 
-/** The tone a voice speaks in sessions: its saved one while that tone exists, else the first. */
+/** The personality a voice speaks like: its saved one while that exists, else the first. */
 function profileTone(profile: VoiceProfileSummary | null): VoiceTone {
-  const tones = phraseToneOrder().filter((tone) => !isMomentTone(tone));
+  const tones = phraseToneOrder();
   const saved = profile?.tone;
   return (saved && tones.find((tone) => sameTone(tone, saved))) || tones[0] || toneOrder[0];
 }
@@ -7527,15 +7932,11 @@ function voiceTone(voice: VoiceOption): VoiceTone {
   return profileTone(voice.profile);
 }
 
-/** The tone the Clips panel shows: the picked one while it exists, else the voice's own. */
-function viewedTone(voice: VoiceOption): VoiceTone {
-  const picked = clipsTone ? phraseToneOrder().find((tone) => sameTone(tone, clipsTone as string)) : null;
-  return picked || voiceTone(voice);
-}
 
-/** Every line of the voice's tone has a clip, and the tone has lines at all. */
+/** Every back to work line of the voice's personality has a clip, and it has some at all. The
+ *  other moments can come later; a voice without them stays quiet there. */
 function profileToneReady(profile: VoiceProfileSummary | null): boolean {
-  const phrases = tonePhrases(profileTone(profile));
+  const phrases = momentPhrases(profileTone(profile), "nudge");
   return phrases.length > 0 && phrases.every((phrase) => clipForPhraseId(profile?.clips ?? [], phrase.id));
 }
 
@@ -7586,22 +7987,28 @@ function ramLockMessage(): string {
   const system = voiceBackend?.system;
   const need = system?.min_free_ram_bytes ? formatBytes(system.min_free_ram_bytes) : "enough";
   const free = system?.available_ram_bytes != null ? formatBytes(system.available_ram_bytes) : "unknown";
-  return `Clone locked. Need about ${need} available RAM, this computer has ${free} available.`;
+  return `Free up some memory first. Lines need about ${need} free; this computer has ${free}.`;
 }
 
 function canGenerateClip(voice: VoiceOption): boolean {
   return modelInstalled() && voiceBusy === null && Boolean(voice.profile?.reference_path) && !ramGenerationLocked();
 }
 
+/** What stops a line being generated right now, from the live engine and memory checks. */
 function clipGenerateLockTitle(voice: VoiceOption): string {
-  if (!modelInstalled()) {
+  const engine = modelInstalled();
+  const memory = !ramGenerationLocked();
+  if (!engine && !memory) {
+    return "Download the voice engine and free up some memory first.";
+  }
+  if (!engine) {
     return "Download the voice engine first.";
   }
-  if (ramGenerationLocked()) {
+  if (!memory) {
     return ramLockMessage();
   }
   if (!voice.profile?.reference_path) {
-    return "Pick one of your voices under Lines for.";
+    return "This voice has no recording to make lines from.";
   }
   return "";
 }
@@ -7659,25 +8066,22 @@ function ensureSelectedVoice(): void {
   if (!availableVoices().some((item) => item.id === clipsVoiceId)) {
     clipsVoiceId = "starter-female";
   }
-  if (!clipsVoiceTouched && !clipsVoice().profile?.reference_path) {
-    const cloned = availableVoices().find((item) => item.profile?.reference_path);
-    if (cloned) {
-      clipsVoiceId = cloned.id;
-    }
+  if (!clipsVoiceTouched && draft.voiceId !== "none" && availableVoices().some((item) => item.id === draft.voiceId)) {
+    clipsVoiceId = draft.voiceId;
   }
 }
 
-function openPhraseEditor(phraseId: string | null, tone: VoiceTone): void {
+function openPhraseEditor(phraseId: string | null, tone: VoiceTone, moment: PhraseMoment): void {
   const phrase = phraseId ? effectivePhrases().find((item) => item.id === phraseId) : null;
   phraseEditor = {
     phraseId,
     tone: phrase?.tone ?? tone,
+    moment: phrase?.moment ?? moment,
     text: phrase?.text ?? "",
   };
   paintVoiceLayer();
   (document.getElementById("phrase-editor-text") as HTMLInputElement | null)?.focus();
 }
-
 function phraseToneOrder(): VoiceTone[] {
   const tones: VoiceTone[] = [...toneOrder];
   for (const tone of customPhraseSets) {
@@ -7693,18 +8097,6 @@ function phraseToneOrder(): VoiceTone[] {
   return tones;
 }
 
-function phraseToneOptions(selected: VoiceTone): string {
-  const tones = phraseToneOrder();
-  if (!tones.some((tone) => tone.toLowerCase() === selected.toLowerCase())) {
-    tones.push(selected);
-  }
-  return tones
-    .map(
-      (tone) =>
-        `<option value="${attr(tone)}" ${tone.toLowerCase() === selected.toLowerCase() ? "selected" : ""}>${escapeHtml(toneLabel(tone))}</option>`,
-    )
-    .join("");
-}
 
 function effectivePhrases(): PhraseDefinition[] {
   return [
@@ -7717,6 +8109,7 @@ function voicePhraseInputs(): PhraseDefinition[] {
   return effectivePhrases().map((phrase) => ({
     id: phrase.id,
     tone: phrase.tone,
+    moment: phrase.moment,
     text: phrase.text,
   }));
 }
@@ -7835,30 +8228,9 @@ function formatBytes(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function isMomentTone(tone: VoiceTone): boolean {
-  return MOMENT_TONES.some((item) => sameTone(item, tone));
-}
-
-/** What a moment's set is for, under its lines. */
-function phoneHint(tone: VoiceTone): string {
-  const text = sameTone(tone, PHONE_TONE)
-    ? "Played when the camera sees your phone. Without them, the voice's own tone speaks."
-    : sameTone(tone, ROUND_OVER_TONE)
-      ? "Played when a Pomodoro round ends."
-      : sameTone(tone, BREAK_OVER_TONE)
-        ? "Played when a Pomodoro break ends."
-        : "";
-  return text ? `<span class="clips-hint">${text}</span>` : "";
-}
 
 function toneLabel(tone: VoiceTone): string {
   switch (tone) {
-    case "phone":
-      return "Phone";
-    case "roundover":
-      return "Round over";
-    case "breakover":
-      return "Break over";
     case "gentle":
       return "Gentle";
     case "mom":
@@ -7895,12 +8267,15 @@ async function refreshTrends(shouldRender = true): Promise<void> {
   } catch (error) {
     lastError = errorText(error);
   }
+  trendsLoaded = true;
   if (shouldRender) {
-    if (activeTab === "session" && !preflightOpen) {
-      animateCalendarSoon();
-    }
     render();
   }
+}
+
+/** What the History list draws from, to tell whether a refresh changed anything. */
+function historyDataKey(): string {
+  return JSON.stringify([trends, historyWeek, weekRecap, appNames]);
 }
 
 async function refreshHistoryWeek(shouldRender = true): Promise<void> {
@@ -7923,7 +8298,6 @@ async function refreshHistoryWeek(shouldRender = true): Promise<void> {
     historyWeekStart = week.week_start;
     if (historySearch.trim()) {
       await runHistorySearch(historySearch.trim());
-      return;
     }
   } catch (error) {
     if (request !== historyWeekRequest) {
@@ -7945,7 +8319,7 @@ function scheduleHistorySearch(): void {
   if (!query) {
     historySearchRequest += 1;
     historySearchResults = null;
-    render();
+    paintHistoryBody();
     return;
   }
   historySearchTimer = window.setTimeout(() => {
@@ -7967,8 +8341,10 @@ async function runHistorySearch(query: string): Promise<void> {
       return;
     }
     lastError = errorText(error);
+    render();
+    return;
   }
-  render();
+  paintHistoryBody();
 }
 
 function noteNewHistory(items: SessionSummary[]): number | null {
@@ -8025,6 +8401,7 @@ async function confirmHistoryAction(): Promise<void> {
     await runHistoryCommand("delete_session", { id: confirm.id }, "Session deleted");
     historyView = "list";
     sessionReport = null;
+    animateOnArrival("history");
     await refreshHistoryWeek();
     return;
   }
@@ -8208,18 +8585,22 @@ function streakDays(asOf = dayKey(new Date())): number {
 }
 
 /**
- * The calendar pops in when Home comes into view (arriving on the tab, data landing, the
- * preflight closing), not on every rebuild behind an open preflight.
+ * Session and History animate in when you arrive on them (and Session at launch), once: the
+ * first draw that shows the calendar or the week's charts plays it, and every later redraw
+ * leaves them standing.
  */
-let calendarAnimateUntil = performance.now() + 1500;
+const pendingAnimations = new Set<"calendar" | "history">(["calendar"]);
 
-/** Opens a short window in which rebuilds of Home pop the calendar in. */
-function animateCalendarSoon(): void {
-  calendarAnimateUntil = performance.now() + 1500;
+function animateOnArrival(tab: Tab): void {
+  if (tab === "session") {
+    pendingAnimations.add("calendar");
+  } else if (tab === "history") {
+    pendingAnimations.add("history");
+  }
 }
 
-function takeCalendarAnimation(): boolean {
-  return performance.now() < calendarAnimateUntil;
+function takeAnimation(name: "calendar" | "history"): boolean {
+  return pendingAnimations.delete(name);
 }
 
 function monthLabel(date: Date): string {
@@ -8246,13 +8627,15 @@ function renderCalendar(): string {
     if (date > today) classes.push("is-future");
     else if (key === dayKey(today)) classes.push("is-today");
     else if (seconds >= STREAK_DAY_SECONDS) classes.push("is-on");
-    const label = `${date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}, ${formatMinutes(seconds)}`;
+    // Hovering a day lifts it and swaps its date for its focused time; the parts wrap onto
+    // two lines when the day is narrow.
+    const time = date > today ? "" : `<b class="cal-time">${formatHours(seconds).split(" ").map((part) => `<span>${part}</span>`).join("")}</b>`;
     days.push(
-      `<span class="${classes.join(" ")}" style="animation-delay: ${index * 12}ms" title="${attr(label)}">${date.getDate()}</span>`,
+      `<span class="${classes.join(" ")}" style="animation-delay: ${index * 12}ms"><span class="cal-num">${date.getDate()}</span>${time}</span>`,
     );
   }
   return `
-    <div class="cal-grid ${takeCalendarAnimation() ? "is-animated" : ""}" role="img" aria-label="${attr(monthLabel(today))}, days with focus shaded">
+    <div class="cal-grid ${!trendsLoaded ? "is-waiting" : takeAnimation("calendar") ? "is-animated" : ""}" role="img" aria-label="${attr(monthLabel(today))}, days with focus shaded">
       ${letters.map((letter) => `<span class="cal-dow">${letter}</span>`).join("")}
       ${days.join("")}
     </div>
@@ -8287,7 +8670,11 @@ async function ensureDayCard(): Promise<void> {
     if (dayCardKey === key) {
       reports.sort((a, b) => a.started_at.localeCompare(b.started_at));
       dayCard = { day, reports };
-      render();
+      // Only the card: a full rebuild here would cut the calendar's pop-in short.
+      if (paintSlot("day-card-slot", renderDayCard(streakDays()))) {
+        fitShareStats();
+        fitQuote(); // the card's height sets the quote's room
+      }
     }
   } catch {
     // The card stays off until the next snapshot.

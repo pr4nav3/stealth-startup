@@ -1,0 +1,247 @@
+<meta charset="utf-8">
+<title>Supervisor Voice Page</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+:root{--canvas:#f4ead7;--panel:#fff4cf;--ink:#101010;--muted:#5d564a;--border:#101010;--sh:rgba(17,16,14,.68);--green:#a8eb37;--yellow:#ffcf31;--coral:#ff684f;--cink:#141410;--soft:#fff7df;--grid:rgba(16,16,16,.1);--scrim:rgba(16,16,16,.45)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--canvas:#40403c;--panel:#353530;--ink:#fff8e9;--muted:#ddd5c5;--border:#151512;--sh:#0b0b09;--soft:#4c4b46;--grid:rgba(255,255,255,.12);--scrim:rgba(0,0,0,.55);color-scheme:dark}}
+:root[data-theme="dark"]{--canvas:#40403c;--panel:#353530;--ink:#fff8e9;--muted:#ddd5c5;--border:#151512;--sh:#0b0b09;--soft:#4c4b46;--grid:rgba(255,255,255,.12);--scrim:rgba(0,0,0,.55);color-scheme:dark}
+body{background:var(--canvas);background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:18px 18px;color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,"Segoe UI",sans-serif;line-height:1.45;padding-block:24px 60px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+*{box-sizing:border-box}
+.page{max-width:1000px;margin:0 auto;display:grid;gap:16px}
+.eyebrow{margin:0 0 4px;font-family:ui-monospace,Consolas,monospace;font-size:calc(.82rem + 1px);font-weight:500;letter-spacing:.04em;text-transform:uppercase;color:var(--ink)}
+h2,h3{margin:0;font-weight:650}h2{font-size:1.5rem}h3{font-size:1.05rem}
+.note{background:var(--soft);border:2px dashed var(--border);border-radius:7px;padding:12px 14px;font-size:.88rem;display:grid;gap:4px}
+.panel{background:var(--panel);border:2px solid var(--border);border-radius:7px;box-shadow:4px 4px 0 var(--sh);padding:16px;display:grid;gap:14px;min-width:0}
+.head{display:flex;align-items:center;gap:12px}.grow{flex:1}
+/* buttons exactly as the app draws them */
+button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0 14px;font-family:ui-monospace,Consolas,monospace;font-size:.78rem;font-weight:500;letter-spacing:.04em;line-height:1;text-transform:uppercase;color:var(--ink);background:var(--soft);border:2px solid var(--border);border-radius:6px;box-shadow:2px 2px 0 var(--sh);cursor:pointer}
+button:active{transform:translate(2px,2px);box-shadow:none}
+button:disabled{opacity:.45;cursor:not-allowed;transform:none}
+button.small{min-height:32px;padding:0 10px}
+button.primary{background:var(--green);color:var(--cink)}
+button.danger{background:var(--coral);color:var(--cink)}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.hint{font-size:.9rem;color:var(--muted)}
+/* voices */
+.voices{display:flex;gap:12px;overflow-x:auto;padding:2px 4px 6px 2px}
+.vcard{flex:0 0 auto;width:184px;display:grid;gap:8px;border:2px solid var(--border);border-radius:7px;padding:10px;background:var(--soft)}
+.vcard.on{background:var(--green);color:var(--cink)}
+.vcard .top{display:flex;align-items:baseline;gap:6px}
+.vcard strong{font-size:1rem;font-weight:650;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vcard .tag{font:500 .68rem ui-monospace,Consolas,monospace;letter-spacing:.04em;text-transform:uppercase;opacity:.75}
+.vcard .like{font-size:.8rem;margin-top:-6px;opacity:.85}
+.hear{justify-content:flex-start;gap:8px;min-height:36px;padding:0 8px 0 4px;background:var(--panel);text-transform:none}
+.hear .pb{width:24px;height:24px;border-radius:50%;background:var(--ink);color:var(--canvas);display:grid;place-items:center;font-size:.6rem;flex:0 0 auto}
+.wave{display:flex;gap:2px;align-items:center;height:20px;flex:1}.wave i{flex:1;background:currentColor;border-radius:2px;opacity:.7}
+.hear.playing .wave i:nth-child(-n+5){opacity:1;background:var(--coral)}
+.vcard .acts{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.vcard.on .acts button{color:var(--ink)}
+.vcard.mute .silent{height:36px;display:grid;place-items:center;font-size:.8rem;opacity:.75;border:2px dashed currentColor;border-radius:6px}
+.vcard.mute .acts{grid-template-columns:1fr}
+/* tiles: as in the app */
+.tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+@media (max-width:560px){.tiles{grid-template-columns:1fr}}
+.tile{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 12px 10px 16px;border:2px solid var(--border);border-radius:6px;background:var(--panel);box-shadow:2px 2px 0 var(--sh)}
+.tile .eyebrow{color:var(--muted);font-size:.78rem}
+.tile strong{display:block;font-size:1.05rem;font-weight:650}
+.tile .dot{width:12px;height:12px;border:2px solid var(--border);border-radius:50%;background:var(--green)}
+/* sentence + personalities */
+.sentence{font-size:1.3rem;font-weight:650;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.pill{border:2px solid var(--border);border-radius:6px;padding:0 10px}
+.pill.v{background:var(--green);color:var(--cink)}.pill.p{background:var(--yellow);color:var(--cink)}
+.pers{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
+.pcard{min-height:48px;font-family:inherit;font-size:.95rem;font-weight:650;letter-spacing:0;text-transform:none}
+.pcard.on{background:var(--yellow);color:var(--cink)}
+.pcard.new{font-family:ui-monospace,Consolas,monospace;font-size:.78rem;font-weight:500;letter-spacing:.04em;text-transform:uppercase}
+/* lines: cards like the app's clips cards, rows like its line rows */
+.sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+@media (max-width:760px){.sections{grid-template-columns:1fr}}
+.sec{display:flex;flex-direction:column;gap:10px;padding:12px;border:2px solid var(--border);border-radius:6px;background:var(--soft);box-shadow:2px 2px 0 var(--sh)}
+.sec-head{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:baseline}
+.sec-head .eyebrow{margin:0}
+.sec-head .when{grid-column:1/-1;font-size:.9rem;color:var(--muted)}
+.sec-head .n{font-size:.9rem;color:var(--muted)}
+.line{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center;min-height:52px;padding:8px 12px;border:2px solid var(--border);border-radius:6px;background:var(--panel);box-shadow:2px 2px 0 var(--sh);cursor:pointer}
+.line .d{width:11px;height:11px;border:1.5px solid var(--border);border-radius:50%}.line .d.ok{background:var(--green)}
+.line .st{font-size:.85rem;color:var(--muted)}
+.play{width:32px;min-height:32px;padding:0;border-radius:50%;font-size:.6rem}
+.quiet{color:var(--muted);font-size:.9rem;margin:0}
+.sec-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:10px;border-top:1.5px solid color-mix(in srgb,var(--ink) 18%,transparent)}
+/* the recommendation: a plain yellow card, the app's warning colour */
+.nudge{display:grid;gap:4px;padding:10px 12px;border:2px solid var(--border);border-radius:6px;background:var(--yellow);color:var(--cink);font-size:.9rem}
+.nudge b{font-weight:650}
+.foot{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding-top:12px;border-top:1.5px solid color-mix(in srgb,var(--ink) 18%,transparent)}
+/* edit voice popup */
+.scrim{position:fixed;inset:0;background:var(--scrim);display:grid;place-items:center;padding:16px;z-index:5}
+.scrim[hidden]{display:none}
+.modal{width:min(440px,100%);background:var(--panel);border:2px solid var(--border);border-radius:7px;box-shadow:4px 4px 0 var(--sh);padding:16px;display:grid;gap:14px}
+.modal label{display:grid;gap:6px}
+.modal label span{font:500 .78rem ui-monospace,Consolas,monospace;letter-spacing:.04em;text-transform:uppercase}
+.modal input[type=text]{font:inherit;font-size:1rem;min-height:40px;padding:0 12px;border:2px solid var(--border);border-radius:6px;background:var(--soft);color:var(--ink)}
+.transport{display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:center;border:2px solid var(--border);border-radius:6px;padding:10px;background:var(--soft)}
+.transport .pb{width:40px;border-radius:50%;padding:0;background:var(--ink);color:var(--canvas)}
+.transport .wave{height:36px}
+.times{display:flex;justify-content:space-between;font:500 .72rem ui-monospace,Consolas,monospace;color:var(--muted)}
+.danger-zone{border-top:1.5px solid color-mix(in srgb,var(--ink) 18%,transparent);padding-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+.callouts{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.callouts .note{background:var(--panel)}
+.line .acts{display:flex;align-items:center;gap:6px}
+.line{cursor:default}
+.modal textarea,.modal select{font:inherit;width:100%;border:2px solid var(--border);border-radius:6px;background:var(--soft);color:var(--ink)}
+.modal textarea{min-height:84px;padding:10px 12px;resize:vertical}
+.modal select{min-height:40px;padding:0 12px}
+.modal .count{justify-self:end;font:500 .72rem ui-monospace,Consolas,monospace;color:var(--muted);margin-top:-8px}
+.audio{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px;border:2px solid var(--border);border-radius:6px;background:var(--soft)}
+.audio .pb{width:40px;border-radius:50%;padding:0;background:var(--ink);color:var(--canvas)}
+.audio .wave{height:30px}
+.audio .len{font:500 .72rem ui-monospace,Consolas,monospace;color:var(--muted)}
+.audio.stale .wave{opacity:.45}
+.audio-empty{display:grid;place-items:center;min-height:62px;border:2px dashed var(--border);border-radius:6px;color:var(--muted);font-size:.9rem;text-align:center;padding:8px}
+.modal .acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.modal .acts .grow{flex:1}
+</style>
+
+<div class="page">
+  <div class="note"><b>Mockup: personality first, per voice (round 3, with line editing)</b><span>Each voice card plays its recording right there and has an <b>Edit</b> button (rename, listen, delete). Personality cards are plain. Everything uses the app's own buttons, cards and row style. Try <b>Coach</b>, <b>My voice</b> and <b>Edit</b>.</span></div>
+
+  <div class="head">
+    <button>Back</button>
+    <div class="grow"><p class="eyebrow">Voice settings</p><h2>Voices</h2></div>
+    <button>?</button>
+  </div>
+
+  <section class="panel">
+    <div class="toolbar"><p class="eyebrow">Voices</p><button>+ New voice</button></div>
+    <div class="voices" id="voices"></div>
+  </section>
+
+  <div class="tiles">
+    <div class="tile"><span class="dot"></span><div><p class="eyebrow">Voice engine</p><strong>Installed</strong></div><button>›</button></div>
+    <div class="tile"><span class="dot"></span><div><p class="eyebrow">Memory</p><strong>6.2 GB free</strong></div><button>›</button></div>
+  </div>
+
+  <section class="panel" id="pers-panel">
+    <div class="sentence" id="sentence"></div>
+    <div class="pers" id="pers"></div>
+  </section>
+
+  <section class="panel" id="lines-panel">
+    <div class="lines-head">
+      <div class="grow"><h3 id="lines-title"></h3></div>
+    </div>
+    <div class="sections" id="sections"></div>
+    <div class="foot" id="foot"></div>
+  </section>
+
+  <div class="callouts">
+    <div class="note"><b>Voice cards</b><span>The wave is the play button: one click to hear the recording. Edit opens rename, the full player, and both deletes from today's Info popup. "No voice" has neither. A voice whose lines aren't made yet says so on the card.</span></div>
+    <div class="note"><b>Nudges, not rules</b><span>The yellow note shows only on Back to work and Phone down, the two that repeat all session, while they have fewer than 3 lines. Take a break and Session done are fine with one.</span></div>
+    <div class="note"><b>Still just a few lines</b><span>3 + 1 + 1 + 1 = 6 lines make a full personality. Built-in ones ship with 3 phone lines, so the nudge never shows on them.</span></div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+    <div class="toolbar"><div><p class="eyebrow">Edit voice</p><h2 id="edit-title"></h2></div><button data-close>Close</button></div>
+    <label><span>Name</span><input type="text" id="edit-name"></label>
+    <div><p class="eyebrow" style="margin-bottom:6px">Recording</p>
+      <div class="transport"><button class="pb" aria-label="Play">▶</button><div><div class="wave" id="edit-wave"></div><div class="times"><span>0:00</span><span>0:11</span></div></div></div></div>
+    <div class="danger-zone" id="danger"></div>
+    <div class="toolbar" style="justify-content:flex-end"><button data-close>Cancel</button><button class="primary" data-save>Save</button></div>
+  </section>
+</div>
+
+<div class="scrim" id="line-modal" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="line-title">
+    <div class="toolbar"><div><p class="eyebrow" id="line-eyebrow"></p><h2 id="line-title">Line</h2></div><button data-close-line>Close</button></div>
+    <label><span>Line</span><textarea id="line-text" maxlength="140"></textarea></label>
+    <span class="count" id="line-count"></span>
+    <label><span>Plays when</span><select id="line-moment"></select></label>
+    <div><p class="eyebrow">Audio</p><div id="line-audio"></div></div>
+    <div class="acts" id="line-acts"></div>
+  </section>
+</div>
+
+<script>
+const voices=[{id:"none",name:"No voice",mute:true},{id:"derek",name:"Derek",p:"mom",ready:true,starter:true},{id:"elise",name:"Elise",p:"stern",ready:true,starter:true},{id:"you",name:"My voice",p:"gentle",ready:false}];
+const moments=[{id:"back",name:"Back to work",when:"When you drift or a break ends",often:true},{id:"phone",name:"Phone down",when:"When the camera sees your phone",often:true},{id:"breaks",name:"Take a break",when:"When a Pomodoro round ends"},{id:"done",name:"Session done",when:"When a session ends"}];
+const P={gentle:{name:"Gentle",back:["Hey. Back to it.","Small step. Just the next one.","Come back when you're ready. Now's good."],phone:["Phone can wait.","Let's put that down for now.","Face down, then back to it."],breaks:["Nice round. Rest a little."],done:["That's it for today. Well done."]},
+mom:{name:"Mom",back:["Is that your homework?","I'm not mad, I'm just disappointed.","Your future self says thanks."],phone:["Phone down, please.","Who are you texting?","I can see that phone."],breaks:["Good job. Go drink some water."],done:["All done. I'm proud of you."]},
+genz:{name:"Gen Z",back:["Bestie, lock in.","Respectfully, close the tab.","It's giving procrastination."],phone:["The phone is not the vibe.","Put the phone down, no cap.","Doomscrolling? In this economy?"],breaks:["Ate that round. Touch grass."],done:["Session? Served."]},
+stern:{name:"Stern",back:["Back to work. Now.","That isn't the task.","Focus."],phone:["Phone. Down.","Not now.","Put it away."],breaks:["Round done. Five minutes."],done:["Done. Same time tomorrow."]},
+coach:{name:"Coach",custom:true,back:["Eyes up. Next rep."],phone:[],breaks:["Water. Stretch. Back in five."],done:[]}};
+let sel="derek",editing=null,playing=null;
+const V=()=>voices.find(v=>v.id===sel);
+const waveHtml=n=>'<div class="wave">'+[8,14,20,11,18,16,9,17,12,7,13,19,10,15,8,12].slice(0,n).map(h=>`<i style="height:${h}px"></i>`).join("")+'</div>';
+const ok=(v,p,i)=>v.ready&&!(p.custom&&i>0);
+function cards(){
+  document.getElementById("voices").innerHTML=voices.map(v=>{
+    if(v.mute)return `<div class="vcard mute ${v.id===sel?"on":""}"><div class="top"><strong>${v.name}</strong></div><div class="silent">Stays quiet</div><div class="acts"><button class="small" data-v="none" ${v.id===sel?"disabled":""}>${v.id===sel?"Selected":"Select"}</button></div></div>`;
+    const lacks=!v.ready;
+    return `<div class="vcard ${v.id===sel?"on":""} ${lacks?"warn":""}"><div class="top"><strong>${v.name}</strong>${v.starter?'<span class="tag">Starter</span>':""}</div>
+    <span class="like">speaks like <b>${P[v.p].name}</b></span>
+    <button class="hear ${playing===v.id?"playing":""}" data-hear="${v.id}" aria-label="Play ${v.name}'s recording"><span class="pb">${playing===v.id?"❚❚":"▶"}</span>${waveHtml(16)}</button>
+    <div class="acts">${v.id===sel?'<button class="small" disabled>Selected</button>':`<button class="small" data-v="${v.id}">Select</button>`}<button class="small" data-edit="${v.id}">Edit</button></div></div>`}).join("");
+}
+function draw(){
+  cards();
+  const muted=V().mute;
+  document.getElementById("pers-panel").hidden=muted;document.getElementById("lines-panel").hidden=muted;
+  if(muted)return;
+  const p=P[V().p];
+  document.getElementById("sentence").innerHTML=`<span class="pill v">${V().name}</span> speaks like <span class="pill p">${p.name}</span>`;
+  document.getElementById("pers").innerHTML=Object.entries(P).map(([k,x])=>`<button class="pcard ${k===V().p?"on":""}" data-p="${k}">${x.name}</button>`).join("")+`<button class="pcard new">+ New personality</button>`;
+  document.getElementById("lines-title").textContent=`What ${V().name} says as ${p.name}`;
+  let total=0,done=0;
+  document.getElementById("sections").innerHTML=moments.map(m=>{const ls=p[m.id];total+=ls.length;
+    const rows=ls.map((t,i)=>{const r=ok(V(),p,i);if(r)done++;return `<div class="line"><span class="d ${r?"ok":""}"></span><span>${t}</span><span class="acts">${r?"":'<span class="st">Not generated</span>'}<button class="small" data-line="${m.id}|${i}">Edit</button>${r?'<button class="play" aria-label="Play">▶</button>':""}</span></div>`}).join("");
+    const empty=ls.length?"":`<p class="quiet">No lines yet. ${V().name} stays quiet ${m.id==="phone"?"when your phone shows up":m.id==="done"?"when a session ends":"here"}.</p>`;
+    const short=m.often&&ls.length<3;
+    const nudge=short?`<div class="nudge"><b>${ls.length?`Only ${ls.length}? That gets old fast.`:"This one plays a lot."}</b><span>We recommend 3 or more lines here. Trust us, you'll be hearing them all session. Write ${3-ls.length} more and have some fun with it.</span></div>`:"";
+    return `<div class="sec"><div class="sec-head"><p class="eyebrow">${m.name}</p><span class="n">${ls.length} ${ls.length===1?"line":"lines"}</span><span class="when">${m.when}</span></div>${rows}${empty}${nudge}<div class="sec-foot"><button class="small" data-add-line="${m.id}">+ Add line</button></div></div>`}).join("");
+  const miss=total-done;
+  document.getElementById("foot").innerHTML=(miss?`<button class="primary">Generate ${miss} ${miss===1?"line":"lines"} · ~${Math.max(1.5,Math.round((90+15*(miss-1))/30)/2)} min</button><span class="hint">In ${V().name}'s voice. Click a line to change it.</span>`:`<span class="hint">All lines ready. Click a line to change it.</span>`)+(p.custom?'<span class="grow"></span><button>Rename personality</button><button class="danger">Delete personality</button>':"");
+}
+function openEdit(id){editing=voices.find(v=>v.id===id);
+  document.getElementById("edit-title").textContent=editing.name;document.getElementById("edit-name").value=editing.name;
+  document.getElementById("edit-wave").innerHTML=waveHtml(16).replace(/^<div class="wave">|<\/div>$/g,"").repeat(2);
+  document.getElementById("danger").innerHTML=editing.starter?'<span class="hint">Starter voices stay on this device. You can still rename them.</span>':`<button ${editing.ready?"":"disabled"}>Delete lines, keep recording</button><button class="danger">Delete voice</button>`;
+  document.getElementById("scrim").hidden=false;document.getElementById("edit-name").focus()}
+let lineEdit=null;
+function openLine(m,i){const p=P[V().p];lineEdit={m,i,orig:i==null?"":p[m][i],text:i==null?"":p[m][i],to:m};document.getElementById("line-modal").hidden=false;drawLine(true)}
+function drawLine(fresh){const p=P[V().p],e=lineEdit,existing=e.i!=null,g=id=>document.getElementById(id);
+  if(fresh)g("line-text").value=e.text;
+  const ready=existing&&ok(V(),p,e.i),changed=e.text.trim()!==e.orig;
+  g("line-eyebrow").textContent=`${p.name} · ${V().name}`;g("line-title").textContent=existing?"Line":"New line";
+  g("line-count").textContent=`${e.text.length}/140`;
+  g("line-moment").innerHTML=moments.map(m=>`<option value="${m.id}" ${m.id===e.to?"selected":""}>${m.name}: ${m.when.toLowerCase()}</option>`).join("");
+  g("line-audio").innerHTML=ready
+    ?`<div class="audio ${changed?"stale":""}"><button class="pb" aria-label="Play">▶</button><span class="wave">${waveHtml(16)+waveHtml(16)}</span><span class="len">0:02</span></div>${changed?'<p class="hint" style="margin-top:6px">This is the old wording until you regenerate.</p>':""}`
+    :`<div class="audio-empty">${existing?`No audio yet. Generate to hear it in ${V().name}'s voice.`:`Add it, then generate to hear it in ${V().name}'s voice.`}</div>`;
+  const primary=!existing?"Add and generate":changed?"Save and regenerate":ready?"Regenerate":"Generate";
+  const saveOnly=!existing||changed||e.to!==e.m;
+  g("line-acts").innerHTML=(existing?'<button class="danger" data-del-line>Delete</button>':"")+'<span class="grow"></span>'+(saveOnly?`<button data-save-line ${e.text.trim()?"":"disabled"}>${existing?"Save only":"Add only"}</button>`:"")+`<button class="primary" data-gen-line ${e.text.trim()?"":"disabled"}>${primary}</button>`}
+function saveLine(){const p=P[V().p],e=lineEdit,t=e.text.trim();if(!t)return;
+  if(e.i!=null&&e.to===e.m)p[e.m][e.i]=t;else{if(e.i!=null)p[e.m].splice(e.i,1);p[e.to].push(t)}
+  closeLine()}
+function closeLine(){document.getElementById("line-modal").hidden=true;lineEdit=null;draw()}
+document.getElementById("line-text").addEventListener("input",e=>{lineEdit.text=e.target.value;drawLine(false)});
+document.getElementById("line-moment").addEventListener("change",e=>{lineEdit.to=e.target.value;drawLine(false)});
+document.getElementById("line-modal").addEventListener("click",e=>{if(e.target.id==="line-modal")closeLine()});
+document.addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;const d=b.dataset;
+  if(d.line){const[m,i]=d.line.split("|");openLine(m,+i)}
+  else if(d.addLine)openLine(d.addLine,null);
+  else if("closeLine" in d)closeLine();
+  else if("saveLine" in d||"genLine" in d)saveLine();
+  else if("delLine" in d){P[V().p][lineEdit.m].splice(lineEdit.i,1);closeLine()}});
+document.addEventListener("click",e=>{const t=e.target.closest("[data-v],[data-p],[data-hear],[data-edit],[data-close],[data-save]");if(!t)return;
+  if(t.dataset.v)sel=t.dataset.v;
+  if(t.dataset.p){V().p=t.dataset.p}
+  if(t.dataset.hear)playing=playing===t.dataset.hear?null:t.dataset.hear;
+  if(t.dataset.edit)return openEdit(t.dataset.edit);
+  if(t.hasAttribute("data-save")){const n=document.getElementById("edit-name").value.trim();if(n)editing.name=n}
+  if(t.hasAttribute("data-close")||t.hasAttribute("data-save"))document.getElementById("scrim").hidden=true;
+  draw()});
+document.getElementById("scrim").addEventListener("click",e=>{if(e.target.id==="scrim")e.target.hidden=true});
+draw();
+</script>

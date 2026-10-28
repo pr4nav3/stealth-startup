@@ -1,3 +1,8 @@
+/* A slot that main.ts redraws on its own; it adds no box, so layout ignores it. */
+.slot {
+  display: contents;
+}
+
 :root {
   --sv-canvas: #f4ead7;
   --sv-panel: #fff4cf;
@@ -765,8 +770,74 @@ h1 {
   opacity: 0.4;
 }
 
+/* Hidden until the focus days load, so the calendar pops in once, with its colours. */
+.cal-grid.is-waiting .cal-day {
+  opacity: 0;
+}
+
+/* Backwards, not both: a held end frame would pin the transform and stop the hover lift. */
 .cal-grid.is-animated .cal-day {
-  animation: cal-pop 320ms cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+  animation: cal-pop 320ms cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards;
+}
+
+/* A past day lifts like a raised button and its date slides out for its focused time. */
+.cal-day {
+  overflow: hidden;
+  transition:
+    transform 140ms ease-out,
+    box-shadow 140ms ease-out;
+}
+
+.cal-day:not(.is-future):hover {
+  z-index: 1;
+  opacity: 1;
+  transform: translate(-2px, -2px);
+  box-shadow: 4px 4px 0 var(--sv-shadow-color);
+}
+
+.cal-num {
+  display: block;
+}
+
+.cal-num,
+.cal-time {
+  transition:
+    opacity 140ms ease-out,
+    transform 140ms ease-out;
+}
+
+.cal-time {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  justify-content: center;
+  column-gap: 0.3em;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.1;
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.cal-day:not(.is-future):hover .cal-num {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.cal-day:not(.is-future):hover .cal-time {
+  opacity: 1;
+  transform: none;
+}
+
+/* Without motion the lift and the swap still happen, just at once. */
+@media (prefers-reduced-motion: reduce) {
+  .cal-day,
+  .cal-num,
+  .cal-time {
+    transition: none;
+  }
 }
 
 @keyframes cal-pop {
@@ -1929,6 +2000,11 @@ dt {
   justify-self: end;
 }
 
+.rule-editor-ask {
+  align-self: center;
+  font-weight: 650;
+}
+
 .rule-kind {
   border: var(--border);
   border-radius: 4px;
@@ -2343,48 +2419,182 @@ dt {
   background: var(--sv-soft-white);
 }
 
-/* Clips: whose, then the tones beside the viewed tone's lines, as two inner cards. */
-.phrase-panel {
+/* "Derek speaks like Mom": the sentence, then one plain card per personality. */
+.personality-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
-.clips-strip {
+/* The sentence wraps beside its button; a long name is cut short, so it is two lines at most. */
+.personality-head {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px 12px;
+  gap: 12px;
 }
 
-.clips-for {
+.speaks-like {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  font-size: 1.3rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.speaks-voice,
+.speaks-tone {
+  max-width: min(100%, 16ch);
+  overflow: hidden;
+  border: var(--border);
+  border-radius: var(--radius-control);
+  padding: 0 10px;
+  color: var(--sv-colored-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.personality-head .small-button {
+  flex: none;
+  min-height: 34px;
+}
+
+.speaks-voice {
+  background: var(--sv-green);
+}
+
+.speaks-tone {
+  background: var(--sv-yellow);
+}
+
+.personality-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+button.personality-card {
+  min-width: 0;
+  min-height: 48px;
+  font-family: var(--font-sans);
+  font-size: var(--sv-type-3);
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+button.personality-card.is-on {
+  background: var(--sv-yellow);
+  color: var(--sv-colored-ink);
+}
+
+button.personality-card span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Your own personality, chosen: its card with a ⋯ for Rename and Delete. */
+.personality-own {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.personality-own button.personality-card {
+  padding-right: 40px;
+}
+
+button.personality-more {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  transform: translateY(-50%);
+  background: var(--white-soft);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+/* The ⋯ rides on its card: when the card presses in, it moves the same 2px and keeps its own
+   shadow. Pressed itself, it presses like any button. */
+.personality-own:has(> button.personality-card:active:not(:disabled)) button.personality-more {
+  transform: translate(2px, calc(-50% + 2px));
+}
+
+button.personality-more:active {
+  transform: translate(2px, calc(-50% + 2px));
+  box-shadow: none;
+}
+
+.personality-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  gap: 6px;
+  min-width: 140px;
+  padding: 8px;
+  border: var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.personality-menu button {
+  justify-content: flex-start;
+  min-height: 34px;
+}
+
+.personality-form {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  min-width: 0;
+  padding: 10px;
+  border: var(--border);
+  border-radius: 6px;
+  background: var(--white-soft);
+  box-shadow: var(--shadow-control);
 }
 
-.clips-for .eyebrow {
-  margin: 0;
+.personality-form input {
+  flex: 1;
+  min-width: 160px;
 }
 
-.clips-for-word,
-.clips-summary {
-  color: var(--sv-muted);
+.personality-form > span {
+  flex: 1;
+  min-width: 200px;
   font-size: var(--sv-type-3);
 }
 
-.clips-for select {
-  width: auto;
-  min-width: 170px;
+/* The personality's lines: one inner card per moment, two across. */
+.phrase-panel {
+  gap: 12px;
+}
+
+.lines-title {
+  font-size: var(--sv-type-2);
   font-weight: 650;
 }
 
-.clips-grid {
+/* Each card is as tall as its lines; a short one does not stretch to its neighbour. */
+.moment-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
-  gap: 14px;
-  align-items: stretch;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
 }
 
 .clips-card {
@@ -2399,239 +2609,87 @@ dt {
   box-shadow: var(--shadow-control);
 }
 
-.clips-card-head {
-  display: flex;
+.moment-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 10px;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1.5px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
 }
 
-.clips-card-head .eyebrow {
+.moment-head .eyebrow {
   margin: 0;
 }
 
-.clips-card-head > span,
-.clips-card-tools > span {
+.moment-head > span {
   color: var(--sv-muted);
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-4);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.clips-card-tools {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.clips-card-tools .small-button {
-  min-height: 30px;
-  padding: 0 10px;
-}
-
-/* Every tone shows; the page grows rather than scrolling inside the card. */
-.tone-list {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 8px;
-}
-
-button.tone-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: 8px;
-  align-items: center;
-  min-height: 42px;
-  padding: 0 12px;
-  border-radius: 6px;
-  background: var(--panel);
-  box-shadow: var(--shadow-control);
-  color: var(--ink);
-  font-family: var(--font-sans);
   font-size: var(--sv-type-3);
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  text-align: left;
-  text-transform: none;
-  transition: none;
 }
 
-button.tone-row:hover {
-  background: var(--white-soft);
+.moment-head .moment-when {
+  grid-column: 1 / -1;
 }
 
-button.tone-row.is-on,
-button.tone-row.is-on:hover {
+.moment-card > .empty {
+  margin: 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
+}
+
+/* Too few lines where they repeat: the app's warning yellow, flat. */
+.moment-nudge {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: var(--border);
+  border-radius: 6px;
   background: var(--sv-yellow);
   color: var(--sv-colored-ink);
+  font-size: var(--sv-type-3);
 }
 
-.tone-dot {
-  width: 11px;
-  height: 11px;
-  border: 1.5px solid var(--sv-border);
-  border-radius: 50%;
-  background: transparent;
+.moment-nudge strong {
+  font-weight: 650;
 }
 
-.tone-dot.is-ready {
-  background: var(--sv-green);
+.moment-foot {
+  display: flex;
+  padding-top: 10px;
+  border-top: 1.5px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
 }
 
-.tone-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tone-speaks,
-.tone-count {
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-4);
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--sv-muted);
-}
-
-button.tone-row.is-on .tone-speaks,
-button.tone-row.is-on .tone-count {
-  color: var(--sv-colored-ink);
-  opacity: 0.75;
+.moment-foot .small-button {
+  min-height: 32px;
+  padding: 0 10px;
 }
 
 .line-list {
   display: flex;
-  flex: 1;
   flex-direction: column;
   gap: 8px;
-}
-
-.line-list .empty {
-  margin: 0;
-  padding: 10px 0;
 }
 
 .line-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
-  min-height: 56px;
-  padding: 10px 14px;
+  min-height: 52px;
+  padding: 8px 12px;
   border: var(--border);
   border-radius: 6px;
   background: var(--panel);
   box-shadow: var(--shadow-control);
 }
 
-.line-row p,
-button.line-open {
-  margin: 0;
-  font-size: var(--sv-type-2);
+.line-text {
+  font-size: 0.84rem;
   line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
-/* The words themselves open the line: a text button with the row's type and no chrome. */
-button.line-open {
-  display: block;
-  width: 100%;
-  min-height: 0;
-  height: auto;
-  padding: 2px 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  box-shadow: none;
-  color: inherit;
-  font-family: var(--font-sans);
-  font-weight: 400;
-  letter-spacing: 0;
-  text-align: left;
-  text-transform: none;
-  text-decoration: underline transparent;
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-
-button.line-open:hover,
-button.line-open:focus-visible {
-  text-decoration-color: currentColor;
-  text-decoration-style: dotted;
-}
-
-button.line-open:active {
-  transform: none;
-}
-
-button.line-open:disabled {
-  cursor: default;
-  opacity: 1;
-}
-
-.line-row.is-missing button.line-open {
-  color: var(--sv-muted);
-}
-
-/* The whole row is the way in: it lifts to white-soft with an ink border, and its words underline. */
-.line-row.is-openable {
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.line-row.is-openable:hover,
-.line-row.is-openable:has(button.line-open:focus-visible) {
-  border-color: var(--ink);
-  background: var(--white-soft);
-}
-
-.line-row.is-openable:hover button.line-open,
-.line-row.is-openable:has(button.line-open:focus-visible) button.line-open {
-  text-decoration-color: currentColor;
-  text-decoration-style: dotted;
-}
-
-.line-edit-hint {
-  color: var(--sv-muted);
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-4);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.line-row.is-openable:hover .line-edit-hint,
-.line-row.is-openable:has(button.line-open:focus-visible) .line-edit-hint {
-  color: var(--ink);
-}
-
-.line-row.is-busy button.line-open {
-  color: inherit;
-}
-
-.line-row.is-missing {
-  border-style: dashed;
-  border-color: color-mix(in srgb, var(--sv-ink) 40%, transparent);
-  background: transparent;
-  box-shadow: none;
-}
-
-
 .line-row.is-busy {
   background: var(--sv-yellow);
   color: var(--sv-colored-ink);
-}
-
-
-.line-dot {
-  border: 0;
-  background: transparent;
-  color: var(--sv-muted);
 }
 
 .line-dot {
@@ -2645,10 +2703,6 @@ button.line-open:disabled {
 
 .line-dot.is-ready {
   background: var(--sv-green);
-}
-
-.line-row.is-missing .line-dot {
-  border-color: color-mix(in srgb, var(--sv-ink) 40%, transparent);
 }
 
 .line-state {
@@ -2673,25 +2727,26 @@ button.line-open:disabled {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .line-actions .small-button {
-  min-height: 36px;
-  padding: 0 12px;
+  min-height: 32px;
+  padding: 0 10px;
 }
 
 .line-actions .voice-play {
-  width: 36px;
-  min-width: 36px;
-  height: 36px;
-  min-height: 36px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
   padding: 0;
+  border-radius: 50%;
 }
 
 .line-actions .voice-play svg {
-  width: 11px;
-  height: 11px;
+  width: 10px;
+  height: 10px;
 }
 
 .clips-foot {
@@ -2700,8 +2755,7 @@ button.line-open:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px 12px;
-  margin-top: auto;
-  padding-top: 10px;
+  padding-top: 12px;
   border-top: 1.5px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
 }
 
@@ -2709,7 +2763,7 @@ button.line-open:disabled {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 8px 12px;
 }
 
 .clips-foot .small-button {
@@ -2730,46 +2784,70 @@ button.line-open:disabled {
   color: var(--ink);
 }
 
-.tone-rename {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.line-popup,
-.tones-popup {
+.line-popup {
   width: min(520px, 100%);
 }
 
-.line-clip-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 36px;
+.line-count {
+  justify-self: end;
+  margin-top: -6px;
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
 }
 
-.line-clip-status {
-  color: var(--sv-muted);
+.line-audio-block {
+  display: grid;
+  gap: 6px;
+}
+
+.line-audio-label {
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
-.line-clip-status.is-ready {
+.line-audio {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border: var(--border);
+  border-radius: 6px;
+  background: var(--white-soft);
+}
+
+.line-audio-wave {
+  width: 100%;
+  height: 36px;
   color: var(--ink);
 }
 
-.line-play {
-  gap: 8px;
-  min-height: 34px;
+.line-audio.is-stale .line-audio-wave {
+  opacity: 0.45;
 }
 
-.line-play svg {
-  width: 10px;
-  height: 10px;
+/* The line box grows from one row as the words come (fitLineBox). */
+.line-popup .phrase-editor textarea {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.new-personality-popup p {
+  margin: 0;
+  color: var(--sv-muted);
+}
+
+.line-audio-note {
+  margin: 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
+}
+
+.line-audio-note:empty {
+  display: none;
 }
 
 .line-popup-actions {
@@ -2777,63 +2855,42 @@ button.line-open:disabled {
   justify-content: flex-end;
 }
 
-.tone-manage-list {
-  display: grid;
-  gap: 8px;
+.line-popup-gap {
+  flex: 1;
 }
 
-.tone-manage-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 12px;
-  min-height: 46px;
-  padding: 6px 12px;
-  border: var(--border);
-  border-radius: 6px;
-  background: var(--white-soft);
-}
-
-.tone-manage-name {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.tone-manage-name strong {
-  font-size: var(--sv-type-3);
+.line-popup-ask {
+  flex: 1;
   font-weight: 650;
 }
 
-.tone-manage-tools {
-  display: flex;
-  flex: 1 1 auto;
-  align-items: center;
-  justify-content: flex-end;
+@media (max-width: 760px) {
+  .moment-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Edit voice: the name field with its button beside it. */
+.voice-rename {
+  display: grid;
+}
+
+.voice-rename label {
+  display: grid;
   gap: 6px;
-  min-width: 0;
 }
 
-.tone-manage-tools .small-button {
-  min-height: 32px;
-}
-
-.tone-manage-note {
-  color: var(--sv-muted);
+.voice-rename label span {
+  font-family: var(--font-mono);
   font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
-.tone-rename input {
-  flex: 1;
-  min-width: 80px;
-  min-height: 36px;
-  padding: 0 10px;
-}
-
-.tone-rename .small-button {
-  min-height: 36px;
+.voice-rename-status {
+  margin-left: 6px;
+  color: var(--sv-muted);
+  font-style: normal;
 }
 
 /* The three popups off this page share one shape. */
@@ -2904,7 +2961,6 @@ button.line-open:disabled {
 }
 
 @media (max-width: 640px) {
-  .clips-grid,
   .voice-tiles,
   .voice-kv {
     grid-template-columns: minmax(0, 1fr);
@@ -2914,8 +2970,7 @@ button.line-open:disabled {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .line-row .line-actions,
-  .line-row .line-state {
+  .line-row .line-actions {
     grid-column: 2;
     justify-self: start;
   }
@@ -2948,22 +3003,22 @@ button.line-open:disabled {
   font-size: 0.68rem;
 }
 
+/* Room for a card's lift and shadow: the row clips what falls outside it. */
 .voice-list {
   display: flex;
   align-items: stretch;
   gap: 10px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 0;
+  padding: 2px 4px 4px 2px;
   scroll-snap-type: x proximity;
 }
 
 .voice-card {
   display: flex;
   flex: 0 0 auto;
-  width: 160px;
-  min-width: 160px;
-  height: 132px;
+  width: 170px;
+  min-width: 170px;
   flex-direction: column;
   gap: 8px;
   border: var(--border);
@@ -2979,28 +3034,189 @@ button.line-open:disabled {
   width: 100%;
   min-height: 0;
   overflow: hidden;
+  font-size: 1.2rem;
   white-space: nowrap;
   line-height: 1.2;
 }
 
-.voice-card-wave,
-.voice-card-mute {
+/* The card is the Select button, drawn like one: a 2px shadow at rest. Hover lifts it 1px and the
+   shadow grows 1px, so its edge stays put; a press sinks it into the shadow. Its buttons ride
+   along with it, and pressing one of them leaves the card where it is. */
+.voice-card {
+  box-shadow: var(--shadow-control);
+}
+
+.voice-card.is-pickable {
+  cursor: pointer;
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+
+.voice-card.is-pickable:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--sv-shadow-color);
+}
+
+.voice-card.is-pickable:active:not(:has(button:active)) {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.voice-card:focus-visible {
+  outline: 3px solid var(--sv-yellow);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-card.is-pickable {
+    transition: none;
+  }
+}
+
+.voice-card-top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.voice-card-top strong {
   flex: 1;
-  align-self: center;
-  color: var(--ink);
+  min-width: 0;
+  text-overflow: ellipsis;
 }
 
-.voice-card-wave {
-  width: 88px;
-  height: 32px;
-  max-height: 32px;
+.voice-card-tag {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.75;
 }
 
-.voice-card-mute {
+/* Card spans are mono labels; these are sentences. */
+.voice-card .voice-card-speaks,
+.voice-card .voice-card-quiet,
+.voice-card .voice-card-note {
+  font-family: var(--font-sans);
+  text-transform: none;
+}
+
+.voice-card-speaks {
+  margin-top: -4px;
+  font-size: var(--sv-type-3);
+}
+
+.voice-card-speaks b {
+  font-weight: 650;
+}
+
+.voice-card .voice-card-note {
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
+}
+
+.voice-card .voice-card-quiet {
+  margin-top: -4px;
+  font-size: var(--sv-type-3);
+  opacity: 0.8;
+}
+
+/* Play on the left (the orb while it plays), Edit on the right. */
+.voice-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+/* The buttons take the panel's colour, in both themes; the orb keeps its green. */
+.voice-card-foot button:not(.is-playing) {
+  background: var(--panel);
+}
+
+.voice-card-foot button.voice-play {
   width: 28px;
+  min-width: 28px;
   height: 28px;
-  max-height: 28px;
-  opacity: 0.55;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.voice-card-foot button.voice-play svg {
+  width: 9px;
+  height: 9px;
+}
+
+/* Edit voice, as the personality cards' ⋯. */
+.voice-card-foot button.voice-card-more {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+
+/* A play button while its clip plays: the session-done orb, small. It turns green, and four bars
+   move in it in place of the triangle. */
+.mini-orb {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  height: 12px;
+}
+
+.mini-orb i {
+  width: 2px;
+  height: 25%;
+  border-radius: 1px;
+  background: var(--sv-colored-ink);
+  animation: mini-orb-bar 0.8s ease-in-out infinite;
+}
+
+.mini-orb i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.mini-orb i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.mini-orb i:nth-child(4) {
+  animation-delay: 0.1s;
+}
+
+@keyframes mini-orb-bar {
+  50% {
+    height: 100%;
+  }
+}
+
+button.is-playing .mini-orb {
+  display: flex;
+}
+
+button.is-playing svg,
+button.is-playing .voice-preview-icon {
+  display: none;
+}
+
+button.voice-play.is-playing,
+button.voice-preview-play.is-playing {
+  background: var(--sv-green);
+  color: var(--sv-colored-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mini-orb i {
+    height: 70%;
+    animation: none;
+  }
 }
 
 .voice-card.selected {
@@ -3009,35 +3225,14 @@ button.line-open:disabled {
 
 .voice-card.selected,
 .voice-card.selected strong,
-.voice-card.selected span,
-.voice-card.selected .voice-card-wave,
-.voice-card.selected .voice-card-mute {
+.voice-card.selected > span,
+.voice-card.selected .voice-card-top span {
   color: var(--sv-colored-ink);
 }
 
-.voice-card.selected button {
+.voice-card.selected button,
+.voice-card.selected button.voice-play svg {
   color: var(--ink);
-}
-
-.voice-actions {
-  display: grid;
-  width: 100%;
-  min-width: 0;
-  flex-shrink: 0;
-  gap: 6px;
-  margin-top: auto;
-}
-
-.voice-actions.has-info {
-  grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
-}
-
-.voice-actions button {
-  width: 100%;
-  min-width: 0;
-  min-height: 38px;
-  padding: 0 6px;
-  overflow: hidden;
 }
 
 .voice-play svg {
@@ -5251,13 +5446,37 @@ button.history-item {
   cursor: grab;
 }
 
+/* Delete (or the starter note) on the left, Done on the right. */
 .voice-info-foot {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.voice-info-foot > :only-child {
+  margin-left: auto;
+}
+
+.voice-info-note {
+  margin: 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
 }
 
 .confirm-panel {
   width: min(420px, 100%);
+}
+
+/* Session done: the round-over card and its button, held in one panel over the report. */
+.session-over-card {
+  display: grid;
+  gap: 12px;
+  width: min(420px, 100%);
+}
+
+.session-over-card .interrupt-alert {
+  box-shadow: none;
 }
 
 .confirm-panel p {
