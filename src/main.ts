@@ -4125,24 +4125,30 @@ function renderShareModal(): string {
           <div>
             <p class="eyebrow">History</p>
             <h2 id="share-title">Share</h2>
-            <p class="share-sub">Copy a card and paste it anywhere.</p>
+            <p class="share-sub">Click a card to copy it, then paste it anywhere.</p>
           </div>
           <button type="button" data-action="close-share">Cancel</button>
         </div>
         <div class="share-grid">
-          ${renderShareColumn(week !== null, "week", "copy-week-card", "Copy week", week !== null && week.session_count > 0, "No sessions this week")}
-          ${renderShareColumn(month !== null, "month", "copy-month-card", "Copy month", month !== null && month.session_count > 0, "No sessions this month")}
+          ${renderShareColumn(week !== null, "week", "copy-week-card", week !== null && week.session_count > 0, "No sessions this week")}
+          ${renderShareColumn(month !== null, "month", "copy-month-card", month !== null && month.session_count > 0, "No sessions this month")}
         </div>
       </section>
     </div>
   `;
 }
 
-function renderShareColumn(drawn: boolean, card: "week" | "month", action: string, label: string, ready: boolean, note: string): string {
+/** The card is the button, like the day card on Home: a click copies it. A period with no
+ *  sessions shows its card, still, with a line saying why it can't be copied. */
+function renderShareColumn(drawn: boolean, card: "week" | "month", action: string, ready: boolean, note: string): string {
+  if (!drawn) {
+    return `<div class="share-col"><div class="share-preview share-preview-empty" aria-hidden="true"></div></div>`;
+  }
+  const slot = `<span class="share-preview" data-share-card="${card}"></span>`;
   return `
     <div class="share-col">
-      <div class="share-preview ${drawn ? "" : "share-preview-empty"}" ${drawn ? `data-share-card="${card}"` : 'aria-hidden="true"'}></div>
-      ${ready ? `<button type="button" class="primary" data-action="${action}">${label}</button>` : drawn ? `<p class="share-note">${escapeHtml(note)}</p>` : ""}
+      ${ready ? `<button type="button" class="share-pick" data-action="${action}" aria-label="Copy the ${card} card">${slot}</button>` : slot}
+      ${ready ? "" : `<p class="share-note">${escapeHtml(note)}</p>`}
     </div>
   `;
 }

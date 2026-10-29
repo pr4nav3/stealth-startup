@@ -4446,6 +4446,30 @@ button.share-door[aria-disabled="true"] strong {
   aspect-ratio: 668 / 520;
 }
 
+/* A card that copies on click: no button box of its own, it lifts like the cards beside it. */
+button.share-pick {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  cursor: pointer;
+  transition: transform 120ms ease-out;
+}
+
+button.share-pick:hover,
+button.share-pick:focus-visible {
+  transform: translate(-2px, -2px);
+}
+
+button.share-pick:active {
+  transform: translate(1px, 1px);
+}
+
 .share-note {
   margin: 0;
   min-height: 40px;
