@@ -4108,11 +4108,14 @@ function renderShareDoor(weekStart: string, recap: WeekRecap | null): string {
 }
 
 /** The Share popup: the week card and the month card drawn as they will be copied, each with
- *  its button. The month is fetched when the popup opens; its card appears when it arrives. */
+ *  its button. The month is fetched before it opens, so it opens once, at its full size. */
 function renderShareModal(): string {
   if (!shareOpen) {
     return "";
   }
+  // The cards go in as canvases, not encoded images: encoding two large PNGs on every paint
+  // held up the popup. They are swapped in once this markup is in the page, before it paints.
+  queueMicrotask(mountShareCards);
   const week = weekRecap && weekRecap.start === historyWeekStart ? weekRecap : null;
   const month = shareMonth && shareMonth.start.slice(0, 7) === historyWeekStart.slice(0, 7) ? shareMonth : null;
   return `
@@ -4127,33 +4130,44 @@ function renderShareModal(): string {
           <button type="button" data-action="close-share">Cancel</button>
         </div>
         <div class="share-grid">
-          ${renderShareColumn(week ? drawWeekCard(week) : null, "Week card", "copy-week-card", "Copy week", week !== null && week.session_count > 0, "No sessions this week")}
-          ${renderShareColumn(month ? drawMonthCard(month) : null, "Month card", "copy-month-card", "Copy month", month !== null && month.session_count > 0, "No sessions this month")}
+          ${renderShareColumn(week !== null, "week", "copy-week-card", "Copy week", week !== null && week.session_count > 0, "No sessions this week")}
+          ${renderShareColumn(month !== null, "month", "copy-month-card", "Copy month", month !== null && month.session_count > 0, "No sessions this month")}
         </div>
       </section>
     </div>
   `;
 }
 
-function renderShareColumn(canvas: HTMLCanvasElement | null, name: string, action: string, label: string, ready: boolean, note: string): string {
+function renderShareColumn(drawn: boolean, card: "week" | "month", action: string, label: string, ready: boolean, note: string): string {
   return `
     <div class="share-col">
-      ${canvas ? `<img class="share-preview" src="${canvas.toDataURL()}" alt="${attr(name)}">` : '<div class="share-preview share-preview-empty" aria-hidden="true"></div>'}
-      ${ready ? `<button type="button" class="primary" data-action="${action}">${label}</button>` : canvas ? `<p class="share-note">${escapeHtml(note)}</p>` : ""}
+      <div class="share-preview ${drawn ? "" : "share-preview-empty"}" ${drawn ? `data-share-card="${card}"` : 'aria-hidden="true"'}></div>
+      ${ready ? `<button type="button" class="primary" data-action="${action}">${label}</button>` : drawn ? `<p class="share-note">${escapeHtml(note)}</p>` : ""}
     </div>
   `;
 }
 
-async function loadShareMonth(): Promise<void> {
-  const weekStart = historyWeekStart;
-  try {
-    const month = await invoke<MonthRecap>("get_month_recap", { start: weekStart });
-    if (shareOpen && historyWeekStart === weekStart) {
-      shareMonth = month;
-      paintModalLayer();
+/** Draws each card into its place in the popup. */
+function mountShareCards(): void {
+  document.querySelectorAll<HTMLElement>("[data-share-card]").forEach((slot) => {
+    const week = slot.dataset.shareCard === "week";
+    const canvas = week ? (weekRecap ? drawWeekCard(weekRecap) : null) : shareMonth ? drawMonthCard(shareMonth) : null;
+    if (!canvas) {
+      return;
     }
+    canvas.className = "share-preview";
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", week ? "Week card" : "Month card");
+    slot.replaceWith(canvas);
+  });
+}
+
+async function fetchShareMonth(): Promise<MonthRecap | null> {
+  try {
+    return await invoke<MonthRecap>("get_month_recap", { start: historyWeekStart });
   } catch (error) {
     showFeedback(`Could not load the month: ${errorText(error)}`);
+    return null;
   }
 }
 
@@ -5921,10 +5935,9 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "open-share") {
+    shareMonth = await fetchShareMonth();
     shareOpen = true;
-    shareMonth = null;
     paintModalLayer();
-    void loadShareMonth();
     return;
   }
 

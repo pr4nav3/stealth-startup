@@ -4560,8 +4560,10 @@ button.share-door[aria-disabled="true"] strong {
      room above is the card's, like the hero's space between its tiles and its bars. */
   min-height: 96px;
   max-height: 146px;
-  margin-top: auto;
-  padding-top: 26px;
+  /* The band runs to the card's edges, so the sides of the bars hold the card still too;
+     only above and below it does the card lift. The padding puts the bars back in place. */
+  margin: auto -18px 0;
+  padding: 26px 18px 0;
 }
 
 /* A bar is a button that opens its week: no box of its own, the bar is the whole of it. */
