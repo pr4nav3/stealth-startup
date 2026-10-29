@@ -252,6 +252,16 @@ interface FocusRecap {
   session_count: number;
 }
 
+/** A calendar month for the share card; `days[i].label` is the day ("2026-10-01"). */
+interface MonthRecap {
+  start: string;
+  end: string;
+  focus_seconds: number;
+  session_count: number;
+  longest_stretch_seconds: number;
+  days: RecapBucket[];
+}
+
 interface HistoryWeek {
   week_start: string;
   sessions: SessionSummary[];
@@ -694,6 +704,9 @@ let pickerRequest = 0;
 let historyConfirm: HistoryConfirm | null = null;
 /** Quit was picked from the tray while a session runs. */
 let quitConfirmOpen = false;
+/** The Share popup over History, and the month it shows (loaded when it opens). */
+let shareOpen = false;
+let shareMonth: MonthRecap | null = null;
 let historyHydrated = false;
 const knownHistoryIds = new Set<number>();
 let permanentRules = cloneRules(starterRules);
@@ -1073,6 +1086,11 @@ function closeTopLayer(): void {
   }
   if (sessionOver) {
     sessionOver = null;
+    paintModalLayer();
+    return;
+  }
+  if (shareOpen) {
+    shareOpen = false;
     paintModalLayer();
     return;
   }
@@ -3798,20 +3816,69 @@ function renderHistoryBody(): string {
   `;
 }
 
-/** A small card above the Trends door: one click copies the viewed week as a picture. With
- *  nothing in the week it stays, dimmed, so the column keeps its shape. */
+/** A small card above the Trends door that opens the Share popup: the viewed week and its
+ *  month as pictures. Before the first session it stays, dimmed, so the column keeps its shape. */
 function renderShareDoor(weekStart: string, recap: WeekRecap | null): string {
-  const ready = recap !== null && recap.start === weekStart && recap.session_count > 0;
-  const current = weekStart === thisMondayKey();
+  const ready = recap !== null && recap.start === weekStart && historyWeek?.oldest_day != null;
   return `
-    <button type="button" class="panel share-door" data-action="copy-week-card" ${ready ? "" : 'aria-disabled="true"'} title="${ready ? "Copies the card as an image" : ""}">
+    <button type="button" class="panel share-door" data-action="open-share" ${ready ? "" : 'aria-disabled="true"'}>
       <span class="share-door-text">
         <span class="eyebrow">Share</span>
-        <strong>${ready ? `${current ? "This" : "That"} week as a picture` : "Nothing to share yet"}</strong>
+        <strong>${ready ? "Week and month cards" : "Nothing to share yet"}</strong>
       </span>
-      ${ready ? '<span class="trend-door-go" aria-hidden="true">Copy ›</span>' : ""}
+      ${ready ? '<span class="trend-door-go" aria-hidden="true">Open ›</span>' : ""}
     </button>
   `;
+}
+
+/** The Share popup: the week card and the month card drawn as they will be copied, each with
+ *  its button. The month is fetched when the popup opens; its card appears when it arrives. */
+function renderShareModal(): string {
+  if (!shareOpen) {
+    return "";
+  }
+  const week = weekRecap && weekRecap.start === historyWeekStart ? weekRecap : null;
+  const month = shareMonth && shareMonth.start.slice(0, 7) === historyWeekStart.slice(0, 7) ? shareMonth : null;
+  return `
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel share-panel" role="dialog" aria-modal="true" aria-labelledby="share-title">
+        <div class="modal-head share-head">
+          <div>
+            <p class="eyebrow">History</p>
+            <h2 id="share-title">Share</h2>
+            <p class="share-sub">Copy a card and paste it anywhere.</p>
+          </div>
+          <button type="button" data-action="close-share">Cancel</button>
+        </div>
+        <div class="share-grid">
+          ${renderShareColumn(week ? drawWeekCard(week) : null, "Week card", "copy-week-card", "Copy week", week !== null && week.session_count > 0, "No sessions this week")}
+          ${renderShareColumn(month ? drawMonthCard(month) : null, "Month card", "copy-month-card", "Copy month", month !== null && month.session_count > 0, "No sessions this month")}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderShareColumn(canvas: HTMLCanvasElement | null, name: string, action: string, label: string, ready: boolean, note: string): string {
+  return `
+    <div class="share-col">
+      ${canvas ? `<img class="share-preview" src="${canvas.toDataURL()}" alt="${attr(name)}">` : '<div class="share-preview share-preview-empty" aria-hidden="true"></div>'}
+      ${ready ? `<button type="button" class="primary" data-action="${action}">${label}</button>` : canvas ? `<p class="share-note">${escapeHtml(note)}</p>` : ""}
+    </div>
+  `;
+}
+
+async function loadShareMonth(): Promise<void> {
+  const weekStart = historyWeekStart;
+  try {
+    const month = await invoke<MonthRecap>("get_month_recap", { start: weekStart });
+    if (shareOpen && historyWeekStart === weekStart) {
+      shareMonth = month;
+      paintModalLayer();
+    }
+  } catch (error) {
+    showFeedback(`Could not load the month: ${errorText(error)}`);
+  }
 }
 
 function renderHistoryToolbar(weekStart: string): string {
@@ -5294,7 +5361,7 @@ function paintPreflightLayer(): void {
 
 /** The confirm boxes and the session-over card, over whatever page is showing. */
 function renderModalLayer(): string {
-  return renderHistoryConfirm() + renderQuitConfirm() + renderSessionOver();
+  return renderHistoryConfirm() + renderQuitConfirm() + renderSessionOver() + renderShareModal();
 }
 
 function paintModalLayer(): void {
@@ -5425,6 +5492,10 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     applyTheme();
     // Waves are drawn in the theme's ink; the drawn key includes the theme, so they redraw.
     bindVoiceWaveforms();
+    // The share cards are drawn in the theme's colours too.
+    if (shareOpen) {
+      paintModalLayer();
+    }
     const button = document.querySelector(".theme-toggle");
     if (button) {
       button.textContent = theme === "dark" ? "Dark" : "Light";
@@ -5521,8 +5592,35 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "open-share") {
+    shareOpen = true;
+    shareMonth = null;
+    paintModalLayer();
+    void loadShareMonth();
+    return;
+  }
+
+  if (action === "close-share") {
+    shareOpen = false;
+    paintModalLayer();
+    return;
+  }
+
+  // Both draw from data already in memory, so the clipboard write stays inside the click.
   if (action === "copy-week-card") {
-    await copyWeekCard();
+    const week = weekRecap && weekRecap.start === historyWeekStart ? weekRecap : null;
+    const canvas = week ? drawWeekCard(week) : null;
+    if (canvas) {
+      await copyCanvas(canvas);
+    }
+    return;
+  }
+
+  if (action === "copy-month-card") {
+    const canvas = shareMonth ? drawMonthCard(shareMonth) : null;
+    if (canvas) {
+      await copyCanvas(canvas);
+    }
     return;
   }
 
@@ -9308,7 +9406,7 @@ function drawCardTile(ctx: CanvasRenderingContext2D, x: number, y: number, w: nu
   const inner = w - inset * 2;
   ctx.textAlign = "left";
   ctx.fillStyle = palette.muted;
-  fitCanvasText(ctx, label, 600, CARD_MONO, 11, 8, inner);
+  fitCanvasText(ctx, label, 600, CARD_MONO, 12, 8, inner);
   ctx.fillText(label, x + inset, y + 14);
   ctx.fillStyle = palette.ink;
   const valueSize = fitCanvasText(ctx, value, 800, CARD_SANS, valueMax, 16, inner);
@@ -9394,128 +9492,186 @@ async function copyCard(): Promise<void> {
   await copyCanvas(canvas);
 }
 
-/** The week's day squares, shaded like the week picker: more focused time, greener. */
+/** The shaded greens of the calendar and the week picker: more focused time, greener. */
 const CARD_LEVELS = ["#d9f2a3", "#bfe96a", "#a8eb37"];
+const CARD_GREEN = "#a8eb37";
+/** Dark text on the greens, whichever theme the card is drawn in. */
+const CARD_GREEN_INK = "#101010";
+const CARD_INSET = 18;
 
-/** Draws the viewed week as a card and puts the PNG on the clipboard: the week and its focused
- *  time up top, a square per day shaded by focused time with the best day marked, and five
- *  tiles underneath. Only the week already loaded is drawn, so the clipboard write stays
- *  inside the click (see copyCanvas). */
-async function copyWeekCard(): Promise<void> {
-  const recap = weekRecap;
-  if (!recap || recap.start !== historyWeekStart || recap.session_count === 0) {
-    return;
-  }
+/** The header both share cards start with: the wordmark over the focused total on the left,
+ *  the eyebrow over the period on the right, hanging from the same baseline. Returns the y
+ *  where the body starts. */
+function drawCardHeader(ctx: CanvasRenderingContext2D, eyebrow: string, period: string, focusSeconds: number): number {
+  const palette = cardPalette();
   const width = CARD_WIDTH;
-  const drawn = cardCanvas(324);
+  ctx.textAlign = "left";
+  ctx.fillStyle = palette.ink;
+  ctx.font = `750 24px ${CARD_SANS}`;
+  ctx.fillText("Supervisor", CARD_PAD, CARD_PAD);
+
+  const bigTop = CARD_PAD + 42;
+  const bigSize = 40;
+  const big = formatHours(focusSeconds);
+  ctx.font = `800 ${bigSize}px ${CARD_SANS}`;
+  ctx.fillText(big, CARD_PAD, bigTop);
+  const bigW = ctx.measureText(big).width;
+  ctx.fillStyle = palette.muted;
+  ctx.font = `600 14px ${CARD_MONO}`;
+  ctx.fillText("FOCUSED", CARD_PAD + bigW + 10, bigTop + bigSize - 21);
+
+  const bottom = bigTop + bigSize;
+  ctx.textAlign = "right";
+  ctx.fillStyle = palette.ink;
+  const periodSize = fitCanvasText(ctx, period, 650, CARD_SANS, 28, 18, width - CARD_PAD * 2 - bigW - 120);
+  ctx.fillText(period, width - CARD_PAD, bottom - periodSize);
+  ctx.fillStyle = palette.muted;
+  ctx.font = `600 15px ${CARD_MONO}`;
+  ctx.fillText(eyebrow.toUpperCase(), width - CARD_PAD, bottom - periodSize - 24);
+  ctx.textAlign = "left";
+  return bottom + 18;
+}
+
+/** An inner panel in the card's language: hard shadow, fill, border. */
+function drawCardPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
+  const palette = cardPalette();
+  ctx.fillStyle = palette.shadow;
+  ctx.beginPath();
+  ctx.roundRect(x + 4, y + 4, w, h, 8);
+  ctx.fill();
+  ctx.fillStyle = palette.panel;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 8);
+  ctx.fill();
+  ctx.strokeStyle = palette.border;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+}
+
+/** The three tiles under a card's panel; returns the card's full height. */
+function drawCardTiles(ctx: CanvasRenderingContext2D, y: number, sessions: number, longestSeconds: number, streak: number): number {
+  const gap = 12;
+  const tileW = (CARD_WIDTH - CARD_PAD * 2 - gap * 2) / 3;
+  const tileH = 84;
+  const tiles: [string, string][] = [
+    ["SESSIONS", String(sessions)],
+    ["LONGEST", formatMinutes(longestSeconds)],
+    ["STREAK", streakLabel(streak)],
+  ];
+  tiles.forEach(([label, value], index) => drawCardTile(ctx, CARD_PAD + index * (tileW + gap), y, tileW, tileH, label, value));
+  return y + tileH + 4 + CARD_PAD;
+}
+
+/** The streak the card can claim: as of the period's last day, or today while it is running. */
+function streakAsOf(lastDay: string): number {
+  const today = dayKey(new Date());
+  return streakDays(lastDay < today ? lastDay : today);
+}
+
+/** The week as a card: the header, a bar per day in its own panel, three tiles. Drawn from the
+ *  recap already loaded, so a copy can start inside the click (see copyCanvas). */
+function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
+  const barsH = 200;
+  const panelH = CARD_INSET + barsH + 10 + 14 + CARD_INSET;
+  const bodyTop = CARD_PAD + 42 + 40 + 18;
+  const height = bodyTop + panelH + 18 + 84 + 4 + CARD_PAD;
+  const drawn = cardCanvas(height);
   if (!drawn) {
-    return;
+    return null;
   }
   const { canvas, ctx } = drawn;
   const palette = cardPalette();
   const today = dayKey(new Date());
-  const days = recap.buckets.map((bucket, index) => ({ key: addDaysKey(recap.start, index), label: bucket.label, seconds: bucket.focus_seconds }));
-  const best = days.reduce((top, day) => (day.seconds > top.seconds ? day : top), days[0]);
-  const kept = days.filter((day) => day.seconds >= STREAK_DAY_SECONDS).length;
-  const weekEnd = addDaysKey(recap.start, 6);
-  const streak = streakDays(weekEnd < today ? weekEnd : today);
   const year = parseDayKey(recap.start).getFullYear();
+  const top = drawCardHeader(ctx, "Your week", `${formatWeekRange(recap.start)}, ${year}`, recap.focus_seconds);
 
-  // Header: the week on the left, the mark and the focused total on the right.
-  ctx.fillStyle = palette.muted;
-  ctx.font = `600 12px ${CARD_MONO}`;
-  ctx.fillText("YOUR WEEK", CARD_PAD, 30);
-  ctx.fillStyle = palette.ink;
-  const title = `${formatWeekRange(recap.start)}, ${year}`;
-  fitCanvasText(ctx, title, 750, CARD_SANS, 30, 20, width - CARD_PAD * 2 - 230);
-  ctx.fillText(title, CARD_PAD, 48);
-
-  ctx.font = `600 11px ${CARD_MONO}`;
-  const markText = "SUPERVISOR";
-  const markW = ctx.measureText(markText).width + 16;
-  const markX = width - CARD_PAD - markW;
-  ctx.fillStyle = palette.shadow;
-  ctx.beginPath();
-  ctx.roundRect(markX + 2, 28 + 2, markW, 20, 4);
-  ctx.fill();
-  ctx.fillStyle = "#ffcf31";
-  ctx.beginPath();
-  ctx.roundRect(markX, 28, markW, 20, 4);
-  ctx.fill();
-  ctx.strokeStyle = palette.border;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.fillStyle = "#101010";
-  ctx.fillText(markText, markX + 8, 28 + 5);
-
-  ctx.textAlign = "right";
-  ctx.fillStyle = palette.muted;
-  ctx.font = `600 11px ${CARD_MONO}`;
-  const unit = "FOCUSED";
-  const unitW = ctx.measureText(unit).width;
-  ctx.fillText(unit, width - CARD_PAD, 66);
-  ctx.fillStyle = palette.ink;
-  ctx.font = `800 34px ${CARD_SANS}`;
-  ctx.fillText(formatHours(recap.focus_seconds), width - CARD_PAD - unitW - 8, 50);
-  ctx.textAlign = "left";
-
-  // A square per day: the day's number up top, its focused time at the foot.
-  const gap = 10;
-  const squareW = (width - CARD_PAD * 2 - gap * 6) / 7;
-  const squareY = 118;
-  const squareH = 62;
-  days.forEach((day, index) => {
-    const x = CARD_PAD + index * (squareW + gap);
-    const future = day.key > today;
-    const level = day.seconds <= 0 ? -1 : day.seconds >= 90 * 60 ? 2 : day.seconds >= 25 * 60 ? 1 : 0;
-    ctx.fillStyle = palette.muted;
-    ctx.font = `500 10px ${CARD_MONO}`;
-    ctx.textAlign = "center";
-    ctx.fillText(day.label.toUpperCase(), x + squareW / 2, squareY - 16);
-    ctx.textAlign = "left";
-    if (day === best && best.seconds > 0) {
+  const panelW = CARD_WIDTH - CARD_PAD * 2;
+  drawCardPanel(ctx, CARD_PAD, top, panelW, panelH);
+  const gap = 12;
+  const colW = (panelW - CARD_INSET * 2 - gap * 6) / 7;
+  const barsTop = top + CARD_INSET;
+  const max = Math.max(...recap.buckets.map((bucket) => bucket.focus_seconds), 1);
+  recap.buckets.forEach((bucket, index) => {
+    const x = CARD_PAD + CARD_INSET + index * (colW + gap);
+    const day = addDaysKey(recap.start, index);
+    const future = day > today;
+    const on = bucket.focus_seconds > 0;
+    const h = on ? Math.max(14, (barsH * smartBarHeight(bucket.focus_seconds, max, 14)) / 100) : 10;
+    const y = barsTop + barsH - h;
+    if (on) {
       ctx.fillStyle = palette.shadow;
       ctx.beginPath();
-      ctx.roundRect(x + 3, squareY + 3, squareW, squareH, 6);
+      ctx.roundRect(x + 3, y + 3, colW, h, 6);
       ctx.fill();
     }
-    ctx.fillStyle = level < 0 ? (future ? "transparent" : palette.track) : CARD_LEVELS[level];
+    ctx.fillStyle = on ? CARD_GREEN : future ? "transparent" : palette.track;
     ctx.beginPath();
-    ctx.roundRect(x, squareY, squareW, squareH, 6);
+    ctx.roundRect(x, y, colW, h, 6);
+    ctx.fill();
+    ctx.strokeStyle = future ? palette.grid : palette.border;
+    ctx.lineWidth = on ? 3 : 2;
+    ctx.stroke();
+    ctx.fillStyle = palette.muted;
+    ctx.font = `500 13px ${CARD_MONO}`;
+    ctx.textAlign = "center";
+    ctx.fillText(bucket.label.toUpperCase(), x + colW / 2, barsTop + barsH + 12);
+    ctx.textAlign = "left";
+  });
+
+  drawCardTiles(ctx, top + panelH + 18, recap.session_count, recap.longest_stretch_seconds, streakAsOf(recap.end));
+  return canvas;
+}
+
+/** The month as a card: the header, a calendar shaded by focused time in its own panel, three
+ *  tiles. Days still ahead are faint outlines. */
+function drawMonthCard(recap: MonthRecap): HTMLCanvasElement | null {
+  const panelW = CARD_WIDTH - CARD_PAD * 2;
+  const gap = 8;
+  const cell = (panelW - CARD_INSET * 2 - gap * 6) / 7;
+  const first = parseDayKey(recap.start);
+  const offset = (first.getDay() + 6) % 7;
+  const rows = Math.ceil((offset + recap.days.length) / 7);
+  const lettersH = 22;
+  const panelH = CARD_INSET + lettersH + rows * (cell + gap) - gap + CARD_INSET;
+  const bodyTop = CARD_PAD + 42 + 40 + 18;
+  const height = bodyTop + panelH + 18 + 84 + 4 + CARD_PAD;
+  const drawn = cardCanvas(height);
+  if (!drawn) {
+    return null;
+  }
+  const { canvas, ctx } = drawn;
+  const palette = cardPalette();
+  const today = dayKey(new Date());
+  const top = drawCardHeader(ctx, "Your month", first.toLocaleDateString(undefined, { month: "long", year: "numeric" }), recap.focus_seconds);
+
+  drawCardPanel(ctx, CARD_PAD, top, panelW, panelH);
+  const gridX = CARD_PAD + CARD_INSET;
+  const gridY = top + CARD_INSET;
+  ctx.fillStyle = palette.muted;
+  ctx.font = `500 13px ${CARD_MONO}`;
+  ctx.textAlign = "center";
+  ["M", "T", "W", "T", "F", "S", "S"].forEach((letter, index) => ctx.fillText(letter, gridX + index * (cell + gap) + cell / 2, gridY));
+  ctx.textAlign = "left";
+  recap.days.forEach((day, index) => {
+    const slot = offset + index;
+    const x = gridX + (slot % 7) * (cell + gap);
+    const y = gridY + lettersH + Math.floor(slot / 7) * (cell + gap);
+    const future = day.label > today;
+    const level = day.focus_seconds <= 0 ? -1 : day.focus_seconds >= 90 * 60 ? 2 : day.focus_seconds >= 25 * 60 ? 1 : 0;
+    ctx.fillStyle = level >= 0 ? CARD_LEVELS[level] : future ? "transparent" : palette.track;
+    ctx.beginPath();
+    ctx.roundRect(x, y, cell, cell, 6);
     ctx.fill();
     ctx.strokeStyle = future ? palette.grid : palette.border;
     ctx.lineWidth = 2;
     ctx.stroke();
-    if (day === best && best.seconds > 0) {
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.roundRect(x + 4, squareY + 4, squareW - 8, squareH - 8, 3);
-      ctx.stroke();
-    }
-    ctx.fillStyle = level >= 0 ? "#101010" : future ? palette.muted : palette.ink;
-    ctx.font = `600 12px ${CARD_MONO}`;
-    ctx.fillText(String(Number(day.key.slice(8))), x + 9, squareY + 9);
-    if (day.seconds > 0) {
-      ctx.font = `500 10px ${CARD_MONO}`;
-      ctx.fillText(formatHours(day.seconds), x + 9, squareY + squareH - 19);
-    }
+    ctx.fillStyle = level >= 0 ? CARD_GREEN_INK : future ? palette.muted : palette.ink;
+    ctx.font = `600 13px ${CARD_MONO}`;
+    ctx.fillText(String(index + 1), x + 8, y + 7);
   });
 
-  const tileGap = 10;
-  const tileW = (width - CARD_PAD * 2 - tileGap * 4) / 5;
-  const tileY = 204;
-  const tileH = 84;
-  const bestName = best.seconds > 0 ? parseDayKey(best.key).toLocaleDateString(undefined, { weekday: "short" }) : "—";
-  const tiles: [string, string, string][] = [
-    ["SESSIONS", String(recap.session_count), ""],
-    ["LONGEST", formatMinutes(recap.longest_stretch_seconds), "IN ONE GO"],
-    ["BEST DAY", bestName, best.seconds > 0 ? formatHours(best.seconds).toUpperCase() : ""],
-    ["STREAK", streakLabel(streak), ""],
-    ["DAYS", `${kept} of 7`, "25 MIN+"],
-  ];
-  tiles.forEach(([label, value, sub], index) => drawCardTile(ctx, CARD_PAD + index * (tileW + tileGap), tileY, tileW, tileH, label, value, sub));
-
-  await copyCanvas(canvas);
+  drawCardTiles(ctx, top + panelH + 18, recap.session_count, recap.longest_stretch_seconds, streakAsOf(recap.end));
+  return canvas;
 }
 
 function dayKey(date: Date): string {

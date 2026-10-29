@@ -16,7 +16,7 @@ use session::{
     SessionManager, SessionSettings, SessionSnapshot, SessionSummary, SettingsUpdate,
     StartSessionInput, SupervisorIdentity,
 };
-use storage::{DailyFocus, HistoryWeek, WeekRecap, SessionReport, StoredPhraseLibrary, TrendPeriod, TrendUnit, TrendsData};
+use storage::{DailyFocus, HistoryWeek, MonthRecap, WeekRecap, SessionReport, StoredPhraseLibrary, TrendPeriod, TrendUnit, TrendsData};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -240,6 +240,12 @@ fn search_sessions(query: String, state: State<'_, AppState>) -> Result<Vec<Sess
 #[tauri::command]
 fn get_week_recap(start: String, state: State<'_, AppState>) -> Result<WeekRecap, String> {
     lock_sessions(&state)?.week_recap(start)
+}
+
+/// The calendar month containing `start`, for the share card.
+#[tauri::command]
+fn get_month_recap(start: String, state: State<'_, AppState>) -> Result<MonthRecap, String> {
+    lock_sessions(&state)?.month_recap(start)
 }
 
 #[tauri::command]
@@ -756,6 +762,7 @@ pub fn run() {
             get_history,
             get_history_week,
             get_week_recap,
+            get_month_recap,
             search_sessions,
             get_session_report,
             get_trends,

@@ -43,6 +43,7 @@ const STATES = [
   ["overlay-corner-more", M + "?view=overlay&live=1", (d) => { d.querySelector("details.overlay-more").open = true; }, 228, 400],
   ["report-delete", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, ".history-item"); await sleep(500); click(d, '[data-action="ask-delete-session"]'); }],
   ["trends", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, '[data-action="open-trends"]'); }],
+  ["share", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, '[data-action="open-share"]'); await sleep(900); }],
   ["overlay-corner", M + "?view=overlay&live=1", null, 228, 400],
   ["overlay-interrupt", M + "?view=overlay&live=1&drift=1", null, 420, 600],
   ["preflight-pomodoro", M, async (d) => { click(d, '[data-action="open-preflight"]'); await sleep(300); click(d, '[data-mode="pomodoro"]'); }],

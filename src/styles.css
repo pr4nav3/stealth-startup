@@ -4389,6 +4389,65 @@ button.share-door[aria-disabled="true"] strong {
   margin: 0;
 }
 
+/* The Share popup: two columns, each a card drawn as it will be copied, with its button. */
+.share-panel {
+  width: min(900px, 100%);
+  padding: 20px 22px 22px;
+}
+
+.share-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.share-sub {
+  margin: 8px 0 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
+}
+
+.share-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+  align-items: stretch;
+}
+
+/* The card at the top, its button at the foot, so the two buttons share a line. */
+.share-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.share-preview {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.share-preview-empty {
+  aspect-ratio: 668 / 520;
+}
+
+.share-note {
+  margin: 0;
+  min-height: 40px;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
+  line-height: 40px;
+}
+
+@media (max-width: 720px) {
+  .share-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .share-door-text strong {
   display: block;
   margin-top: 2px;

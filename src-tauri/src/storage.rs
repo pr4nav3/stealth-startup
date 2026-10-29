@@ -273,6 +273,18 @@ pub struct RecapApp {
     pub seconds: u64,
 }
 
+/// A calendar month for the share card: its focused time, sessions and longest run, and every
+/// day's focused seconds in order (`days[i].label` is the day, "2026-10-01").
+#[derive(Clone, Debug, Serialize)]
+pub struct MonthRecap {
+    pub start: String,
+    pub end: String,
+    pub focus_seconds: u64,
+    pub session_count: u64,
+    pub longest_stretch_seconds: u64,
+    pub days: Vec<RecapBucket>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct WeekRecap {
     pub start: String,
@@ -1798,6 +1810,39 @@ impl SessionStorage {
             unrecovered_count: stats.unrecovered,
             previous_recovery_median_seconds: previous.recovery_median(),
             apps,
+        })
+    }
+
+    /// The calendar month containing `day`.
+    pub fn get_month_recap(&self, day: &str) -> Result<MonthRecap, String> {
+        let start = TrendUnit::Month.start_of(parse_day(day)?);
+        let end_exclusive = TrendUnit::Month.next(start);
+        let sessions = self.recap_sessions(&format_day(start), &format_day(end_exclusive))?;
+        let mut by_day = std::collections::HashMap::<String, u64>::new();
+        let mut focus_seconds = 0u64;
+        let mut longest_stretch_seconds = 0u64;
+        for session in &sessions {
+            focus_seconds += session.focused_seconds;
+            longest_stretch_seconds = longest_stretch_seconds.max(session.longest_stretch_seconds);
+            *by_day.entry(session.day.clone()).or_insert(0) += session.focused_seconds;
+        }
+        let mut days = Vec::new();
+        let mut cursor = start;
+        while cursor < end_exclusive {
+            let label = format_day(cursor);
+            days.push(RecapBucket {
+                focus_seconds: *by_day.get(&label).unwrap_or(&0),
+                label,
+            });
+            cursor = cursor.saturating_add(time::Duration::days(1));
+        }
+        Ok(MonthRecap {
+            start: format_day(start),
+            end: format_day(end_exclusive.saturating_sub(time::Duration::days(1))),
+            focus_seconds,
+            session_count: sessions.len() as u64,
+            longest_stretch_seconds,
+            days,
         })
     }
 
@@ -3378,6 +3423,40 @@ mod tests {
                 ("Work", "Cursor", 600),
             ]
         );
+    }
+
+    #[test]
+    fn month_recap_covers_the_calendar_month() {
+        let storage = SessionStorage::open_in_memory().expect("open db");
+        for (started, ended, focused) in [
+            ("2026-09-01T12:00:00Z", "2026-09-01T12:30:00Z", 1800),
+            ("2026-09-30T12:00:00Z", "2026-09-30T12:10:00Z", 600),
+            ("2026-10-01T12:00:00Z", "2026-10-01T12:20:00Z", 1200),
+        ] {
+            let id = storage
+                .insert_session("Month", Strictness::Normal, started, focused)
+                .expect("insert");
+            storage
+                .insert_span(id, &app("Code"), "focused", 0, focused)
+                .expect("span");
+            storage
+                .close_session(id, ended, "stopped", focused)
+                .expect("close");
+        }
+
+        let recap = storage.get_month_recap("2026-09-15").expect("month recap");
+        assert_eq!((recap.start.as_str(), recap.end.as_str()), ("2026-09-01", "2026-09-30"));
+        assert_eq!(recap.days.len(), 30);
+        assert_eq!(recap.session_count, 2);
+        assert_eq!(recap.focus_seconds, 2400);
+        assert_eq!(recap.longest_stretch_seconds, 1800);
+        assert_eq!((recap.days[0].label.as_str(), recap.days[0].focus_seconds), ("2026-09-01", 1800));
+        assert_eq!(recap.days[1].focus_seconds, 0);
+        assert_eq!((recap.days[29].label.as_str(), recap.days[29].focus_seconds), ("2026-09-30", 600));
+
+        // October has its own day and nothing of September's.
+        let october = storage.get_month_recap("2026-10-20").expect("october");
+        assert_eq!((october.session_count, october.focus_seconds, october.days.len()), (1, 1200, 31));
     }
 
     #[test]
