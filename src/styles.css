@@ -2137,18 +2137,6 @@ button.recap-app-row:active {
   box-shadow: none;
 }
 
-/* On the distractions list. */
-.recap-app-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-left: 7px;
-  border: 1.5px solid var(--sv-border);
-  border-radius: 50%;
-  background: var(--sv-coral);
-  vertical-align: middle;
-}
-
 /* The app popup: the dialog, its fields and the start screen's two-way toggle. */
 .modal-panel.app-edit-panel {
   display: grid;
@@ -4924,8 +4912,10 @@ button.trend-spark-track:focus-visible .week-tip {
 }
 
 /* The section's title in the ink, its groups' labels in the muted tone below it. */
-.recap-apps-title {
+.recap-apps .recap-apps-title {
   margin: 0 0 8px;
+  font-size: var(--sv-type-1);
+  font-weight: 500;
   padding-bottom: 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
   color: var(--ink);

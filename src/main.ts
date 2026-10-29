@@ -4561,13 +4561,8 @@ function editableApp(app: RecapApp): boolean {
   return (app.kind === "website" || app.kind === "app") && !["untracked", "supervisor", "phone"].includes(app.key);
 }
 
-function appOnList(app: RecapApp): boolean {
-  const target = app.kind === "website" ? "website" : "app";
-  return permanentRules.some((rule) => rule.target === target && rule.value.toLowerCase() === app.key.toLowerCase());
-}
-
 /** Apps & sites, in a report or a week: Work beside Distractions, each an eyebrow with its
- *  total and its rows in a box; Away time and the hint on a line underneath. */
+ *  total and its rows in a box; any Away time and the hint on a line underneath. */
 function renderAppColumns(apps: RecapApp[], sessionId: number | null, period: "session" | "week"): string {
   const work = apps.filter((app) => app.group === "Work");
   const distractions = apps.filter((app) => app.group === "Distractions");
@@ -4588,14 +4583,11 @@ function renderAppColumns(apps: RecapApp[], sessionId: number | null, period: "s
       ${column("Work", work, "Every minute was on something from the distractions list.")}
       ${column("Distractions", distractions, period === "week" ? "Nothing from the distractions list came up this week." : "Nothing from the distractions list came up.")}
     </div>
-    <div class="week-app-foot">
-      <span>${awayLine ? escapeHtml(awayLine) : period === "week" ? "Never away from the keyboard during a session." : "Never away from the keyboard."}</span>
-      ${editable ? `<span>${APP_EDIT_HINT}</span>` : ""}
-    </div>
+    ${awayLine || editable ? `<div class="week-app-foot">${awayLine ? `<span>${escapeHtml(awayLine)}</span>` : ""}${editable ? `<span>${APP_EDIT_HINT}</span>` : ""}</div>` : ""}
   `;
 }
 
-const APP_EDIT_HINT = "Click a row to rename it or change how it counts. A dot marks your distractions list.";
+const APP_EDIT_HINT = "Click a row to rename it or change how it counts.";
 
 /** One line per app or site: its name and its time. A real app or site is a quiet button that
  *  opens its popup (see AppEdit); `sessionId` is the report's session, or null for the week. */
@@ -4603,9 +4595,8 @@ function renderAppRows(items: RecapApp[], sessionId: number | null = null): stri
   return items
     .map((app) => {
       const tone = app.group === "Distractions" ? "is-distraction" : "";
-      const dot = editableApp(app) && appOnList(app) ? `<i class="recap-app-dot" title="On your distractions list"></i>` : "";
       const cells = `
-        <span class="recap-app-name">${escapeHtml(app.label)}${dot}</span>
+        <span class="recap-app-name">${escapeHtml(app.label)}</span>
         <strong>${escapeHtml(formatHours(app.seconds))}</strong>
       `;
       if (!editableApp(app)) {
