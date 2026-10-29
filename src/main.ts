@@ -3783,7 +3783,10 @@ function renderHistoryBody(): string {
   return `
     <div class="history-hero">
       ${renderWeekHero(weekStart, recap, animate)}
-      ${renderTrendsDoor(weekStart, recap, animate)}
+      <div class="history-side">
+        ${renderShareDoor(weekStart, recap)}
+        ${renderTrendsDoor(weekStart, recap, animate)}
+      </div>
     </div>
     <div class="history-seg-row">
       <div class="history-seg" role="group" aria-label="Show">
@@ -3792,6 +3795,22 @@ function renderHistoryBody(): string {
       </div>
     </div>
     ${historyPane === "apps" ? renderWeekAppsPane(recap) : renderSessionsPane(sessions, emptyWeek)}
+  `;
+}
+
+/** A small card above the Trends door: one click copies the viewed week as a picture. With
+ *  nothing in the week it stays, dimmed, so the column keeps its shape. */
+function renderShareDoor(weekStart: string, recap: WeekRecap | null): string {
+  const ready = recap !== null && recap.start === weekStart && recap.session_count > 0;
+  const current = weekStart === thisMondayKey();
+  return `
+    <button type="button" class="panel share-door" data-action="copy-week-card" ${ready ? "" : 'aria-disabled="true"'} title="${ready ? "Copies the card as an image" : ""}">
+      <span class="share-door-text">
+        <span class="eyebrow">Share</span>
+        <strong>${ready ? `${current ? "This" : "That"} week as a picture` : "Nothing to share yet"}</strong>
+      </span>
+      ${ready ? '<span class="trend-door-go" aria-hidden="true">Copy ›</span>' : ""}
+    </button>
   `;
 }
 
@@ -5499,6 +5518,11 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "copy-card") {
     await copyCard();
+    return;
+  }
+
+  if (action === "copy-week-card") {
+    await copyWeekCard();
     return;
   }
 
@@ -9203,16 +9227,17 @@ function composing(event: KeyboardEvent): boolean {
   return event.isComposing || event.keyCode === 229;
 }
 
-async function copyCard(): Promise<void> {
-  if (!dayCard) {
-    return;
-  }
-  const summary = summarizeDay(dayCard);
-  const streak = streakDays(summary.day);
+/** Width of every shared card; the day and the week card draw at the same size. */
+const CARD_WIDTH = 640;
+const CARD_PAD = 36;
+const CARD_MONO = "ui-monospace, Menlo, Consolas, monospace";
+const CARD_SANS = "Inter, system-ui, sans-serif";
+
+/** A card-sized canvas at 2x with the card's frame drawn: hard shadow, the grid paper, the
+ *  border. The rest of the PNG is transparent. The context is already inside the card. */
+function cardCanvas(height: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
   const scale = 2;
-  const width = 640;
-  const height = 316;
-  // Room around the card for its hard shadow; the rest of the PNG is transparent.
+  const width = CARD_WIDTH;
   const pad = 14;
   const shadow = 8;
   const radius = 12;
@@ -9221,14 +9246,11 @@ async function copyCard(): Promise<void> {
   canvas.height = (height + pad * 2) * scale;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
-    return;
+    return null;
   }
   ctx.scale(scale, scale);
   ctx.translate(pad, pad);
   const palette = cardPalette();
-  const ink = palette.ink;
-  const mono = "ui-monospace, Menlo, Consolas, monospace";
-  const sans = "Inter, system-ui, sans-serif";
 
   ctx.fillStyle = palette.shadow;
   ctx.beginPath();
@@ -9262,22 +9284,86 @@ async function copyCard(): Promise<void> {
   ctx.roundRect(0, 0, width, height, radius);
   ctx.stroke();
   ctx.restore();
+  ctx.textBaseline = "top";
+  return { canvas, ctx };
+}
+
+/** One stat tile in the app's card language: border, hard shadow, slightly rounded. A smaller
+ *  value sits on the same baseline as a full-size one; `sub` is a small line under it. */
+function drawCardTile(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, label: string, value: string, sub = ""): void {
+  const palette = cardPalette();
+  const valueMax = sub ? 26 : 34;
+  ctx.fillStyle = palette.shadow;
+  ctx.beginPath();
+  ctx.roundRect(x + 4, y + 4, w, h, 6);
+  ctx.fill();
+  ctx.fillStyle = palette.panel;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 6);
+  ctx.fill();
+  ctx.strokeStyle = palette.border;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  const inset = sub ? 12 : 16;
+  const inner = w - inset * 2;
+  ctx.textAlign = "left";
+  ctx.fillStyle = palette.muted;
+  fitCanvasText(ctx, label, 600, CARD_MONO, 11, 8, inner);
+  ctx.fillText(label, x + inset, y + 14);
+  ctx.fillStyle = palette.ink;
+  const valueSize = fitCanvasText(ctx, value, 800, CARD_SANS, valueMax, 16, inner);
+  ctx.fillText(value, x + inset, y + 36 + (valueMax - valueSize));
+  if (sub) {
+    ctx.fillStyle = palette.muted;
+    fitCanvasText(ctx, sub, 500, CARD_MONO, 10, 8, inner);
+    ctx.fillText(sub, x + inset, y + 36 + valueMax + 6);
+  }
+}
+
+/** Puts the canvas on the clipboard as a PNG. The write starts at once, with the PNG still
+ *  being encoded: WebKit (the Mac webview) allows a clipboard write only during the click
+ *  itself, not after an await, so nothing that calls this may await first. */
+async function copyCanvas(canvas: HTMLCanvasElement): Promise<void> {
+  const png = new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not draw the card"))), "image/png"),
+  );
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    showFeedback("Card copied");
+  } catch (error) {
+    showFeedback(`Could not copy: ${errorText(error)}`);
+  }
+}
+
+/** Draws the day card to a canvas and puts the PNG on the clipboard, in the current theme's colours. */
+async function copyCard(): Promise<void> {
+  if (!dayCard) {
+    return;
+  }
+  const summary = summarizeDay(dayCard);
+  const streak = streakDays(summary.day);
+  const width = CARD_WIDTH;
+  const drawn = cardCanvas(316);
+  if (!drawn) {
+    return;
+  }
+  const { canvas, ctx } = drawn;
+  const palette = cardPalette();
 
   ctx.fillStyle = palette.muted;
-  ctx.font = `600 14px ${mono}`;
-  ctx.textBaseline = "top";
-  ctx.fillText("SUPERVISOR", 36, 32);
+  ctx.font = `600 14px ${CARD_MONO}`;
+  ctx.fillText("SUPERVISOR", CARD_PAD, 32);
   ctx.textAlign = "right";
-  ctx.fillText(cardDate(summary.day).toUpperCase(), width - 36, 32);
+  ctx.fillText(cardDate(summary.day).toUpperCase(), width - CARD_PAD, 32);
   ctx.textAlign = "left";
 
-  ctx.fillStyle = ink;
-  fitCanvasText(ctx, dayTitle(summary.day), 700, sans, 30, 20, width - 72 - 170);
-  ctx.fillText(dayTitle(summary.day), 36, 62);
+  ctx.fillStyle = palette.ink;
+  fitCanvasText(ctx, dayTitle(summary.day), 700, CARD_SANS, 30, 20, width - CARD_PAD * 2 - 170);
+  ctx.fillText(dayTitle(summary.day), CARD_PAD, 62);
 
-  const stripX = 36;
+  const stripX = CARD_PAD;
   const stripY = 112;
-  const stripW = width - 72;
+  const stripW = width - CARD_PAD * 2;
   const stripH = 44;
   ctx.save();
   ctx.beginPath();
@@ -9301,45 +9387,135 @@ async function copyCard(): Promise<void> {
     ["ATTENTION SPAN", formatMinutes(summary.attentionSeconds)],
     ["STREAK", streakLabel(streak)],
   ];
-  // Three tiles in the app's card language: border, hard shadow, slightly rounded.
   const tileGap = 12;
-  const tileW = (width - 72 - tileGap * 2) / 3;
-  const tileY = 186;
-  const tileH = 94;
-  stats.forEach(([label, value], index) => {
-    const x = 36 + index * (tileW + tileGap);
-    ctx.fillStyle = palette.shadow;
-    ctx.beginPath();
-    ctx.roundRect(x + 4, tileY + 4, tileW, tileH, 6);
-    ctx.fill();
-    ctx.fillStyle = palette.panel;
-    ctx.beginPath();
-    ctx.roundRect(x, tileY, tileW, tileH, 6);
-    ctx.fill();
-    ctx.strokeStyle = palette.border;
-    ctx.lineWidth = 3;
-    ctx.stroke();
-    const inner = tileW - 32;
+  const tileW = (width - CARD_PAD * 2 - tileGap * 2) / 3;
+  stats.forEach(([label, value], index) => drawCardTile(ctx, CARD_PAD + index * (tileW + tileGap), 186, tileW, 94, label, value));
+
+  await copyCanvas(canvas);
+}
+
+/** The week's day squares, shaded like the week picker: more focused time, greener. */
+const CARD_LEVELS = ["#d9f2a3", "#bfe96a", "#a8eb37"];
+
+/** Draws the viewed week as a card and puts the PNG on the clipboard: the week and its focused
+ *  time up top, a square per day shaded by focused time with the best day marked, and five
+ *  tiles underneath. Only the week already loaded is drawn, so the clipboard write stays
+ *  inside the click (see copyCanvas). */
+async function copyWeekCard(): Promise<void> {
+  const recap = weekRecap;
+  if (!recap || recap.start !== historyWeekStart || recap.session_count === 0) {
+    return;
+  }
+  const width = CARD_WIDTH;
+  const drawn = cardCanvas(324);
+  if (!drawn) {
+    return;
+  }
+  const { canvas, ctx } = drawn;
+  const palette = cardPalette();
+  const today = dayKey(new Date());
+  const days = recap.buckets.map((bucket, index) => ({ key: addDaysKey(recap.start, index), label: bucket.label, seconds: bucket.focus_seconds }));
+  const best = days.reduce((top, day) => (day.seconds > top.seconds ? day : top), days[0]);
+  const kept = days.filter((day) => day.seconds >= STREAK_DAY_SECONDS).length;
+  const weekEnd = addDaysKey(recap.start, 6);
+  const streak = streakDays(weekEnd < today ? weekEnd : today);
+  const year = parseDayKey(recap.start).getFullYear();
+
+  // Header: the week on the left, the mark and the focused total on the right.
+  ctx.fillStyle = palette.muted;
+  ctx.font = `600 12px ${CARD_MONO}`;
+  ctx.fillText("YOUR WEEK", CARD_PAD, 30);
+  ctx.fillStyle = palette.ink;
+  const title = `${formatWeekRange(recap.start)}, ${year}`;
+  fitCanvasText(ctx, title, 750, CARD_SANS, 30, 20, width - CARD_PAD * 2 - 230);
+  ctx.fillText(title, CARD_PAD, 48);
+
+  ctx.font = `600 11px ${CARD_MONO}`;
+  const markText = "SUPERVISOR";
+  const markW = ctx.measureText(markText).width + 16;
+  const markX = width - CARD_PAD - markW;
+  ctx.fillStyle = palette.shadow;
+  ctx.beginPath();
+  ctx.roundRect(markX + 2, 28 + 2, markW, 20, 4);
+  ctx.fill();
+  ctx.fillStyle = "#ffcf31";
+  ctx.beginPath();
+  ctx.roundRect(markX, 28, markW, 20, 4);
+  ctx.fill();
+  ctx.strokeStyle = palette.border;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#101010";
+  ctx.fillText(markText, markX + 8, 28 + 5);
+
+  ctx.textAlign = "right";
+  ctx.fillStyle = palette.muted;
+  ctx.font = `600 11px ${CARD_MONO}`;
+  const unit = "FOCUSED";
+  const unitW = ctx.measureText(unit).width;
+  ctx.fillText(unit, width - CARD_PAD, 66);
+  ctx.fillStyle = palette.ink;
+  ctx.font = `800 34px ${CARD_SANS}`;
+  ctx.fillText(formatHours(recap.focus_seconds), width - CARD_PAD - unitW - 8, 50);
+  ctx.textAlign = "left";
+
+  // A square per day: the day's number up top, its focused time at the foot.
+  const gap = 10;
+  const squareW = (width - CARD_PAD * 2 - gap * 6) / 7;
+  const squareY = 118;
+  const squareH = 62;
+  days.forEach((day, index) => {
+    const x = CARD_PAD + index * (squareW + gap);
+    const future = day.key > today;
+    const level = day.seconds <= 0 ? -1 : day.seconds >= 90 * 60 ? 2 : day.seconds >= 25 * 60 ? 1 : 0;
     ctx.fillStyle = palette.muted;
-    fitCanvasText(ctx, label, 600, mono, 11, 8, inner);
-    ctx.fillText(label, x + 16, tileY + 16);
-    ctx.fillStyle = ink;
-    const valueSize = fitCanvasText(ctx, value, 800, sans, 34, 18, inner);
-    // Smaller values sit on the same baseline as full-size ones.
-    ctx.fillText(value, x + 16, tileY + 40 + (34 - valueSize));
+    ctx.font = `500 10px ${CARD_MONO}`;
+    ctx.textAlign = "center";
+    ctx.fillText(day.label.toUpperCase(), x + squareW / 2, squareY - 16);
+    ctx.textAlign = "left";
+    if (day === best && best.seconds > 0) {
+      ctx.fillStyle = palette.shadow;
+      ctx.beginPath();
+      ctx.roundRect(x + 3, squareY + 3, squareW, squareH, 6);
+      ctx.fill();
+    }
+    ctx.fillStyle = level < 0 ? (future ? "transparent" : palette.track) : CARD_LEVELS[level];
+    ctx.beginPath();
+    ctx.roundRect(x, squareY, squareW, squareH, 6);
+    ctx.fill();
+    ctx.strokeStyle = future ? palette.grid : palette.border;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    if (day === best && best.seconds > 0) {
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(x + 4, squareY + 4, squareW - 8, squareH - 8, 3);
+      ctx.stroke();
+    }
+    ctx.fillStyle = level >= 0 ? "#101010" : future ? palette.muted : palette.ink;
+    ctx.font = `600 12px ${CARD_MONO}`;
+    ctx.fillText(String(Number(day.key.slice(8))), x + 9, squareY + 9);
+    if (day.seconds > 0) {
+      ctx.font = `500 10px ${CARD_MONO}`;
+      ctx.fillText(formatHours(day.seconds), x + 9, squareY + squareH - 19);
+    }
   });
 
-  // The write starts now, with the PNG still being encoded: WebKit (the Mac webview) allows
-  // a clipboard write only during the click itself, not after an await.
-  const png = new Promise<Blob>((resolve, reject) =>
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not draw the card"))), "image/png"),
-  );
-  try {
-    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
-    showFeedback("Card copied");
-  } catch (error) {
-    showFeedback(`Could not copy: ${errorText(error)}`);
-  }
+  const tileGap = 10;
+  const tileW = (width - CARD_PAD * 2 - tileGap * 4) / 5;
+  const tileY = 204;
+  const tileH = 84;
+  const bestName = best.seconds > 0 ? parseDayKey(best.key).toLocaleDateString(undefined, { weekday: "short" }) : "—";
+  const tiles: [string, string, string][] = [
+    ["SESSIONS", String(recap.session_count), ""],
+    ["LONGEST", formatMinutes(recap.longest_stretch_seconds), "IN ONE GO"],
+    ["BEST DAY", bestName, best.seconds > 0 ? formatHours(best.seconds).toUpperCase() : ""],
+    ["STREAK", streakLabel(streak), ""],
+    ["DAYS", `${kept} of 7`, "25 MIN+"],
+  ];
+  tiles.forEach(([label, value, sub], index) => drawCardTile(ctx, CARD_PAD + index * (tileW + tileGap), tileY, tileW, tileH, label, value, sub));
+
+  await copyCanvas(canvas);
 }
 
 function dayKey(date: Date): string {

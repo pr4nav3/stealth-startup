@@ -4319,6 +4319,87 @@ button.wp-day.is-future:disabled {
   border-color: #141410;
 }
 
+/* The right column: the Share card, then the Trends door filling the rest of the week card's height. */
+.history-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.history-side .trend-door {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The Share card: a button in the shape of a small panel, one line and a quiet "Copy" that
+   darkens with the lift. Without a week to share it sits dimmed and still. */
+button.share-door {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  padding: 12px 18px;
+  color: var(--ink);
+  font: inherit;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  cursor: pointer;
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+button.share-door:hover,
+button.share-door:focus-visible {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 var(--sv-shadow-color);
+}
+
+button.share-door:active {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--sv-shadow-color);
+}
+
+button.share-door:hover .trend-door-go,
+button.share-door:focus-visible .trend-door-go {
+  color: var(--ink);
+  transform: translateX(2px);
+}
+
+button.share-door[aria-disabled="true"],
+button.share-door[aria-disabled="true"]:hover {
+  transform: none;
+  box-shadow: var(--shadow-control);
+  cursor: default;
+}
+
+button.share-door[aria-disabled="true"] strong {
+  color: var(--sv-muted);
+}
+
+.share-door-text {
+  display: block;
+  min-width: 0;
+}
+
+.share-door-text .eyebrow {
+  margin: 0;
+}
+
+.share-door-text strong {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The card is the door. It lifts under the mouse like the day card and the calendar's days, and
    presses on click; a quiet "View trends" in its header says what the click does. The bars are
    their own targets, so the card holds still over the whole chart: a cursor run across the bars
