@@ -5956,7 +5956,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   // Both draw from data already in memory, so the clipboard write stays inside the click.
   if (action === "copy-week-card") {
     const week = weekRecap && weekRecap.start === historyWeekStart ? weekRecap : null;
-    const canvas = week ? drawWeekCard(week) : null;
+    const canvas = week ? drawWeekCard(week, true) : null;
     if (canvas) {
       await copyCanvas(canvas);
     }
@@ -5964,7 +5964,7 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "copy-month-card") {
-    const canvas = shareMonth ? drawMonthCard(shareMonth) : null;
+    const canvas = shareMonth ? drawMonthCard(shareMonth, true) : null;
     if (canvas) {
       await copyCanvas(canvas);
     }
@@ -9633,8 +9633,8 @@ function renderDayCard(todayStreakDays: number): string {
 /** The card's colours in the current theme (the same tokens as styles.css). */
 function cardPalette() {
   return theme === "dark"
-    ? { canvas: "#40403c", panel: "#353530", grid: "rgba(255,255,255,0.12)", ink: "#fff8e9", muted: "#ddd5c5", border: "#151512", track: "#4c4b46", shadow: "#0b0b09" }
-    : { canvas: "#f4ead7", panel: "#fff4cf", grid: "rgba(16,16,16,0.08)", ink: "#101010", muted: "#5d564a", border: "#101010", track: "#fff7df", shadow: "rgba(17,16,14,0.68)" };
+    ? { canvas: "#40403c", panel: "#353530", grid: "rgba(255,255,255,0.12)", ink: "#fff8e9", muted: "#ddd5c5", border: "#151512", track: "#4c4b46", shadow: "#0b0b09", frame: "#353530" }
+    : { canvas: "#f4ead7", panel: "#fff4cf", grid: "rgba(16,16,16,0.08)", ink: "#101010", muted: "#5d564a", border: "#101010", track: "#fff7df", shadow: "rgba(17,16,14,0.68)", frame: "#fff7df" };
 }
 
 /** Sets the largest font (down to `min`) at which `text` fits in `maxWidth`; returns the size used. */
@@ -9664,24 +9664,31 @@ const CARD_PAD = 36;
 const CARD_MONO = "ui-monospace, Menlo, Consolas, monospace";
 const CARD_SANS = "Inter, system-ui, sans-serif";
 
-/** A card-sized canvas at 2x with the card's frame drawn: hard shadow, the grid paper, the
- *  border. Only the rounded corners and the strip the shadow leaves are transparent. */
-function cardCanvas(height: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+/** A card-sized canvas at 2x with the card drawn: hard shadow, the grid paper, the border.
+ *  `framed`, for the image that is copied: a solid frame in the theme's cream fills the square
+ *  around the card, so no pixel is transparent. Chat apps send images as JPEGs, which turn
+ *  transparency white; the card's rounded corners and shadow keep their shape on the frame.
+ *  Unframed (the Share popup's previews), only the corners and the shadow's notch are clear. */
+function cardCanvas(height: number, framed = false): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
   const scale = 2;
   const width = CARD_WIDTH;
   const shadow = 8;
   const radius = 12;
-  // The image is the card and its shadow, nothing around them: pasted somewhere that fills
-  // transparency with white, a margin would show as a white frame.
+  const frame = framed ? 14 : 0;
   const canvas = document.createElement("canvas");
-  canvas.width = (width + shadow) * scale;
-  canvas.height = (height + shadow) * scale;
+  canvas.width = (width + shadow + frame * 2) * scale;
+  canvas.height = (height + shadow + frame * 2) * scale;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return null;
   }
   ctx.scale(scale, scale);
   const palette = cardPalette();
+  if (framed) {
+    ctx.fillStyle = palette.frame;
+    ctx.fillRect(0, 0, width + shadow + frame * 2, height + shadow + frame * 2);
+    ctx.translate(frame, frame);
+  }
 
   ctx.fillStyle = palette.shadow;
   ctx.beginPath();
@@ -9774,7 +9781,7 @@ async function copyCard(): Promise<void> {
   const summary = summarizeDay(dayCard);
   const streak = streakDays(summary.day);
   const width = CARD_WIDTH;
-  const drawn = cardCanvas(316);
+  const drawn = cardCanvas(316, true);
   if (!drawn) {
     return;
   }
@@ -9908,12 +9915,12 @@ function bestStreakIn(daySeconds: number[]): number {
 
 /** The week as a card: the header, a bar per day in its own panel, three tiles. Drawn from the
  *  recap already loaded, so a copy can start inside the click (see copyCanvas). */
-function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
+function drawWeekCard(recap: WeekRecap, framed = false): HTMLCanvasElement | null {
   const barsH = 200;
   const panelH = CARD_INSET + barsH + 10 + 14 + CARD_INSET;
   const bodyTop = CARD_PAD + 42 + 40 + 18;
   const height = bodyTop + panelH + 18 + 84 + 4 + CARD_PAD;
-  const drawn = cardCanvas(height);
+  const drawn = cardCanvas(height, framed);
   if (!drawn) {
     return null;
   }
@@ -9962,7 +9969,7 @@ function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
 
 /** The month as a card: the header, a calendar shaded by focused time in its own panel, three
  *  tiles. Days still ahead are faint outlines. */
-function drawMonthCard(recap: MonthRecap): HTMLCanvasElement | null {
+function drawMonthCard(recap: MonthRecap, framed = false): HTMLCanvasElement | null {
   const panelW = CARD_WIDTH - CARD_PAD * 2;
   const gap = 8;
   const cell = (panelW - CARD_INSET * 2 - gap * 6) / 7;
@@ -9973,7 +9980,7 @@ function drawMonthCard(recap: MonthRecap): HTMLCanvasElement | null {
   const panelH = CARD_INSET + lettersH + rows * (cell + gap) - gap + CARD_INSET;
   const bodyTop = CARD_PAD + 42 + 40 + 18;
   const height = bodyTop + panelH + 18 + 84 + 4 + CARD_PAD;
-  const drawn = cardCanvas(height);
+  const drawn = cardCanvas(height, framed);
   if (!drawn) {
     return null;
   }
