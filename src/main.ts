@@ -3994,32 +3994,38 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: b
     caption = "Finish a session and this week starts the chart.";
   } else if (!previous) {
     value = weeks[0].start === weekStart ? "First week" : "Off the chart";
-    caption = weeks[0].start === weekStart ? "Nothing before it to compare with." : "Open Trends to see older weeks.";
+    caption = weeks[0].start === weekStart ? "nothing before it" : "older weeks are in Trends";
   } else if (previous.session_count === 0 && recap.session_count === 0) {
     value = "Quiet";
-    caption = current ? "No sessions this week or last." : "No sessions this week or the one before.";
+    caption = current ? "no sessions this week or last" : "no sessions either week";
   } else if (recap && previous && (previous.session_count > 0 || recap.session_count > 0)) {
     const before = current && todayIndex < 6 ? focusThrough(previousStart, todayIndex) : previous.focus_seconds;
     // A running week is measured against last week up to the same weekday; "so far" says so.
     const against = current ? "last week" : "the week before";
-    const soFar = current && todayIndex < 6 ? " so far" : "";
+    const soFar = current && todayIndex < 6 ? ", so far" : "";
     const change = recap.focus_seconds - before;
     if (Math.abs(change) < 60) {
       value = "Steady";
-      caption = `Same focused time${soFar} as ${against}.`;
+      caption = `same as ${against}${soFar}`;
     } else {
       value = `${change > 0 ? "↑" : "↓"} ${formatHours(Math.abs(change))}`;
-      caption = `${change > 0 ? "More" : "Less"} focused time${soFar} than ${against}.`;
+      caption = `vs ${against}${soFar}`;
     }
   }
   const shown = weeks.slice(-DOOR_WEEKS);
+  // The card is the door: a click anywhere on it opens Trends, except on a week's bar, which
+  // is its own button and opens that week here. Keyboard: the card takes focus; Enter opens.
   return `
-    <section class="panel trend-door" aria-label="Trends">
-      <p class="eyebrow">Trends</p>
-      <strong class="trend-door-value">${escapeHtml(value)}</strong>
-      <span class="trend-door-caption">${escapeHtml(caption)}</span>
-      ${shown.length ? `<span class="trend-door-chart-title">Focused hours, last ${shown.length === 1 ? "week" : `${shown.length} weeks`}</span>${renderDoorChart(shown, weekStart, animate)}` : ""}
-      <button type="button" class="trend-door-go" data-action="open-trends">View trends ›</button>
+    <section class="panel trend-door ${shown.length ? "has-chart" : ""}" role="button" tabindex="0" data-action="open-trends" aria-label="View trends">
+      <div class="trend-door-head">
+        <p class="eyebrow">${shown.length ? `Last ${shown.length === 1 ? "week" : `${shown.length} weeks`}` : "Trends"}</p>
+        <span class="trend-door-go" aria-hidden="true">View trends ›</span>
+      </div>
+      <div class="trend-door-line">
+        <strong class="trend-door-value">${escapeHtml(value)}</strong>
+        <span class="trend-door-caption">${escapeHtml(caption)}</span>
+      </div>
+      ${shown.length ? renderDoorChart(shown, weekStart, animate) : ""}
     </section>
   `;
 }
@@ -4041,11 +4047,11 @@ function renderDoorChart(shown: TrendPeriod[], weekStart: string, animate: boole
           const sessions = week.session_count === 1 ? "1 session" : `${week.session_count} sessions`;
           const tip = `${formatWeekStart(week.start)} · ${formatHours(week.focus_seconds)}${week.start === running ? " so far" : ""}`;
           return `
-            <span class="trend-spark-track" aria-label="${attr(`${tip} · ${sessions}`)}">
+            <button type="button" class="trend-spark-track" data-action="pick-week" data-day="${attr(week.start)}" aria-label="${attr(`${tip} · ${sessions}. Show this week`)}">
               <span class="${classes}" style="--i: ${index}; ${week.focus_seconds ? `height: ${smartBarHeight(week.focus_seconds, maxWeek, 14)}%` : ""}">
                 <span class="week-tip">${escapeHtml(tip)}</span>
               </span>
-            </span>
+            </button>
           `;
         })
         .join("")}

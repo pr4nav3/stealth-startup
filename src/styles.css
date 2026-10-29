@@ -4253,25 +4253,78 @@ button.wp-day.is-future:disabled {
   border-color: #141410;
 }
 
+/* The card is the door. It lifts under the mouse like the day card and the calendar's days, and
+   presses on click; a quiet "View trends" in its header says what the click does. A hovered
+   bar is its own target, so the card holds still while the bar lifts. */
 .panel.trend-door {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
-  padding: 16px 18px;
+  padding: 14px 18px 16px;
+  cursor: pointer;
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+.panel.trend-door:hover:not(:has(.trend-spark-track:hover)),
+.panel.trend-door:focus-visible {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 var(--sv-shadow-color);
+}
+
+.panel.trend-door:active:not(:has(.trend-spark-track:active)) {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--sv-shadow-color);
 }
 
 .trend-door .eyebrow {
   margin: 0;
 }
 
-.trend-door-chart-title {
-  margin-top: 10px;
+.trend-door-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.trend-door-go {
   color: var(--sv-muted);
   font-family: var(--font-mono);
   font-size: 0.66rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
+  transition: color 120ms ease-out, transform 120ms ease-out;
+}
+
+.panel.trend-door:hover:not(:has(.trend-spark-track:hover)) .trend-door-go,
+.panel.trend-door:focus-visible .trend-door-go {
+  color: var(--ink);
+  transform: translateX(2px);
+}
+
+/* The figure and its reading on one line; with a chart below, the reading never wraps. */
+.trend-door-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.trend-door-line .trend-door-value {
+  flex: none;
+  white-space: nowrap;
+}
+
+.trend-door-line .trend-door-caption {
+  min-width: 0;
+}
+
+.trend-door.has-chart .trend-door-caption {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Four weeks of bars, no axis; the viewed week is solid, the running week dashed. */
@@ -4283,8 +4336,30 @@ button.wp-day.is-future:disabled {
   flex: 1 1 auto;
   align-items: stretch;
   gap: 10px;
-  min-height: 120px;
-  margin-top: 26px;
+  /* The same height as the week's bars beside it, so the two charts share a baseline; the
+     room above is the card's, like the hero's space between its tiles and its bars. */
+  min-height: 96px;
+  max-height: 146px;
+  margin-top: auto;
+  padding-top: 26px;
+}
+
+/* A bar is a button that opens its week: no box of its own, the bar is the whole of it. */
+button.trend-spark-track {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: flex-end;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
 }
 
 .trend-spark-track {
@@ -4293,6 +4368,15 @@ button.wp-day.is-future:disabled {
   flex: 1;
   align-items: flex-end;
   min-width: 0;
+}
+
+button.trend-spark-track:focus-visible .trend-spark-bar:not(.is-empty) {
+  transform: translate(-2px, -2px);
+}
+
+button.trend-spark-track:focus-visible .week-tip {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
 
 /* A hovered bar's tip paints over its neighbours and the card's text. */
@@ -4382,18 +4466,7 @@ button.wp-day.is-future:disabled {
 
 .trend-door-caption {
   color: var(--sv-muted);
-  font-size: var(--sv-type-3);
-}
-
-button.trend-door-go {
-  width: 100%;
-  min-height: 40px;
-  margin-top: 14px;
-}
-
-.trend-door-caption + button.trend-door-go {
-  margin-top: auto;
-  padding-top: 0;
+  font-size: var(--sv-type-4);
 }
 
 /* Sessions or Apps & sites: one list under the week at a time. */
