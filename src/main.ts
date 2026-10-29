@@ -9825,8 +9825,7 @@ async function copyCard(): Promise<void> {
   await copyCanvas(canvas);
 }
 
-/** The shaded greens of the calendar and the week picker: more focused time, greener. */
-const CARD_LEVELS = ["#d9f2a3", "#bfe96a", "#a8eb37"];
+/** A day that counts (25 focused minutes) is green, as on the Session calendar; less is white. */
 const CARD_GREEN = "#a8eb37";
 /** Dark text on the greens, whichever theme the card is drawn in. */
 const CARD_GREEN_INK = "#101010";
@@ -9882,23 +9881,28 @@ function drawCardPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w: n
 }
 
 /** The three tiles under a card's panel; returns the card's full height. */
-function drawCardTiles(ctx: CanvasRenderingContext2D, y: number, sessions: number, longestSeconds: number, streak: number): number {
+function drawCardTiles(ctx: CanvasRenderingContext2D, y: number, sessions: number, longestSeconds: number, bestStreak: number): number {
   const gap = 12;
   const tileW = (CARD_WIDTH - CARD_PAD * 2 - gap * 2) / 3;
   const tileH = 84;
   const tiles: [string, string][] = [
     ["SESSIONS", String(sessions)],
     ["LONGEST", formatMinutes(longestSeconds)],
-    ["STREAK", streakLabel(streak)],
+    ["BEST STREAK", streakLabel(bestStreak)],
   ];
   tiles.forEach(([label, value], index) => drawCardTile(ctx, CARD_PAD + index * (tileW + gap), y, tileW, tileH, label, value));
   return y + tileH + 4 + CARD_PAD;
 }
 
-/** The streak the card can claim: as of the period's last day, or today while it is running. */
-function streakAsOf(lastDay: string): number {
-  const today = dayKey(new Date());
-  return streakDays(lastDay < today ? lastDay : today);
+/** The longest run of days in a row with 25 focused minutes, within the card's own days. */
+function bestStreakIn(daySeconds: number[]): number {
+  let best = 0;
+  let run = 0;
+  for (const seconds of daySeconds) {
+    run = seconds >= STREAK_DAY_SECONDS ? run + 1 : 0;
+    best = Math.max(best, run);
+  }
+  return best;
 }
 
 /** The week as a card: the header, a bar per day in its own panel, three tiles. Drawn from the
@@ -9929,6 +9933,8 @@ function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
     const day = addDaysKey(recap.start, index);
     const future = day > today;
     const on = bucket.focus_seconds > 0;
+    // Green only for a day that counts; a shorter day stands at its height in white.
+    const counts = bucket.focus_seconds >= STREAK_DAY_SECONDS;
     const h = on ? Math.max(14, (barsH * smartBarHeight(bucket.focus_seconds, max, 14)) / 100) : 10;
     const y = barsTop + barsH - h;
     if (on) {
@@ -9937,7 +9943,7 @@ function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
       ctx.roundRect(x + 3, y + 3, colW, h, 6);
       ctx.fill();
     }
-    ctx.fillStyle = on ? CARD_GREEN : future ? "transparent" : palette.track;
+    ctx.fillStyle = counts ? CARD_GREEN : future ? "transparent" : palette.track;
     ctx.beginPath();
     ctx.roundRect(x, y, colW, h, 6);
     ctx.fill();
@@ -9951,7 +9957,7 @@ function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
     ctx.textAlign = "left";
   });
 
-  drawCardTiles(ctx, top + panelH + 18, recap.session_count, recap.longest_stretch_seconds, streakAsOf(recap.end));
+  drawCardTiles(ctx, top + panelH + 18, recap.session_count, recap.longest_stretch_seconds, bestStreakIn(recap.buckets.map((bucket) => bucket.focus_seconds)));
   return canvas;
 }
 
@@ -9990,20 +9996,20 @@ function drawMonthCard(recap: MonthRecap): HTMLCanvasElement | null {
     const x = gridX + (slot % 7) * (cell + gap);
     const y = gridY + lettersH + Math.floor(slot / 7) * (cell + gap);
     const future = day.label > today;
-    const level = day.focus_seconds <= 0 ? -1 : day.focus_seconds >= 90 * 60 ? 2 : day.focus_seconds >= 25 * 60 ? 1 : 0;
-    ctx.fillStyle = level >= 0 ? CARD_LEVELS[level] : future ? "transparent" : palette.track;
+    const counts = day.focus_seconds >= STREAK_DAY_SECONDS;
+    ctx.fillStyle = counts ? CARD_GREEN : future ? "transparent" : palette.track;
     ctx.beginPath();
     ctx.roundRect(x, y, cell, cell, 6);
     ctx.fill();
     ctx.strokeStyle = future ? palette.grid : palette.border;
     ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = level >= 0 ? CARD_GREEN_INK : future ? palette.muted : palette.ink;
+    ctx.fillStyle = counts ? CARD_GREEN_INK : future ? palette.muted : palette.ink;
     ctx.font = `600 13px ${CARD_MONO}`;
     ctx.fillText(String(index + 1), x + 8, y + 7);
   });
 
-  drawCardTiles(ctx, top + panelH + 18, recap.session_count, recap.longest_stretch_seconds, streakAsOf(recap.end));
+  drawCardTiles(ctx, top + panelH + 18, recap.session_count, recap.longest_stretch_seconds, bestStreakIn(recap.days.map((day) => day.focus_seconds)));
   return canvas;
 }
 
