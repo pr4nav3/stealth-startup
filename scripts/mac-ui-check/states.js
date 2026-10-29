@@ -13,6 +13,8 @@ const STATES = [
   ["home-empty", M + "?empty=1", null],
   ["home-first", M + "?first=1", null],
   ["onboarding", M + "?empty=1", (d) => click(d, '[data-action="onboard-show"]')],
+  ["first-run-list", M + "?empty=1", async (d) => { click(d, '[data-action="onboard-show"]'); await sleep(300); click(d, '[data-action="first-run-next"]'); await sleep(300); }],
+  ["first-run-list-mac", M + "?empty=1&mac=1", async (d) => { click(d, '[data-action="onboard-show"]'); await sleep(300); click(d, '[data-action="first-run-next"]'); await sleep(300); click(d, '[data-action="first-run-next"]'); await sleep(300); }],
   ["preflight", M, (d) => click(d, '[data-action="open-preflight"]')],
   ["preflight-open-blocks", M, async (d) => { click(d, '[data-action="open-preflight"]'); await sleep(300); d.querySelectorAll(".preflight-panel details, .preflight-panel summary").forEach((e) => { if (e.tagName === "DETAILS") e.open = true; }); }],
   ["live", M + "?live=1", null],
@@ -69,7 +71,7 @@ for (const [name, url, setup, w, h] of STATES) {
     if (setup) await setup(d);
     await sleep(900);
     const sizes = {};
-    for (const sel of [".app-shell", ".home-grid", ".modal-panel", ".preflight-panel", ".state-slab", ".interrupt-alert", ".settings-page", ".voice-page", ".webcam-page", ".history-page", ".report-slab", ".overlay-shell", ".cal-grid", ".quote-card", ".onboard-panel", ".history-item", ".voice-card", ".phrase-panel", ".trend-card"]) {
+    for (const sel of [".app-shell", ".home-grid", ".modal-panel", ".preflight-panel", ".state-slab", ".interrupt-alert", ".settings-page", ".voice-page", ".webcam-page", ".history-page", ".report-slab", ".overlay-shell", ".cal-grid", ".quote-card", ".first-run-panel", ".history-item", ".voice-card", ".phrase-panel", ".trend-card"]) {
       const el = d.querySelector(sel); if (el) { const r = el.getBoundingClientRect(); sizes[sel] = [Math.round(r.width), Math.round(r.height)]; }
     }
     const w2 = frame.contentWindow;

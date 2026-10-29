@@ -224,8 +224,13 @@ The last live run on Windows was 2026-10-18.
       preflight readout is plain text; the rule editor keeps the name on the
       address row
 - [x] Header chip shows today's focused time while idle and opens the Session tab
-- [x] Getting started card: clone a voice, webcam (optional), first session.
-      "Add rules" became a line in the intro (five distractions are preset)
+- [x] First run (2026-10-29), replacing the Getting started checklist: opens on the
+      first launch, and from Home's Getting started line until the first real session.
+      Steps: Accessibility (Mac), pick a voice (the Voice page's cards), the distractions
+      list and webcam switch (Settings' own panel and row), then a practice catch: a real
+      5-minute Strict session, stopped and deleted when done, with no report or closing
+      line (`practice.id` in localStorage cleans up one the app closed on). Later, one at
+      a time on Home: record a voice, turn on the webcam, share your week
 
 ### History (v4 boards, 2026-10-22 to 2026-10-24)
 

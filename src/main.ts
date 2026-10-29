@@ -870,6 +870,28 @@ async function init(): Promise<void> {
     window.addEventListener("focus", () => void refreshCaptureAccess());
     draft.strictness = loadedSettings.default_strictness;
     draft.voiceId = normalizeStoredVoiceId(loadedSettings.voice_profile);
+    // A practice the app closed on: never offered as a report, ended and removed now.
+    const stalePractice = Number(readLocal(PRACTICE_KEY) ?? "0");
+    if (stalePractice) {
+      practiceIds.add(stalePractice);
+      knownHistoryIds.add(stalePractice);
+      void (async () => {
+        try {
+          const now = await invoke<SessionSnapshot>("get_session_snapshot");
+          if (now.current?.id === stalePractice) {
+            practiceQuietUntil = Date.now() + 5000;
+            await invoke("stop_session");
+          }
+        } catch {
+          // Removed below either way.
+        }
+        await discardPractice(stalePractice);
+      })();
+    }
+    // The first launch opens the first run; after that it waits on Home's Getting started line.
+    if (appView === "main" && history.length === 0 && readLocal(FIRST_RUN_KEY) !== "1") {
+      firstRunOpen = true;
+    }
   } catch (error) {
     lastError = errorText(error);
   }
@@ -883,6 +905,7 @@ async function init(): Promise<void> {
     await listen("session-nudge", async () => {
       await refreshSnapshot();
       void playNudge(snapshot?.current ?? null);
+      paintFirstRunLive(snapshot?.current ?? null);
     });
     // These read the fresh snapshot, so they skip the poll's in-flight guard.
     await listen<string>("session-moment", async (event) => {
@@ -1028,8 +1051,22 @@ function applySnapshot(next: SessionSnapshot): boolean {
   if (!next.current) {
     quitConfirmOpen = false;
   }
+  // The practice ended without the first run ending it (End session, or it ran out).
+  if (practice && next.current?.id !== practice.id) {
+    const run = practice;
+    practice = null;
+    practiceQuietUntil = Date.now() + 5000;
+    if (run.caught) {
+      firstRunStep = "done";
+    }
+    void discardPractice(run.id);
+  }
   const newest = noteNewHistory(history);
   if (!newest || !historyHydrated) {
+    return false;
+  }
+  if (practiceIds.has(newest)) {
+    knownHistoryIds.add(newest);
     return false;
   }
   if (appView !== "main" || next.current) {
@@ -1164,9 +1201,11 @@ function closeTopLayer(): void {
     paintSessionRulesLayer();
     return;
   }
-  if (onboardingOpen) {
-    onboardingOpen = false;
-    render();
+  // Escape skips the first run, but never walks out on a practice that is running.
+  if (firstRunOpen) {
+    if (!practice) {
+      closeFirstRun();
+    }
     return;
   }
   if (preflightOpen) {
@@ -1216,6 +1255,7 @@ function closeTopLayer(): void {
 
 function editorIsOpen(): boolean {
   return (
+    firstRunOpen ||
     preflightOpen ||
     sessionRulesOpen ||
     ruleEditor !== null ||
@@ -1299,8 +1339,8 @@ function viewKey(): string {
     lastError,
     voiceError,
     history.length,
-    // The Getting started card ticks itself off from rules, voice and settings.
-    onboardingSteps().map((step) => (step.done ? "1" : "0")).join("") + (onboardingOpen ? "o" : ""),
+    // Home's Getting started line and tips follow history, permissions and settings.
+    `${onboardingVisible()}${homeTip()?.id ?? ""}${firstRunOpen ? currentFirstRunStep() : ""}${practice ? `${practice.id}${practice.caught}` : ""}`,
     historyWeekStart,
     historyWeek?.sessions.length ?? "",
     sessionReport?.id ?? "",
@@ -1314,6 +1354,7 @@ function paintLive(current: CurrentSession | null): void {
   if (!current) {
     return;
   }
+  paintFirstRunLive(current);
   const chip = document.querySelector<HTMLElement>(".status-chip");
   if (chip) {
     chip.textContent = statusChip(current);
@@ -1431,6 +1472,7 @@ function render(): void {
       ${activeTab === "session" ? renderSession(current) : ""}
       ${activeTab === "settings" ? renderSettings() : ""}
       ${activeTab === "history" ? renderHistory() : ""}
+      <div id="first-run-layer" class="slot">${renderFirstRun()}</div>
       <div id="voice-layer">${renderVoiceDialogs()}</div>
       <div id="modal-layer" class="slot">${renderModalLayer()}</div>
     </main>
@@ -1476,7 +1518,7 @@ function renderSession(current: CurrentSession | null): string {
             ${renderCalendar()}
           </article>
           <div class="home-side">
-            ${onboardingVisible() ? renderOnboardingLine() : ""}
+            ${onboardingVisible() ? renderOnboardingLine() : renderHomeTip()}
             <article class="panel quote-card">
               <p class="eyebrow">Daily note · ${escapeHtml(note.date)}</p>
               <blockquote>“${escapeHtml(note.text)}”</blockquote>
@@ -1487,7 +1529,6 @@ function renderSession(current: CurrentSession | null): string {
         </div>
         ${renderStartAction()}
       </section>
-      ${onboardingOpen && onboardingVisible() ? renderOnboardingModal() : ""}
       <div id="preflight-layer">${preflightOpen ? renderPreflightModal() : ""}</div>
     `;
   }
@@ -2153,8 +2194,25 @@ function renderOverlayProgress(current: CurrentSession): string {
   `;
 }
 
-/** The Getting started steps, open as a popup over Home. */
-let onboardingOpen = false;
+/**
+ * The first run: a short, hands-on start built from the app's own pieces (the voice cards, the
+ * distraction list and the webcam switch exactly as Settings shows them), so what is learned
+ * here is what the user finds later. It opens by itself on the first launch, and from Home's
+ * Getting started line until the first real session. The practice step runs a real Strict
+ * session, so the card and the voice are the real ones; it is deleted the moment it is done.
+ */
+type FirstRunStep = "access" | "voice" | "list" | "catch" | "done";
+let firstRunOpen = false;
+/** Null: the first step there is (Accessibility on a Mac, once the platform is known). */
+let firstRunStep: FirstRunStep | null = null;
+/** The practice session while it runs; `caught` once its first nudge came. */
+let practice: { id: number; caught: boolean } | null = null;
+/** Practice sessions on their way out of History: they never open a report. */
+const practiceIds = new Set<number>();
+/** The closing line of a practice session stays quiet; the session-end event can come late. */
+let practiceQuietUntil = 0;
+const FIRST_RUN_KEY = "firstRun.done";
+const PRACTICE_KEY = "practice.id";
 
 async function refreshCaptureAccess(): Promise<void> {
   try {
@@ -2169,109 +2227,321 @@ async function refreshCaptureAccess(): Promise<void> {
   }
 }
 
-interface OnboardingStep {
-  id: string;
-  title: string;
-  copy: string;
-  done: boolean;
-  label: string;
-  optional?: boolean;
+/** macOS reads browser addresses through Accessibility; without it every site is Other websites. */
+function accessibilityMissing(): boolean {
+  return captureAccess?.platform === "macos" && captureAccess.permissions.accessibility === "missing";
 }
 
-/** What a new user has to set up, each read from real state so it ticks itself off. */
-function onboardingSteps(): OnboardingStep[] {
-  // macOS reads window titles and browser addresses through Accessibility; without it every
-  // browser counts as Other websites. Windows needs nothing.
-  const accessibility =
-    captureAccess?.platform === "macos"
-      ? [
-          {
-            id: "accessibility",
-            title: "Allow Accessibility",
-            copy: "macOS needs it to tell websites apart. Only the address is read, never the page.",
-            done: captureAccess.permissions.accessibility !== "missing",
-            label: "Open settings",
-          },
-        ]
-      : [];
-  return [
-    ...accessibility,
-    {
-      id: "voice",
-      title: "Clone a voice",
-      copy: "Record 20 to 30 seconds of anyone, and that's who nudges you back. Derek and Elise are ready if you'd rather not.",
-      optional: true,
-      done: (voiceBackend?.profiles ?? []).some(
-        (profile) => !(STARTER_PROFILE_IDS as readonly string[]).includes(profile.profile_id) && Boolean(profile.reference_path),
-      ),
-      label: "Record",
-    },
-    {
-      id: "webcam",
-      title: "Turn on the webcam",
-      copy: "Catches a phone in your hand. Off until you say so.",
-      done: settings.webcam_enabled,
-      label: "Open",
-      optional: true,
-    },
-    {
-      id: "session",
-      title: "Run a first session",
-      copy: "Twenty-five minutes shows how it works and starts your streak.",
-      done: history.length > 0,
-      label: "Start 25 min",
-    },
-  ];
+function firstRunSteps(): FirstRunStep[] {
+  const steps: FirstRunStep[] = ["voice", "list", "catch", "done"];
+  return captureAccess?.platform === "macos" ? ["access", ...steps] : steps;
 }
 
-/** Shown until the required steps are done. The line stays on Home; the steps open as a popup. */
+function currentFirstRunStep(): FirstRunStep {
+  const steps = firstRunSteps();
+  return firstRunStep && steps.includes(firstRunStep) ? firstRunStep : steps[0];
+}
+
+/** Home's Getting started line: until the first real session, and while a Mac still needs Accessibility. */
 function onboardingVisible(): boolean {
-  return onboardingSteps().some((step) => !step.done && !step.optional);
+  return history.length === 0 || accessibilityMissing();
 }
 
 function renderOnboardingLine(): string {
-  const required = onboardingSteps().filter((step) => !step.optional);
-  const done = required.filter((step) => step.done).length;
   return `
     <article class="panel onboard-card">
       <div class="onboard-head">
-        <p class="eyebrow">Getting started · ${done} of ${required.length} done</p>
+        <p class="eyebrow">Getting started</p>
         <button class="small-button" type="button" data-action="onboard-show">Show</button>
       </div>
     </article>
   `;
 }
 
-function renderOnboardingModal(): string {
+function openFirstRun(): void {
+  firstRunOpen = true;
+  firstRunStep = null;
+  ruleEditor = null;
+  paintFirstRun();
+}
+
+/** Closed for good on this computer: it no longer opens by itself (Home's line still can). */
+function closeFirstRun(): void {
+  firstRunOpen = false;
+  firstRunStep = null;
+  ruleEditor = null;
+  writeLocal(FIRST_RUN_KEY, "1");
+  render();
+}
+
+function moveFirstRun(by: number): void {
+  const steps = firstRunSteps();
+  const next = steps[Math.min(steps.length - 1, Math.max(0, steps.indexOf(currentFirstRunStep()) + by))];
+  firstRunStep = next;
+  ruleEditor = null;
+  if (next === "done") {
+    writeLocal(FIRST_RUN_KEY, "1");
+  }
+  paintFirstRun();
+}
+
+function paintFirstRun(): void {
+  paintSlot("first-run-layer", renderFirstRun());
+}
+
+/** The name the practice asks the user to open: the newest distraction, as its chip shows it. */
+function practiceTarget(): string | null {
+  const rule = permanentRules[0];
+  return rule ? ruleName(rule) : null;
+}
+
+function practiceVoiceName(): string | null {
+  return draft.voiceId === "none" ? null : selectedVoice().name;
+}
+
+function renderFirstRun(): string {
+  if (!firstRunOpen || appView !== "main") {
+    return "";
+  }
+  const steps = firstRunSteps();
+  const step = currentFirstRunStep();
+  const index = steps.indexOf(step);
+  const counted = steps.length - 1;
+  const titles: Record<FirstRunStep, string> = {
+    access: "Let Supervisor see the address bar",
+    voice: "Who should nudge you?",
+    list: "These count as distractions",
+    catch: "Get caught once",
+    done: "That's Supervisor",
+  };
+  const back = index > 0 && !practice ? `<button type="button" data-action="first-run-back">Back</button>` : "<span></span>";
   return `
     <div class="modal-backdrop" role="presentation">
-      <section class="modal-panel onboard-panel" role="dialog" aria-modal="true" aria-labelledby="onboard-title">
-        <div class="modal-head onboard-head">
+      <section class="modal-panel first-run-panel" role="dialog" aria-modal="true" aria-labelledby="first-run-title">
+        <div class="modal-head first-run-head">
           <div>
-            <p class="eyebrow">Getting started</p>
-            <h2 id="onboard-title">Set up Supervisor</h2>
+            <p class="eyebrow">Getting started${step === "done" ? "" : ` · ${index + 1} of ${counted}`}</p>
+            <h2 id="first-run-title">${titles[step]}</h2>
           </div>
-          <button class="small-button" type="button" data-action="onboard-hide">Close</button>
+          ${practice || step === "done" ? "" : `<button class="small-button" type="button" data-action="first-run-skip">Skip</button>`}
         </div>
-        <p class="onboard-intro">Supervisor watches what's in front of you and nudges you back. Five common distractions are already on the list; everything else counts as work. Nothing leaves this computer.</p>
-        <ol class="onboard-steps">
-          ${onboardingSteps()
-            .map(
-              (step) => `
-                <li class="onboard-step ${step.done ? "is-done" : ""}">
-                  <i class="onboard-dot" aria-hidden="true"></i>
-                  <div>
-                    <strong>${escapeHtml(step.title)}${step.optional ? ` <span class="onboard-optional">optional</span>` : ""}</strong>
-                    <span>${escapeHtml(step.copy)}</span>
-                  </div>
-                  ${step.done ? `<span class="onboard-done">Done</span>` : `<button class="small-button" type="button" data-action="onboard-${step.id}">${escapeHtml(step.label)}</button>`}
-                </li>
-              `,
-            )
-            .join("")}
-        </ol>
+        ${renderFirstRunBody(step, back)}
       </section>
     </div>
+  `;
+}
+
+function renderFirstRunBody(step: FirstRunStep, back: string): string {
+  if (step === "access") {
+    const missing = accessibilityMissing();
+    return `
+      <p class="first-run-copy">That's how it tells YouTube from Google Docs. Only the address is read, never the page, and nothing leaves this Mac.</p>
+      <section class="panel first-run-block">
+        <div class="setting-row">
+          <span>Accessibility</span>
+          ${missing ? `<button type="button" data-action="onboard-accessibility">Open System Settings</button>` : `<span class="first-run-ok">Allowed</span>`}
+        </div>
+      </section>
+      <p class="first-run-where">${missing ? "Turn on Supervisor in the list, then come back here. Without it, every website counts as Other websites." : "macOS remembers this. You won't be asked again."}</p>
+      <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-next">Next</button></div>
+    `;
+  }
+  if (step === "voice") {
+    return `
+      <p class="first-run-copy">Press play to hear each one. Pick one, and it speaks up when a distraction stays open.</p>
+      <div class="voice-list first-run-voices">${availableVoices().map((voice) => renderVoiceCard(voice, false)).join("")}</div>
+      <p class="first-run-where">Change it anytime in Settings › Voice. You can record anyone's voice there too.</p>
+      <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-next">Next</button></div>
+    `;
+  }
+  if (step === "list") {
+    return `
+      <section class="panel settings-rules-panel first-run-block">
+        ${renderRuleManager("Distractions")}
+      </section>
+      <section class="panel first-run-block">
+        <p class="eyebrow">Webcam</p>
+        <label class="setting-row toggle-row">
+          <span>Turn on webcam monitoring</span>
+          <span class="toggle-field">
+            <input id="first-run-webcam" class="toggle-input" type="checkbox" ${settings.webcam_enabled ? "checked" : ""} aria-label="Turn on webcam monitoring" />
+            <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+          </span>
+        </label>
+        <span class="explain">Vision models spot a phone in your hand. They run only on this computer.</span>
+      </section>
+      <p class="first-run-where">Both are in Settings: Distractions, and Webcam.</p>
+      <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-next">Next</button></div>
+    `;
+  }
+  if (step === "catch") {
+    const target = practiceTarget();
+    const voice = practiceVoiceName();
+    const speaks = voice ? `the card pops up and ${escapeHtml(voice)} speaks` : "the card pops up";
+    if (!target) {
+      return `
+        <p class="first-run-copy">There's nothing on your distractions list to practise with. Go back and add one.</p>
+        <div class="first-run-actions">${back}<span></span></div>
+      `;
+    }
+    if (!practice) {
+      return `
+        <p class="first-run-copy">Start a practice, then open <b>${escapeHtml(target)}</b> and leave it in front. In about 30 seconds ${speaks}. The practice isn't saved.</p>
+        <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-practice">Start practice</button></div>
+      `;
+    }
+    if (!practice.caught) {
+      return `
+        <p class="first-run-copy">Now open <b>${escapeHtml(target)}</b> and leave it there. Supervisor is watching.</p>
+        <p class="first-run-live" id="first-run-live">${escapeHtml(firstRunLiveText(snapshot?.current ?? null))}</p>
+        <div class="first-run-actions"><button type="button" data-action="first-run-end-practice">End practice</button><span></span></div>
+      `;
+    }
+    return `
+      <p class="first-run-copy">That's the card you'll get whenever a distraction stays open, whatever's in front. Back to work closes it. Allow once lets it be for that session.</p>
+      <div class="first-run-actions"><span></span><button class="primary" type="button" data-action="first-run-end-practice">Next</button></div>
+    `;
+  }
+  const voice = practiceVoiceName();
+  return `
+    <p class="first-run-copy">Leave a distraction open and ${voice ? `${escapeHtml(voice)} speaks up` : "the card pops up"}. Your first 25 minutes starts your streak.</p>
+    <p class="first-run-where">Everything you set up is in Settings. Your sessions land in History.</p>
+    <div class="first-run-actions"><button type="button" data-action="first-run-close">Later</button><button class="primary" type="button" data-action="onboard-session">Start 25 minutes</button></div>
+  `;
+}
+
+/** What the practice is watching right now, in the words a report would use. */
+function firstRunLiveText(current: CurrentSession | null): string {
+  const focus = current?.focus;
+  if (!focus) {
+    return "Watching · nothing in front yet";
+  }
+  return `Watching · ${focus.distracting ? "distraction" : "in front"}: ${focus.activity.label}`;
+}
+
+/** The practice's line and its catch, painted in place by the poll. */
+function paintFirstRunLive(current: CurrentSession | null): void {
+  if (!practice || !current || current.id !== practice.id) {
+    return;
+  }
+  if (!practice.caught && current.metrics.nudges > 0) {
+    practice.caught = true;
+    paintFirstRun();
+    return;
+  }
+  const line = document.getElementById("first-run-live");
+  if (line) {
+    line.textContent = firstRunLiveText(current);
+  }
+}
+
+/** A real session on the Strict setting, so the first nudge comes in about 30 seconds. */
+async function startPractice(): Promise<void> {
+  const target = practiceTarget();
+  if (!target || snapshot?.current) {
+    return;
+  }
+  ruleEditor = null;
+  const started = await invokeSnapshot("start_session", {
+    input: { goal: `Practice: open ${target}`, duration_minutes: 5, strictness: "strict", exceptions: [], pomodoro: null },
+  });
+  const current = snapshot?.current;
+  if (!started || !current) {
+    paintFirstRun();
+    return;
+  }
+  practice = { id: current.id, caught: false };
+  writeLocal(PRACTICE_KEY, String(current.id));
+  activeTab = "session";
+  render();
+}
+
+/** Stops the practice and removes it from History; once it caught something, on to the end. */
+async function endPractice(): Promise<void> {
+  const run = practice;
+  if (!run) {
+    return;
+  }
+  practice = null;
+  practiceIds.add(run.id);
+  practiceQuietUntil = Date.now() + 5000;
+  if (run.caught) {
+    firstRunStep = "done";
+    writeLocal(FIRST_RUN_KEY, "1");
+  }
+  if (snapshot?.current?.id === run.id) {
+    await invokeSnapshot("stop_session", undefined, false);
+  }
+  await discardPractice(run.id);
+}
+
+async function discardPractice(id: number): Promise<void> {
+  practiceIds.add(id);
+  knownHistoryIds.add(id);
+  if (id > 0) {
+    try {
+      await invoke("delete_session", { id });
+    } catch {
+      // Already gone, or never saved.
+    }
+  }
+  try {
+    localStorage.removeItem(PRACTICE_KEY);
+  } catch {
+    // Nothing to clear.
+  }
+  try {
+    snapshot = await invoke<SessionSnapshot>("get_session_snapshot");
+    settings = snapshot.settings;
+    history = snapshot.history;
+    await refreshTrends(false);
+  } catch (error) {
+    lastError = errorText(error);
+  }
+  render();
+}
+
+/** Later, one at a time on Home: the next thing worth knowing, once it's worth knowing. */
+interface HomeTip {
+  id: string;
+  text: string;
+  label: string;
+  action: string;
+}
+
+function homeTip(): HomeTip | null {
+  const hidden = (id: string) => readLocal(`tip.${id}`) === "1";
+  const recorded = (voiceBackend?.profiles ?? []).some(
+    (profile) => !(STARTER_PROFILE_IDS as readonly string[]).includes(profile.profile_id) && Boolean(profile.reference_path),
+  );
+  if (history.length >= 1 && !recorded && !hidden("voice")) {
+    return { id: "voice", text: "Record a voice you know", label: "Open", action: "tip-voice" };
+  }
+  if (history.length >= 3 && !settings.webcam_enabled && !hidden("webcam")) {
+    return { id: "webcam", text: "Catch your phone too", label: "Turn on", action: "tip-webcam" };
+  }
+  const oldest = history[history.length - 1];
+  if (oldest && Date.now() - new Date(oldest.started_at).getTime() >= 6 * 86_400_000 && !hidden("share")) {
+    return { id: "share", text: "Share your week", label: "Open", action: "tip-share" };
+  }
+  return null;
+}
+
+function renderHomeTip(): string {
+  const tip = homeTip();
+  if (!tip) {
+    return "";
+  }
+  return `
+    <article class="panel onboard-card">
+      <div class="onboard-head">
+        <p class="eyebrow">${escapeHtml(tip.text)}</p>
+        <div class="home-tip-actions">
+          <button class="small-button" type="button" data-action="${tip.action}">${escapeHtml(tip.label)}</button>
+          <button class="small-button" type="button" data-action="tip-hide" data-tip="${tip.id}">Hide</button>
+        </div>
+      </div>
+    </article>
   `;
 }
 
@@ -2689,7 +2959,7 @@ function renderVoiceSettings(): string {
             <button class="new-voice-button" type="button" data-action="record-voice" ${creating ? "disabled" : ""}>+ New voice</button>
           </div>
           <div class="voice-list">
-            ${voices.map(renderVoiceCard).join("")}
+            ${voices.map((voice) => renderVoiceCard(voice)).join("")}
           </div>
         </section>
 
@@ -2771,7 +3041,8 @@ function fitVoiceCardNames(): void {
   });
 }
 
-function renderVoiceCard(voice: VoiceOption): string {
+/** `editable`: the ⋯ that opens the voice's settings, which live on the Voice page only. */
+function renderVoiceCard(voice: VoiceOption, editable = true): string {
   const selected = draft.voiceId === voice.id;
   const profile = voice.profile;
   const needsGeneration = voice.source === "custom" && Boolean(profile?.reference_retained) && !voice.selectable;
@@ -2801,7 +3072,7 @@ function renderVoiceCard(voice: VoiceOption): string {
         <button class="voice-play" type="button" data-action="play-clip" data-clip-path="${attr(preview?.path ?? "")}" ${preview ? "" : "disabled"} aria-label="Play ${attr(voice.name)}'s recording">
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.2v9.6L11 6z" fill="currentColor"/></svg>${MINI_ORB}
         </button>
-        <button class="voice-card-more" type="button" data-action="voice-info" data-voice-id="${attr(voice.id)}" aria-label="Edit ${attr(voice.name)}" aria-haspopup="dialog">⋯</button>
+        ${editable ? `<button class="voice-card-more" type="button" data-action="voice-info" data-voice-id="${attr(voice.id)}" aria-label="Edit ${attr(voice.name)}" aria-haspopup="dialog">⋯</button>` : ""}
       </div>
     </article>
   `;
@@ -5273,8 +5544,8 @@ function bindEvents(root: ParentNode = document): void {
     void updateStatusWindowEnabled((event.target as HTMLInputElement).checked);
   });
 
-  root.querySelector("#webcam-phone-use")?.addEventListener("change", (event) => {
-    void setWebcamEnabled((event.target as HTMLInputElement).checked);
+  root.querySelectorAll<HTMLInputElement>("#webcam-phone-use, #first-run-webcam").forEach((box) => {
+    box.addEventListener("change", () => void setWebcamEnabled(box.checked));
   });
 
   root.querySelector("#webcam-gpu")?.addEventListener("change", (event) => {
@@ -5439,7 +5710,9 @@ function paintWeekPicker(): void {
 
 /** The rule editor shows on the start screen, in the session's distractions box, or in Settings. */
 function paintRuleEditorHost(): void {
-  if (preflightOpen) {
+  if (firstRunOpen) {
+    paintFirstRun();
+  } else if (preflightOpen) {
     paintPreflightLayer();
   } else if (sessionRulesOpen) {
     paintSessionRulesLayer();
@@ -5589,9 +5862,55 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "onboard-hide" || action === "onboard-show") {
-    onboardingOpen = action === "onboard-show";
+  if (action === "onboard-show") {
+    openFirstRun();
+    return;
+  }
+
+  if (action === "first-run-next" || action === "first-run-back") {
+    moveFirstRun(action === "first-run-next" ? 1 : -1);
+    return;
+  }
+
+  if (action === "first-run-skip" || action === "first-run-close") {
+    closeFirstRun();
+    return;
+  }
+
+  if (action === "first-run-practice") {
+    await startPractice();
+    return;
+  }
+
+  if (action === "first-run-end-practice") {
+    await endPractice();
+    paintFirstRun();
+    return;
+  }
+
+  if (action === "tip-hide") {
+    writeLocal(`tip.${source?.dataset.tip ?? ""}`, "1");
     render();
+    return;
+  }
+
+  if (action === "tip-voice") {
+    activeTab = "settings";
+    await runAction("open-voice-settings");
+    return;
+  }
+
+  if (action === "tip-webcam") {
+    await setWebcamEnabled(true);
+    writeLocal("tip.webcam", "1");
+    showFeedback("Webcam on. Change it in Settings › Webcam");
+    render();
+    return;
+  }
+
+  if (action === "tip-share") {
+    writeLocal("tip.share", "1");
+    document.querySelector<HTMLButtonElement>('nav.tabs [data-tab="history"]')?.click();
     return;
   }
 
@@ -5642,15 +5961,10 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
-  if (action === "onboard-voice" || action === "onboard-webcam") {
-    onboardingOpen = false;
-    activeTab = "settings";
-    await runAction(action === "onboard-voice" ? "open-voice-settings" : "open-webcam-settings");
-    return;
-  }
-
   if (action === "onboard-session") {
-    onboardingOpen = false;
+    firstRunOpen = false;
+    firstRunStep = null;
+    writeLocal(FIRST_RUN_KEY, "1");
     // The streak's daily minimum, so the first session also starts the streak.
     draft.duration_minutes = STREAK_DAY_SECONDS / 60;
     await runAction("open-preflight");
@@ -7806,6 +8120,9 @@ async function playMoment(phase: string): Promise<void> {
 
 /** A session ended: a closing line, taking turns by the session's id (newest in history). */
 async function playSessionOver(): Promise<void> {
+  if (Date.now() < practiceQuietUntil) {
+    return;
+  }
   if ((await playMomentLine("sessionover", history[0]?.id ?? 0)) && lastNudgeVoice?.line) {
     sessionOver = { voice: { ...lastNudgeVoice, speaking: !nudgeAudio?.paused }, session: history[0] ?? null };
     paintModalLayer();

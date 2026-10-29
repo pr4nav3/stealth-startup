@@ -1042,92 +1042,96 @@ h1 {
   margin: 0;
 }
 
-.onboard-panel {
-  width: min(560px, 100%);
+/* The first run: one step at a time, made of the same panels, cards and rows as Settings. */
+.modal-panel.first-run-panel {
+  display: grid;
+  gap: 14px;
+  width: min(640px, 100%);
   padding: 22px;
 }
 
-.onboard-panel .modal-head {
-  margin-bottom: 8px;
+.first-run-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 0;
 }
 
-.onboard-panel .modal-head h2 {
+.first-run-head h2 {
   margin-top: 6px;
+}
+
+.first-run-copy {
+  margin: 0;
+  font-size: var(--sv-type-2);
+  line-height: 1.4;
+}
+
+.first-run-where {
+  margin: 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-3);
+}
+
+.first-run-block {
+  display: grid;
+  gap: 6px;
+  padding: 12px 16px;
+}
+
+.first-run-block .eyebrow {
+  margin: 0;
+}
+
+.first-run-panel .setting-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 44px;
+}
+
+.first-run-ok,
+.first-run-live {
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.first-run-live {
+  margin: 0;
+}
+
+.first-run-voices {
+  padding-bottom: 6px;
+}
+
+.first-run-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.first-run-actions .primary {
+  min-width: 150px;
+}
+
+/* A tip on Home: one line and its buttons, in Getting started's place and shape. */
+.home-tip-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.home-tip-actions .small-button {
+  min-height: 26px;
+  padding: 0 8px;
 }
 
 .onboard-head .small-button {
   min-height: 26px;
   padding: 0 8px;
-}
-
-.onboard-intro {
-  margin: 6px 0 0;
-  font-size: var(--sv-type-3);
-}
-
-.onboard-steps {
-  display: grid;
-  gap: 8px;
-  margin: 12px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.onboard-step {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-}
-
-.onboard-step > div {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.onboard-step strong {
-  font-size: var(--sv-type-3);
-  font-weight: 650;
-}
-
-.onboard-step span {
-  color: var(--sv-muted);
-  font-size: var(--sv-type-4);
-}
-
-.onboard-step.is-done strong,
-.onboard-step.is-done span {
-  color: var(--sv-muted);
-}
-
-.onboard-dot {
-  width: 11px;
-  height: 11px;
-  border: 1px solid var(--sv-border);
-  border-radius: 3px;
-}
-
-.onboard-step.is-done .onboard-dot {
-  background: var(--acid);
-}
-
-.onboard-optional,
-.onboard-done {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.onboard-optional {
-  margin-left: 4px;
-  font-weight: 500;
-  color: var(--sv-muted);
-}
-
-.onboard-done {
-  color: var(--sv-muted);
 }
 
 .status-chip,
@@ -1200,7 +1204,8 @@ button[data-action="cancel-delete-voice"] {
   min-height: 46px;
 }
 
-.webcam-side .setting-row > span:first-child {
+.webcam-side .setting-row > span:first-child,
+.first-run-panel .setting-row > span:first-child {
   font-family: var(--font-sans);
   font-size: var(--sv-type-2);
   font-weight: 650;
