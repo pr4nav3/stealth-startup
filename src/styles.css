@@ -1998,7 +1998,7 @@ dt {
   display: flex;
   flex-wrap: wrap;
   grid-column: 1;
-  align-items: baseline;
+  align-items: center;
   align-self: center;
   gap: 8px;
   min-width: 0;
@@ -2012,11 +2012,13 @@ dt {
   align-self: center;
 }
 
-/* Save sits back until the line says there is something to save; Enter still tries. */
-.rule-editor-actions .primary.is-quiet {
-  background: var(--panel);
-  color: var(--sv-muted);
-  box-shadow: none;
+/* Save fades, like a disabled button anywhere in the app, until the line says there is
+   something to save. It stays a live button, so Enter still tries and says why not. */
+.rule-editor-actions .primary.is-quiet,
+.rule-editor-actions .primary.is-quiet:hover,
+.rule-editor-actions .primary.is-quiet:active {
+  opacity: 0.45;
+  transform: none;
 }
 
 .rule-editor-ask {
@@ -2024,12 +2026,18 @@ dt {
   font-weight: 650;
 }
 
+/* A small yellow tag before the name: what was recognised. The name beside it is the larger. */
 .rule-kind {
-  color: var(--sv-muted);
+  flex: none;
+  border: var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  background: var(--warning);
+  color: var(--sv-colored-ink);
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
   font-weight: 500;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   line-height: 1;
   text-transform: uppercase;
 }
@@ -2038,6 +2046,7 @@ dt {
   min-width: 0;
   overflow-wrap: anywhere;
   font-family: var(--font-mono);
+  font-size: var(--sv-type-2);
   font-weight: 600;
 }
 

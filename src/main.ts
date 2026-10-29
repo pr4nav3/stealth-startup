@@ -2632,8 +2632,8 @@ function renderRulePreview(editor: RuleEditor): string {
   const site = preview.target === "website";
   const value = site ? preview.value : appNames[preview.value.toLowerCase()] ?? preview.value;
   return `
+    <span class="rule-kind">${site ? "Website" : "App"}</span>
     <strong class="rule-preview-value">${escapeHtml(value)}</strong>
-    <span class="rule-kind">${site ? "The website" : "The app"}</span>
   `;
 }
 
