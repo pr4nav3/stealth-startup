@@ -2181,7 +2181,7 @@ function onboardingSteps(): OnboardingStep[] {
     {
       id: "voice",
       title: "Clone a voice",
-      copy: "Record twenty seconds of anyone, and that's who nudges you back. Derek and Elise are ready if you'd rather not.",
+      copy: "Record 20 to 30 seconds of anyone, and that's who nudges you back. Derek and Elise are ready if you'd rather not.",
       optional: true,
       done: (voiceBackend?.profiles ?? []).some(
         (profile) => !(STARTER_PROFILE_IDS as readonly string[]).includes(profile.profile_id) && Boolean(profile.reference_path),
@@ -2199,9 +2199,9 @@ function onboardingSteps(): OnboardingStep[] {
     {
       id: "session",
       title: "Run a first session",
-      copy: "Fifteen minutes is enough to see how it works.",
+      copy: "Twenty-five minutes shows how it works and starts your streak.",
       done: history.length > 0,
-      label: "Start 15 min",
+      label: "Start 25 min",
     },
   ];
 }
@@ -2480,7 +2480,7 @@ function renderWebcamSettings(): string {
           <section class="panel webcam-test-panel">
             <p class="eyebrow">Camera test</p>
             ${renderWebcamMetrics(frame)}
-            <p class="quiet">No images saved. Vision models run locally while a session runs. A phone in view counts as a distraction and gets a nudge; leaving your desk counts as Away.</p>
+            <p class="quiet">No images saved. Vision models run only on this computer. A phone in view counts as a distraction and gets a nudge; leaving your desk counts as Away.</p>
           </section>
         </div>
       </section>
@@ -5493,7 +5493,8 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "onboard-session") {
     onboardingOpen = false;
-    draft.duration_minutes = 15;
+    // The streak's daily minimum, so the first session also starts the streak.
+    draft.duration_minutes = STREAK_DAY_SECONDS / 60;
     await runAction("open-preflight");
     // A first session should show the rules it runs on.
     preflightBlocksOpen = true;
