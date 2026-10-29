@@ -74,6 +74,35 @@ struct AppState {
     webcam: webcam::WebcamPreview,
     started_at: SessionClock,
     identity: SupervisorIdentity,
+    /// The tray's pause item, renamed by the ticker to what it would do now.
+    tray_pause: Mutex<Option<MenuItem<tauri::Wry>>>,
+}
+
+/// What the tray's pause item would do for this session.
+fn tray_pause_label(snapshot: &SessionSnapshot) -> String {
+    let Some(current) = snapshot.current.as_ref() else {
+        return "Pause".to_string();
+    };
+    match current.status {
+        session::SessionStatus::Paused => match current.pomodoro.as_ref() {
+            Some(pomodoro) if pomodoro.phase != "work" => format!("Start round {}", pomodoro.round + 1),
+            _ => "Resume".to_string(),
+        },
+        _ => "Pause".to_string(),
+    }
+}
+
+fn set_tray_pause_label(app: &AppHandle, last: &mut String, label: String) {
+    if *last == label {
+        return;
+    }
+    let state = app.state::<AppState>();
+    if let Ok(item) = state.tray_pause.lock() {
+        if let Some(item) = item.as_ref() {
+            let _ = item.set_text(&label);
+        }
+    }
+    *last = label;
 }
 
 #[tauri::command]
@@ -687,6 +716,7 @@ pub fn run() {
                 webcam: webcam::WebcamPreview::default(),
                 started_at: SessionClock::now(),
                 identity: supervisor_identity(),
+                tray_pause: Mutex::new(None),
             });
 
             // A focus tracker works while it is out of sight. Without this, App Nap slows the
@@ -869,9 +899,12 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show_status =
         MenuItem::with_id(app, "show_status", "Show Status Window", true, None::<&str>)?;
     let pin_status = MenuItem::with_id(app, "pin_status", "Pin Status Window", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "pause_resume", "Pause/Resume", true, None::<&str>)?;
-    let snooze = MenuItem::with_id(app, "snooze", "Mute Nudges 5 min", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "Stop Session", true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause_resume", "Pause", true, None::<&str>)?;
+    let snooze = MenuItem::with_id(app, "snooze", "Mute for 5 min", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "End Session", true, None::<&str>)?;
+    if let Ok(mut slot) = app.state::<AppState>().tray_pause.lock() {
+        *slot = Some(pause.clone());
+    }
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -1369,10 +1402,11 @@ fn start_session_ticker(app: AppHandle) {
     let mut nudges_seen = (0, 0);
     let mut moments_seen = (0, 0);
     let mut was_running = false;
+    let mut tray_label = String::new();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
 
-        let (ended_after_tick, should_poll) = {
+        let (ended_after_tick, should_poll, pause_label) = {
             let state = app.state::<AppState>();
             let now = state.started_at.elapsed();
             let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1399,8 +1433,10 @@ fn start_session_ticker(app: AppHandle) {
             (
                 had_current && matches!(snapshot.status, session::SessionStatus::Idle),
                 sessions.should_poll_activity(),
+                tray_pause_label(&snapshot),
             )
         };
+        set_tray_pause_label(&app, &mut tray_label, pause_label);
         if ended_after_tick {
             session_ended(&app);
         }

@@ -1555,7 +1555,7 @@ function liveTimer(current: CurrentSession): { label: string; caption: string; p
   const left = pomodoro.phase_remaining_seconds;
   return {
     label: formatDuration(left),
-    caption: pomodoro.phase === "break_over" ? "Break over" : `Until round ${pomodoro.round + 1}`,
+    caption: pomodoro.phase === "break_over" ? `Until round ${pomodoro.round + 1} starts by itself` : `Until round ${pomodoro.round + 1}`,
     percent: Math.min(100, Math.round(((pomodoro.break_seconds - left) / pomodoro.break_seconds) * 100)),
   };
 }
@@ -1887,7 +1887,7 @@ function renderMomentOverlay(current: CurrentSession): string {
       <main class="overlay-shell overlay-interrupt">
         <section class="state-slab interrupt-alert moment-break-over">
           <h2 class="moment-title">Break over.</h2>
-          ${renderInterruptVoice(momentShownAt)}
+          <p class="moment-goal">Round ${pomodoro.round + 1} starts by itself in a few minutes, or now.</p>
           <div class="moment-gap"></div>
         </section>
         <div class="interrupt-actions moment-actions">
@@ -4648,7 +4648,7 @@ function renderSessionReport(report: SessionReport): string {
       </section>
       <section class="report-stats" aria-label="Session stats">
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds), "How long the session ran. Paused time isn't counted.")}
-        ${reportStat("Focused", `${report.focus_percent}%`, "The share of the session you were on work. Away and asleep time count against it.")}
+        ${reportStat("Focused", `${report.focus_percent}%`, "Of your time at the desk, the share you were on work. Away and asleep time count for neither side.")}
         ${reportStat("Longest stretch", formatMinutes(report.longest_stretch_seconds), "Your longest run of work without a distraction or stepping away.")}
         ${reportStat("Nudges", String(report.nudge_count), "How many times Supervisor spoke up to pull you back.")}
         ${pomodoroStat(report)}
@@ -7601,11 +7601,15 @@ async function playNudge(current: CurrentSession | null): Promise<void> {
   await playLine(selectedNudgeClip(current.metrics.nudges, current.camera.phone));
 }
 
-/** A Pomodoro round ended (Take a break) or its break did (Back to work). Breaks are pauses, so
- *  this plays whatever the session's status. */
+/** A Pomodoro round ended: a round-over line. A break ending plays nothing: the green card and
+ *  its button say it, and the user did nothing to be corrected. Breaks are pauses, so the round
+ *  line plays whatever the session's status. */
 async function playMoment(phase: string): Promise<void> {
+  if (phase === "break_over") {
+    return;
+  }
   const moments = snapshot?.current?.pomodoro?.moments ?? 1;
-  await playMomentLine(phase === "break_over" ? "nudge" : "roundover", moments - 1);
+  await playMomentLine("roundover", moments - 1);
 }
 
 /** A session ended: a closing line, taking turns by the session's id (newest in history). */

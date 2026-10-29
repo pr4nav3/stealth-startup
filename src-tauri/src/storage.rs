@@ -1642,11 +1642,11 @@ impl SessionStorage {
         ) = row;
 
         let duration_seconds = self.session_duration_seconds(id)?;
-        let focus_percent = if duration_seconds == 0 {
-            0
-        } else {
-            rounded_percent(focused_seconds as u64, duration_seconds)
-        };
+        // Of the time at the desk: away and asleep time are neither work nor a distraction.
+        let focus_percent = rounded_percent(
+            focused_seconds as u64,
+            duration_seconds.saturating_sub(idle_seconds.max(0) as u64),
+        );
 
         let spans = self.load_spans_for_session(id)?;
         let apps = apps_from_spans(&spans);
@@ -1686,7 +1686,7 @@ impl SessionStorage {
         let mut stmt = self
             .conn
             .prepare(&format!(
-                "SELECT started_at, focused_seconds, {RUN_SECONDS_SQL}
+                "SELECT started_at, focused_seconds, {RUN_SECONDS_SQL} - idle_seconds
                  FROM session
                  WHERE ended_at IS NOT NULL
                    AND substr(started_at, 1, 10) >= ?1
@@ -1712,7 +1712,7 @@ impl SessionStorage {
         let mut daily_stmt = self
             .conn
             .prepare(&format!(
-                "SELECT started_at, focused_seconds, {RUN_SECONDS_SQL}
+                "SELECT started_at, focused_seconds, {RUN_SECONDS_SQL} - idle_seconds
                  FROM session
                  WHERE ended_at IS NOT NULL"
             ))
@@ -2409,6 +2409,7 @@ fn local_day(started_at: &str) -> String {
 }
 
 /// Sums (local day, focused seconds, run seconds) rows into one `DailyFocus` per day, oldest first.
+/// Rows are (day, focused seconds, seconds at the desk): the percent is of time at the desk.
 fn fold_days(rows: Vec<(String, i64, i64)>) -> Vec<DailyFocus> {
     let mut by_day = std::collections::HashMap::<String, (u64, u64, u64)>::new();
     for (day, focus_seconds, run_seconds) in rows {

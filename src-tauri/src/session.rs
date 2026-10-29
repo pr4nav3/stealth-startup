@@ -749,12 +749,17 @@ impl Session {
         let Some(plan) = self.pomodoro.as_mut() else {
             return;
         };
-        if let Some(until) = plan.break_until {
-            if !plan.break_over && now.as_secs() >= until {
-                plan.break_over = true;
-                plan.moments += 1;
-                self.push_event(now, "Break over", "POMODORO");
-            }
+        let Some(until) = plan.break_until else {
+            return;
+        };
+        if !plan.break_over && now.as_secs() >= until {
+            plan.break_over = true;
+            plan.moments += 1;
+            self.push_event(now, "Break over", "POMODORO");
+        } else if plan.break_over && now.as_secs() >= until + plan.break_seconds {
+            // Waited one more break's length with nobody back: the next round starts itself,
+            // as the start screen's "Done around" promised.
+            self.start_next_round(now, storage);
         }
     }
 
@@ -780,7 +785,8 @@ impl Session {
     fn pomodoro_status(&self, now: Duration) -> Option<PomodoroStatus> {
         let plan = self.pomodoro.as_ref()?;
         let (phase, phase_remaining_seconds) = match plan.break_until {
-            Some(_) if plan.break_over => ("break_over", 0),
+            // Break over: how long until the next round starts by itself.
+            Some(until) if plan.break_over => ("break_over", (until + plan.break_seconds).saturating_sub(now.as_secs())),
             Some(until) => ("break", until.saturating_sub(now.as_secs())),
             None => (
                 "work",
@@ -939,7 +945,8 @@ impl Session {
         // A pause is cut out of the session: offsets stop with the timer, nothing is recorded.
         self.close_open_span(now, storage);
         self.camera = Camera::default();
-        self.unmute();
+        // A mute keeps its wall-clock end through the pause; resume picks it back up if any is left.
+        self.engine.set_muted(false);
         self.status = SessionStatus::Paused;
         self.push_event(now, "Session paused", "HOLD");
         self.persist_event(now, "pause", None, storage);
@@ -948,7 +955,11 @@ impl Session {
     fn resume(&mut self, now: Duration, storage: Option<&SessionStorage>) {
         if self.status == SessionStatus::Paused {
             self.finish_timer_hold(now);
-            self.status = SessionStatus::Active;
+            let still_muted = self.snoozed_until_seconds.is_some_and(|until| now.as_secs() < until);
+            if !still_muted {
+                self.snoozed_until_seconds = None;
+            }
+            self.status = if still_muted { SessionStatus::Snoozed } else { SessionStatus::Active };
             self.last_accounted_at = now;
             self.engine = self.fresh_engine();
             self.supervisor_state = None;
@@ -3126,6 +3137,41 @@ mod tests {
             exceptions: None,
             pomodoro: None,
         }
+    }
+
+    #[test]
+    fn a_break_that_runs_out_starts_the_next_round_after_one_more_break_length() {
+        let mut manager = test_manager();
+        let mut plan = input("Lab", Strictness::Normal);
+        plan.pomodoro = Some(PomodoroInput { work_minutes: 5, break_minutes: 1, rounds: 2 });
+        manager.start(plan, seconds(0));
+        for t in 0..=300 {
+            record(&mut manager, sample("Code", "lab.md", 0.0), seconds(t));
+        }
+        // Break from 300 to 360; nobody comes back. At 361 the status says 59 s until round 2.
+        manager.tick(seconds(361));
+        let waiting = manager.snapshot(seconds(361)).current.unwrap().pomodoro.unwrap();
+        assert_eq!((waiting.phase, waiting.phase_remaining_seconds), ("break_over", 59));
+        manager.tick(seconds(419));
+        assert_eq!(manager.snapshot(seconds(419)).status, SessionStatus::Paused);
+        manager.tick(seconds(420));
+        let snapshot = manager.snapshot(seconds(420));
+        assert_eq!(snapshot.status, SessionStatus::Active);
+        assert_eq!(snapshot.current.unwrap().pomodoro.unwrap().round, 2);
+    }
+
+    #[test]
+    fn a_mute_outlives_a_pause() {
+        let mut manager = test_manager();
+        manager.start(input("Mute", Strictness::Normal), seconds(0));
+        manager.snooze(seconds(10), 5 * 60);
+        manager.pause(seconds(20));
+        manager.resume(seconds(80));
+        assert_eq!(manager.snapshot(seconds(80)).status, SessionStatus::Snoozed, "four minutes of mute are left");
+        // Past the mute's end, a resume comes back unmuted.
+        manager.pause(seconds(90));
+        manager.resume(seconds(400));
+        assert_eq!(manager.snapshot(seconds(400)).status, SessionStatus::Active);
     }
 
     #[test]

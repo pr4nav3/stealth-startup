@@ -80,6 +80,10 @@ pass from Windows, and what is left for a release, is
       forgets the review's answers; the review matches rows by kind and key;
       Focused copy says what it measures; the day card's percent rounds like
       the report's; sessions with history off keep their voice
+- [x] Decided the same day: break over plays nothing; a run-out break starts
+      the next round itself after one more break length (the timer counts to
+      it); the tray's pause item follows the session ("Start round 3"); a mute
+      outlives a pause; Focused % is work over time at the desk
 
 ## Pomodoro (2026-10-26, branch `pomodoro`)
 
