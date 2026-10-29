@@ -4018,7 +4018,7 @@ function renderTrendsDoor(weekStart: string, recap: WeekRecap | null, animate: b
   return `
     <section class="panel trend-door ${shown.length ? "has-chart" : ""}" role="button" tabindex="0" data-action="open-trends" aria-label="View trends">
       <div class="trend-door-head">
-        <p class="eyebrow">${shown.length ? `Last ${shown.length === 1 ? "week" : `${shown.length} weeks`}` : "Trends"}</p>
+        <p class="eyebrow">Trends</p>
         <span class="trend-door-go" aria-hidden="true">View trends ›</span>
       </div>
       <div class="trend-door-line">
