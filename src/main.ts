@@ -9825,7 +9825,8 @@ async function copyCard(): Promise<void> {
   await copyCanvas(canvas);
 }
 
-/** A day that counts (25 focused minutes) is green, as on the Session calendar; less is white. */
+/** The week's bars are green for any focused time. On the month's calendar a day is green once
+ *  it counts (25 focused minutes), as on the Session calendar; less is white. */
 const CARD_GREEN = "#a8eb37";
 /** Dark text on the greens, whichever theme the card is drawn in. */
 const CARD_GREEN_INK = "#101010";
@@ -9933,8 +9934,6 @@ function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
     const day = addDaysKey(recap.start, index);
     const future = day > today;
     const on = bucket.focus_seconds > 0;
-    // Green only for a day that counts; a shorter day stands at its height in white.
-    const counts = bucket.focus_seconds >= STREAK_DAY_SECONDS;
     const h = on ? Math.max(14, (barsH * smartBarHeight(bucket.focus_seconds, max, 14)) / 100) : 10;
     const y = barsTop + barsH - h;
     if (on) {
@@ -9943,7 +9942,7 @@ function drawWeekCard(recap: WeekRecap): HTMLCanvasElement | null {
       ctx.roundRect(x + 3, y + 3, colW, h, 6);
       ctx.fill();
     }
-    ctx.fillStyle = counts ? CARD_GREEN : future ? "transparent" : palette.track;
+    ctx.fillStyle = on ? CARD_GREEN : future ? "transparent" : palette.track;
     ctx.beginPath();
     ctx.roundRect(x, y, colW, h, 6);
     ctx.fill();
