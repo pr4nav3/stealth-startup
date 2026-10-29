@@ -4320,8 +4320,9 @@ button.wp-day.is-future:disabled {
 }
 
 /* The card is the door. It lifts under the mouse like the day card and the calendar's days, and
-   presses on click; a quiet "View trends" in its header says what the click does. A hovered
-   bar is its own target, so the card holds still while the bar lifts. */
+   presses on click; a quiet "View trends" in its header says what the click does. The bars are
+   their own targets, so the card holds still over the whole chart: a cursor run across the bars
+   should not shake the card, and a click in a gap opens nothing. */
 .panel.trend-door {
   display: flex;
   flex-direction: column;
@@ -4332,13 +4333,13 @@ button.wp-day.is-future:disabled {
   transition: transform 120ms ease-out, box-shadow 120ms ease-out;
 }
 
-.panel.trend-door:hover:not(:has(.trend-spark-track:hover)),
+.panel.trend-door:hover:not(:has(.trend-spark:hover)),
 .panel.trend-door:focus-visible {
   transform: translate(-2px, -2px);
   box-shadow: 6px 6px 0 var(--sv-shadow-color);
 }
 
-.panel.trend-door:active:not(:has(.trend-spark-track:active)) {
+.panel.trend-door:active:not(:has(.trend-spark:active)) {
   transform: translate(1px, 1px);
   box-shadow: 2px 2px 0 var(--sv-shadow-color);
 }
@@ -4364,7 +4365,7 @@ button.wp-day.is-future:disabled {
   transition: color 120ms ease-out, transform 120ms ease-out;
 }
 
-.panel.trend-door:hover:not(:has(.trend-spark-track:hover)) .trend-door-go,
+.panel.trend-door:hover:not(:has(.trend-spark:hover)) .trend-door-go,
 .panel.trend-door:focus-visible .trend-door-go {
   color: var(--ink);
   transform: translateX(2px);
@@ -4376,6 +4377,7 @@ button.wp-day.is-future:disabled {
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  margin-top: 4px;
 }
 
 .trend-door-line .trend-door-value {

@@ -5149,6 +5149,14 @@ function bindEvents(root: ParentNode = document): void {
   bindPreflight(root);
   bindClipsControls(root);
   bindSessionReview(root);
+  // The chart on the Trends door: a click in a gap between its bars is a miss, not the door.
+  root.querySelectorAll<HTMLElement>(".trend-door .trend-spark").forEach((chart) => {
+    chart.addEventListener("click", (event) => {
+      if (!(event.target as Element).closest("button")) {
+        event.stopPropagation();
+      }
+    });
+  });
   root.querySelectorAll<HTMLButtonElement>("[data-stat-flip]").forEach((button) => {
     button.addEventListener("click", () => {
       const key = button.dataset.statFlip ?? "";
