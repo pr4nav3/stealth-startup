@@ -3951,8 +3951,8 @@ function renderWeekHero(weekStart: string, recap: WeekRecap | null, animate: boo
           ${note ? `<p class="week-hero-note">${escapeHtml(note)}</p>` : ""}
         </div>
         <div class="week-hero-stats">
-          <div class="week-hero-stat" title="${empty ? "Longest unbroken run of work, once there is one" : "Longest unbroken run of work"}"><span class="eyebrow">Longest stretch</span><strong>${escapeHtml(longest)}</strong></div>
-          <div class="week-hero-stat" title="${recovery === "None" ? "No distraction pulled you off work this week, so there was nothing to recover from" : "Typical time back to work after a distraction"}"><span class="eyebrow">Recovery</span><strong>${escapeHtml(recovery)}</strong></div>
+          ${weekStat("Longest stretch", longest, empty ? "Longest run of work in one go, once there is one." : "Longest run of work without a distraction or stepping away.")}
+          ${weekStat("Recovery", recovery, recovery === "None" ? "No distraction this week, so nothing to recover from." : "Typical time back to work after a distraction.")}
         </div>
       </div>
       <div class="recap-bars week-hero-bars ${animate ? "is-animated" : ""}" style="grid-template-columns: repeat(${buckets.length}, minmax(0, 1fr))">
@@ -4685,6 +4685,18 @@ function renderSessionReport(report: SessionReport): string {
 
 /** Stat tiles turned over to their explanation; cleared when another report opens. */
 const flippedStats = new Set<string>();
+
+/** The week card's two tiles turn over like the report's; their keys stay apart from the report's. */
+function weekStat(labelText: string, value: string, help: string): string {
+  const key = `week:${labelText}`;
+  const flipped = flippedStats.has(key);
+  return `
+    <button class="week-hero-stat ${flipped ? "is-flipped" : ""}" type="button" data-stat-flip="${attr(key)}" aria-pressed="${flipped}">
+      <span class="week-hero-stat-face"><span class="eyebrow">${escapeHtml(labelText)}</span><strong>${escapeHtml(value)}</strong></span>
+      <span class="week-hero-stat-face week-hero-stat-back">${escapeHtml(help)}</span>
+    </button>
+  `;
+}
 
 /** A stat tile that turns over on click to say, in plain words, what the number is. */
 /** "4 × 25 min" for a Pomodoro session, from the event its start wrote ("25/5x4"). */
