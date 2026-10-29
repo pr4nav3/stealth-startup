@@ -664,7 +664,6 @@ let settings: SessionSettings = {
 let history: SessionSummary[] = [];
 const EMPTY_RECAP: FocusRecap = { start: "", end: "", focus_seconds: 0, session_count: 0 };
 /** Order of the groups `apps_from_spans` produces; they sum to the scores. */
-const APP_GROUPS = ["Distractions", "Work", "Away"];
 /** How the groups and scores are decided, under every Apps & sites list. */
 /** False until the first get_trends answers: the calendar waits for it before popping in. */
 let trendsLoaded = false;
@@ -4533,31 +4532,7 @@ function renderWeekAppsPane(recap: WeekRecap | null): string {
   if (work.length + distractions.length === 0) {
     return `<section class="panel history-list-panel"><p class="empty">Sessions ran, but Supervisor couldn't name any app or site. Time on the desktop or in a window it couldn't read isn't listed.</p></section>`;
   }
-  const maxApp = Math.max(...[...work, ...distractions].map((app) => app.seconds), 1);
-  const editable = recap.apps.some((item) => editableApp(item));
-  // Each side is a report's group: its eyebrow (with the week's total), then its rows in a box.
-  const column = (title: string, items: RecapApp[], emptyText: string) => {
-    const total = items.reduce((sum, app) => sum + app.seconds, 0);
-    return `
-      <div class="recap-app-block">
-        <p class="eyebrow">${escapeHtml(title)}${items.length ? ` · ${escapeHtml(formatHours(total))}` : ""}</p>
-        ${items.length ? `<div class="recap-app-group">${renderAppRows(items, maxApp)}</div>` : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}
-      </div>
-    `;
-  };
-  const awayLine = away.map((row) => `${row.label} ${formatHours(row.seconds)}`).join(" · ");
-  return `
-    <section class="panel week-apps">
-      <div class="week-app-cols">
-        ${column("Work", work, "Every minute was on something from the distractions list.")}
-        ${column("Distractions", distractions, "Nothing from the distractions list came up this week.")}
-      </div>
-      <div class="week-app-foot">
-        <span>${awayLine ? escapeHtml(awayLine) : "Never away from the keyboard during a session."}</span>
-        ${editable ? `<span>${APP_EDIT_HINT}</span>` : ""}
-      </div>
-    </section>
-  `;
+  return `<section class="panel week-apps">${renderAppColumns(recap.apps, null, "week")}</section>`;
 }
 
 function renderHistoryItem(item: SessionSummary): string {
@@ -4591,40 +4566,46 @@ function appOnList(app: RecapApp): boolean {
   return permanentRules.some((rule) => rule.target === target && rule.value.toLowerCase() === app.key.toLowerCase());
 }
 
-function renderAppGroups(apps: RecapApp[], groups: string[], sessionId: number | null = null): string {
-  const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
-  return `<div class="recap-app-list">
-    ${groups
-      .map((group) => {
-        const items = apps.filter((app) => app.group === group);
-        if (items.length === 0) {
-          return "";
-        }
-        return `
-          <div class="recap-app-block">
-            <p class="eyebrow">${escapeHtml(group)}</p>
-            <div class="recap-app-group">${renderAppRows(items, maxApp, sessionId)}</div>
-          </div>
-        `;
-      })
-      .join("")}
-  </div>`;
+/** Apps & sites, in a report or a week: Work beside Distractions, each an eyebrow with its
+ *  total and its rows in a box; Away time and the hint on a line underneath. */
+function renderAppColumns(apps: RecapApp[], sessionId: number | null, period: "session" | "week"): string {
+  const work = apps.filter((app) => app.group === "Work");
+  const distractions = apps.filter((app) => app.group === "Distractions");
+  const away = apps.filter((app) => app.group === "Away");
+  const column = (title: string, items: RecapApp[], emptyText: string) => {
+    const total = items.reduce((sum, app) => sum + app.seconds, 0);
+    return `
+      <div class="recap-app-block">
+        <p class="eyebrow">${escapeHtml(title)}${items.length ? ` · ${escapeHtml(formatHours(total))}` : ""}</p>
+        ${items.length ? `<div class="recap-app-group">${renderAppRows(items, sessionId)}</div>` : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}
+      </div>
+    `;
+  };
+  const awayLine = away.map((row) => `${row.label} ${formatHours(row.seconds)}`).join(" · ");
+  const editable = apps.some((item) => editableApp(item));
+  return `
+    <div class="week-app-cols">
+      ${column("Work", work, "Every minute was on something from the distractions list.")}
+      ${column("Distractions", distractions, period === "week" ? "Nothing from the distractions list came up this week." : "Nothing from the distractions list came up.")}
+    </div>
+    <div class="week-app-foot">
+      <span>${awayLine ? escapeHtml(awayLine) : period === "week" ? "Never away from the keyboard during a session." : "Never away from the keyboard."}</span>
+      ${editable ? `<span>${APP_EDIT_HINT}</span>` : ""}
+    </div>
+  `;
 }
 
 const APP_EDIT_HINT = "Click a row to rename it or change how it counts. A dot marks your distractions list.";
 
-/** One line per app or site: name, a bar against the busiest row, the time. A real app or site
- *  is a quiet button that opens its popup (see AppEdit); `sessionId` is the report's session,
- *  or null for the week shown. */
-function renderAppRows(items: RecapApp[], maxApp: number, sessionId: number | null = null): string {
+/** One line per app or site: its name and its time. A real app or site is a quiet button that
+ *  opens its popup (see AppEdit); `sessionId` is the report's session, or null for the week. */
+function renderAppRows(items: RecapApp[], sessionId: number | null = null): string {
   return items
     .map((app) => {
-      const width = Math.round(app.seconds / 60) > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
       const tone = app.group === "Distractions" ? "is-distraction" : "";
       const dot = editableApp(app) && appOnList(app) ? `<i class="recap-app-dot" title="On your distractions list"></i>` : "";
       const cells = `
         <span class="recap-app-name">${escapeHtml(app.label)}${dot}</span>
-        <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
         <strong>${escapeHtml(formatHours(app.seconds))}</strong>
       `;
       if (!editableApp(app)) {
@@ -5201,12 +5182,7 @@ function renderSessionReport(report: SessionReport): string {
             <h2>Apps & sites</h2>
           </div>
         </div>
-        ${
-          report.apps.length === 0
-            ? `<p class="empty">No app time recorded.</p>`
-            : renderAppGroups(report.apps, APP_GROUPS, report.id)
-        }
-        ${report.apps.some((app) => editableApp(app)) ? `<p class="recap-apps-hint">${APP_EDIT_HINT}</p>` : ""}
+        ${report.apps.length === 0 ? `<p class="empty">No app time recorded.</p>` : renderAppColumns(report.apps, report.id, "session")}
       </section>
     </section>
   `;

@@ -2137,12 +2137,6 @@ button.recap-app-row:active {
   box-shadow: none;
 }
 
-.recap-apps-hint {
-  margin: 0;
-  color: var(--sv-muted);
-  font-size: var(--sv-type-4);
-}
-
 /* On the distractions list. */
 .recap-app-dot {
   display: inline-block;
@@ -4863,18 +4857,9 @@ button.trend-spark-track:focus-visible .week-tip {
   margin: 0;
 }
 
-/* Two boxes side by side, each as tall as its own rows. In a half-width box the bar shares the
-   room with the name instead of taking its 18rem. */
+/* Two boxes side by side, each as tall as its own rows. */
 .week-app-cols {
   align-items: start;
-}
-
-.week-app-cols .recap-app-row {
-  grid-template-columns: minmax(0, 1fr) minmax(3rem, 1fr) 4.5em;
-}
-
-.recap-app-row.is-distraction .recap-app-track span {
-  background: var(--sv-coral);
 }
 
 .week-app-foot {
@@ -5493,12 +5478,6 @@ button.recap-bar-col:active .recap-bar {
   font-weight: 650;
 }
 
-.recap-app-list {
-  display: grid;
-  gap: 16px;
-  margin-top: 8px;
-}
-
 .recap-app-block {
   display: grid;
   gap: 8px;
@@ -5516,19 +5495,9 @@ button.recap-bar-col:active .recap-bar {
 
 .recap-app-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(4rem, 18rem) 4.5em;
+  grid-template-columns: minmax(0, 1fr) 4.5em;
   gap: 12px;
   align-items: center;
-}
-
-@media (max-width: 680px) {
-  .recap-app-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .recap-app-track {
-    display: none;
-  }
 }
 
 .recap-app-name {
@@ -5538,20 +5507,6 @@ button.recap-bar-col:active .recap-bar {
   -webkit-line-clamp: 2;
   overflow-wrap: anywhere;
   font-size: var(--sv-type-3);
-}
-
-.recap-app-track {
-  display: block;
-  height: 8px;
-  overflow: hidden;
-  border: var(--border);
-  background: color-mix(in srgb, var(--sv-ink) 18%, var(--sv-panel));
-}
-
-.recap-app-track span {
-  display: block;
-  height: 100%;
-  background: var(--sv-ink);
 }
 
 .recap-app-row strong {
