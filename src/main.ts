@@ -8202,11 +8202,14 @@ async function measureVolume(url: string): Promise<number> {
 }
 
 async function playLine(clip: VoiceClipSummary | null): Promise<boolean> {
-  if (!clip) {
+  // Never into a recording: the microphone would take the line into the new voice.
+  if (!clip || recordingState === "recording") {
     return false;
   }
   try {
     nudgeAudio?.pause();
+    // One voice at a time: a recording being listened back to stops for the line.
+    voicePreviewAudio?.pause();
     const url = clipAssetUrl(clip.path);
     const audio = new Audio(url);
     nudgeAudio = audio;
