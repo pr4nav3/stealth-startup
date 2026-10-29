@@ -4,6 +4,8 @@
 }
 
 :root {
+  /* A selected text field goes a shade darker (lighter in dark mode); no outline. */
+  --field-focus-shade: rgba(16, 16, 16, 0.08);
   --sv-canvas: #f4ead7;
   --sv-panel: #fff4cf;
   --sv-panel-alt: #eadfc9;
@@ -51,6 +53,7 @@
 }
 
 [data-theme="dark"] {
+  --field-focus-shade: rgba(255, 248, 233, 0.1);
   --sv-canvas: #40403c;
   --sv-panel: #353530;
   --sv-panel-alt: #32322e;
@@ -80,10 +83,17 @@ body {
   overscroll-behavior: none;
 }
 
-/* One focus ring on every OS: WebKit otherwise draws the blue macOS accent ring on fields. */
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible {
+/* A text field you're typing in is shaded, not outlined: a darker fill (lighter in dark mode)
+   over its own background, plus the caret. One rule on every screen and OS, which also keeps
+   WebKit's blue macOS ring away. Dropdowns, sliders and toggles keep a keyboard ring. */
+input:not([type="checkbox"], [type="radio"], [type="range"]):focus,
+textarea:focus {
+  outline: none;
+  /* !important: many fields set the whole background shorthand, which would wipe this out. */
+  background-image: linear-gradient(var(--field-focus-shade), var(--field-focus-shade)) !important;
+}
+
+select:focus-visible {
   outline: 2px solid var(--sv-ink);
   outline-offset: 2px;
 }
@@ -2087,10 +2097,7 @@ dt {
   font-size: var(--sv-type-3);
 }
 
-.recap-rename input:focus {
-  outline: 2px solid var(--sv-border);
-  outline-offset: 1px;
-}
+
 
 @media (max-width: 900px) {
   .rule-editor > label,
@@ -4059,8 +4066,9 @@ button.wp-day.is-future:disabled {
   background: var(--white-soft);
 }
 
+/* The search box's frame shades as a whole; its input inside stays clear. */
 .history-search:focus-within {
-  box-shadow: var(--shadow-control);
+  background-image: linear-gradient(var(--field-focus-shade), var(--field-focus-shade));
 }
 
 .history-search svg {
@@ -4074,6 +4082,7 @@ button.wp-day.is-future:disabled {
   padding: 0;
   border: 0;
   background: transparent;
+  background-image: none !important;
   box-shadow: none;
   font-size: var(--sv-type-3);
   outline: none;

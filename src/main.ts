@@ -5523,13 +5523,11 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "streak-start") {
-    // The missing minutes as a plain timer, on the goal last worked on; the backend's shortest
-    // session is 5 minutes.
+    // The start screen, set to the missing minutes as a plain timer, on the goal last worked on.
     draft.mode = "timer";
-    draft.duration_minutes = Math.max(5, streakMinutesLeft());
-    draft.goal = draft.goal.trim() || history[0]?.goal || "Keep the streak";
-    preflightOpen = false;
-    await startSession();
+    draft.duration_minutes = streakSessionMinutes(streakMinutesLeft());
+    draft.goal = draft.goal.trim() || history[0]?.goal || "";
+    await runAction("open-preflight");
     return;
   }
 
@@ -7515,6 +7513,11 @@ function streakMinutesLeft(): number {
   return Math.max(0, Math.ceil((STREAK_DAY_SECONDS - seconds) / 60));
 }
 
+/** The start screen's length for the missing minutes: the slider's steps of 5, from 15. */
+function streakSessionMinutes(left: number): number {
+  return Math.min(90, Math.max(15, Math.ceil(left / 5) * 5));
+}
+
 /** While no session runs: yellow with the minutes today still needs, one click to start them;
  *  green once today counts. */
 function renderStreakChip(): string {
@@ -7523,9 +7526,9 @@ function renderStreakChip(): string {
   if (left === 0) {
     return `<button class="status-chip streak-chip is-kept" type="button" data-tab="session" aria-label="Today counts toward your streak">Day ${streak} kept</button>`;
   }
-  const minutes = Math.max(5, left);
+  const minutes = streakSessionMinutes(left);
   const text = streak > 0 ? `${left} min to keep your ${streak}-day streak` : `${left} min to start a streak`;
-  return `<button class="status-chip streak-chip is-short" type="button" data-action="streak-start" title="Starts a ${minutes}-minute focus session">${escapeHtml(text)}</button>`;
+  return `<button class="status-chip streak-chip is-short" type="button" data-action="streak-start" title="Opens a ${minutes}-minute focus session">${escapeHtml(text)}</button>`;
 }
 
 function statusChip(current: CurrentSession | null): string {
