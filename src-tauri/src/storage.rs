@@ -1153,6 +1153,29 @@ impl SessionStorage {
         tx.commit().map_err(|error| error.to_string())
     }
 
+    /// Moves one app's or site's time in a session between work and distraction, for that
+    /// session only; the rules are untouched. Moved to work it is remembered as work, so the
+    /// review never asks about it; moved to distraction it is forgotten as work.
+    pub fn set_session_app_distraction(&self, session_id: u64, kind: &str, key: &str, distraction: bool) -> Result<(), String> {
+        let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        let sql = if distraction {
+            "UPDATE span SET state = 'distracted'
+             WHERE session_id = ?1 AND kind = ?2 AND activity_key = ?3 AND state = 'focused'"
+        } else {
+            "UPDATE span SET state = 'focused'
+             WHERE session_id = ?1 AND kind = ?2 AND activity_key = ?3 AND state IN ('distracted', 'suspicious')"
+        };
+        tx.execute(sql, params![session_id, kind, key]).map_err(|error| error.to_string())?;
+        let mut known = self.known_work()?;
+        known.retain(|item| item != key);
+        if !distraction {
+            known.push(key.to_string());
+        }
+        self.set_setting(KNOWN_WORK_KEY, &serde_json::to_string(&known).map_err(|error| error.to_string())?)?;
+        self.recompute_session_metrics(session_id)?;
+        tx.commit().map_err(|error| error.to_string())
+    }
+
     pub fn load_phrase_library(&self) -> Result<StoredPhraseLibrary, String> {
         let raw = self.conn.query_row(
             "SELECT value FROM setting WHERE key = ?1",
@@ -3649,6 +3672,30 @@ mod tests {
         assert_eq!(report.ended_reason.as_deref(), Some("abandoned"));
         assert!(report.ended_at.is_some());
         assert_eq!(report.focused_seconds, 90);
+    }
+
+    #[test]
+    fn an_app_moves_between_work_and_distraction_for_one_session_only() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Move", Strictness::Normal, "2026-09-22T12:00:00Z", 900).unwrap();
+        storage.insert_span(id, &app("Spotify"), "focused", 0, 300).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 300, 600).unwrap();
+        storage.close_session(id, "2026-09-22T12:15:00Z", "stopped", 900).unwrap();
+        let other = storage.insert_session("Other", Strictness::Normal, "2026-09-23T12:00:00Z", 300).unwrap();
+        storage.insert_span(other, &app("Spotify"), "focused", 0, 300).unwrap();
+        storage.close_session(other, "2026-09-23T12:05:00Z", "stopped", 300).unwrap();
+
+        storage.set_session_app_distraction(id, "app", "spotify", true).unwrap();
+        let report = storage.get_session_report(id).unwrap();
+        assert_eq!((report.focused_seconds, report.distracted_seconds), (600, 300));
+        assert_eq!(report.apps.iter().find(|app| app.key == "spotify").unwrap().group, "Distractions");
+        assert_eq!(storage.get_session_report(other).unwrap().focused_seconds, 300, "other sessions keep their record");
+        assert!(storage.read_rules().unwrap().iter().all(|rule| rule.value != "spotify"), "the list is untouched");
+
+        storage.set_session_app_distraction(id, "app", "spotify", false).unwrap();
+        let report = storage.get_session_report(id).unwrap();
+        assert_eq!((report.focused_seconds, report.distracted_seconds), (900, 0));
+        assert_eq!(storage.known_work().unwrap(), vec!["spotify".to_string()]);
     }
 
     #[test]

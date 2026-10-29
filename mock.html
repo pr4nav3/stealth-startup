@@ -86,6 +86,8 @@
         review_candidates: () => [{group:"Work",kind:"app",key:"spotify",label:"Spotify",seconds:540},{group:"Work",kind:"website",key:"news.ycombinator.com",label:"news.ycombinator.com",seconds:360},{group:"Work",kind:"app",key:"code - insiders",label:"Code - Insiders",seconds:180}],
         review_session: a => { rules.push(...a.distractions); return {rules: rules.map(r => ({...r}))}; },
         set_app_name: () => ({}), set_site_name: () => ({}),
+        // A report row moved between Work and Distractions: the report comes back regrouped.
+        reclassify_session_app: a => { const r = handlers.get_session_report({id: a.id}); r.apps.forEach(x => { if (x.kind === a.kind && x.key === a.key) x.group = a.distraction ? "Distractions" : "Work"; }); return r; },
         update_rules: a => { rules.splice(0, rules.length, ...a.rules.map(r => ({...r}))); return {rules: rules.map(r => ({...r}))}; },
         flag_current_distracting: () => handlers.get_session_snapshot(),
         allow_current_for_session: () => handlers.get_session_snapshot(),

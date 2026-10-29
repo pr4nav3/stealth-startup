@@ -239,6 +239,14 @@ impl SessionManager {
         Ok(saved)
     }
 
+    /// From a report: one app's or site's time in that session counts as a distraction, or as
+    /// work. That session only; the rules never move old sessions and this never moves the rules.
+    pub fn reclassify_session_app(&mut self, id: u64, kind: String, key: String, distraction: bool) -> Result<SessionReport, String> {
+        self.storage()?.set_session_app_distraction(id, &kind, &key, distraction)?;
+        self.refresh_history();
+        self.session_report(id)
+    }
+
     pub fn load_phrase_library(&self) -> Result<crate::storage::StoredPhraseLibrary, String> {
         self.storage()?.load_phrase_library()
     }

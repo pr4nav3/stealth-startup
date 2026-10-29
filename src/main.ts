@@ -1846,19 +1846,9 @@ function renderOverlay(current: CurrentSession | null): string {
               <button class="danger" type="button" data-action="stop">End session</button>
             </div>
             <details class="overlay-more" ${overlayMoreOpen ? "open" : ""}>
-              <summary>More settings</summary>
+              <summary>More</summary>
               <div class="overlay-more-body">
-                <label class="overlay-mute">
-                  <span>Mute for 5 min</span>
-                  <span class="toggle-field">
-                    <input id="overlay-snooze" class="toggle-input" type="checkbox" ${nudgesMuted ? "checked" : ""} ${held ? "disabled" : ""} aria-label="Mute nudges for 5 minutes" />
-                    <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
-                  </span>
-                </label>
-                <p>Is this window pulling you off task?</p>
-                <div class="overlay-marks">
-                  <button class="mark-distraction" type="button" data-action="mark-distracting">Add to distractions</button>
-                </div>
+                ${isOnBreak(current) ? "" : renderOverlayWatchControls(current as CurrentSession, held, nudgesMuted)}
                 <button class="overlay-pin" type="button" data-action="${pinned ? "unpin-window" : "pin-window"}">${pinned ? "Unpin window" : "Pin window"}</button>
               </div>
             </details>
@@ -1970,6 +1960,37 @@ function renderVoiceRow(voice: NudgeVoice): string {
         <p class="interrupt-voice-who">${escapeHtml(voice.voice)} ${speaking ? "is speaking" : "said"}</p>
         <p class="interrupt-voice-line">“${escapeHtml(voice.line)}”</p>
       </div>
+    </div>
+  `;
+}
+
+/** Mute, and "Add YouTube to distractions" for what is in front: only while the session is
+ *  watching something. A break judges nothing, so these stay out of it. */
+function renderOverlayWatchControls(current: CurrentSession, held: boolean, nudgesMuted: boolean): string {
+  const focus = current.focus;
+  const name = focus ? (focus.activity.kind === "website" ? siteNames[focus.activity.key] : appNames[focus.activity.key]) ?? focus.activity.label : "";
+  const addable = Boolean(focus && focus.markable && !focus.distracting) && !held;
+  const why = held
+    ? "Paused: nothing is being watched."
+    : !focus
+      ? "Nothing in front yet."
+      : focus.distracting
+        ? `${name} is already a distraction.`
+        : `${name} can't be a distraction on its own.`;
+  return `
+    <label class="overlay-mute">
+      <span>Mute for 5 min</span>
+      <span class="toggle-field">
+        <input id="overlay-snooze" class="toggle-input" type="checkbox" ${nudgesMuted ? "checked" : ""} ${held ? "disabled" : ""} aria-label="Mute nudges for 5 minutes" />
+        <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+      </span>
+    </label>
+    <div class="overlay-marks">
+      ${
+        addable
+          ? `<button class="mark-distraction" type="button" data-action="mark-distracting">Add ${escapeHtml(name)} to distractions</button>`
+          : `<p class="overlay-why">${escapeHtml(why)}</p>`
+      }
     </div>
   `;
 }
@@ -4146,7 +4167,32 @@ function renderHistoryItem(item: SessionSummary): string {
   `;
 }
 
-function renderAppGroups(apps: RecapApp[], groups: string[]): string {
+/** A row the user can rename or move: a real app or site, not the phone, Away or Supervisor. */
+function editableApp(app: RecapApp): boolean {
+  return (app.kind === "website" || app.kind === "app") && !["untracked", "supervisor", "phone"].includes(app.key);
+}
+
+function appOnList(app: RecapApp): boolean {
+  const target = app.kind === "website" ? "website" : "app";
+  return permanentRules.some((rule) => rule.target === target && rule.value.toLowerCase() === app.key.toLowerCase());
+}
+
+/** In Edit mode on a report: move the row to the other group for this session, and offer the
+ *  list to a distraction not yet on it. */
+function renderAppRowActions(app: RecapApp, sessionId: number): string {
+  if (!editableApp(app)) {
+    return "";
+  }
+  const toDistraction = app.group !== "Distractions";
+  const move = `<button class="small-button" type="button" data-action="move-app" data-session-id="${sessionId}" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}" data-label="${attr(app.label)}" data-to="${toDistraction ? "distraction" : "work"}">${toDistraction ? "Count as distraction" : "Count as work"}</button>`;
+  const add =
+    !toDistraction && !appOnList(app)
+      ? `<button class="small-button" type="button" data-action="add-rule-from-report" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}">Add to list</button>`
+      : "";
+  return `<span class="recap-app-actions">${move}${add}</span>`;
+}
+
+function renderAppGroups(apps: RecapApp[], groups: string[], sessionId: number | null = null): string {
   const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
   return `<div class="recap-app-list">
     ${groups
@@ -4158,7 +4204,7 @@ function renderAppGroups(apps: RecapApp[], groups: string[]): string {
         return `
           <div class="recap-app-block">
             <p class="eyebrow">${escapeHtml(group)}</p>
-            <div class="recap-app-group">${renderAppRows(items, maxApp)}</div>
+            <div class="recap-app-group">${renderAppRows(items, maxApp, sessionId)}</div>
           </div>
         `;
       })
@@ -4168,15 +4214,17 @@ function renderAppGroups(apps: RecapApp[], groups: string[]): string {
 
 /** One line per app or site: name, a bar against the busiest row, the time. Read-only; the
  * distractions list is edited in Settings or during a session, never from a past week. */
-function renderAppRows(items: RecapApp[], maxApp: number): string {
+function renderAppRows(items: RecapApp[], maxApp: number, sessionId: number | null = null): string {
   return items
     .map((app) => {
       const width = Math.round(app.seconds / 60) > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
+      const actions = sessionId !== null && editingRecapNames ? renderAppRowActions(app, sessionId) : "";
       return `
-        <div class="recap-app-row ${app.group === "Distractions" ? "is-distraction" : ""}">
+        <div class="recap-app-row ${app.group === "Distractions" ? "is-distraction" : ""} ${actions ? "has-actions" : ""}">
           ${renderRecapAppName(app)}
           <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
           <strong>${escapeHtml(formatHours(app.seconds))}</strong>
+          ${actions}
         </div>
       `;
     })
@@ -4599,13 +4647,23 @@ function renderSessionReport(report: SessionReport): string {
         ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds), "How long the webcam saw a phone in your hand.") : ""}
       </section>
       <section class="panel recap-apps">
-        <p class="eyebrow">WHERE IT WENT</p>
-        <h2>Apps & sites</h2>
+        <div class="recap-apps-head">
+          <div>
+            <p class="eyebrow">WHERE IT WENT</p>
+            <h2>Apps & sites</h2>
+          </div>
+          ${
+            report.apps.some((app) => editableApp(app))
+              ? `<button type="button" data-action="toggle-recap-names" aria-pressed="${editingRecapNames}">${editingRecapNames ? "Done" : "Edit"}</button>`
+              : ""
+          }
+        </div>
         ${
           report.apps.length === 0
             ? `<p class="empty">No app time recorded.</p>`
-            : renderAppGroups(report.apps, APP_GROUPS)
+            : renderAppGroups(report.apps, APP_GROUPS, report.id)
         }
+        ${editingRecapNames ? `<p class="quiet">Moving a row changes this session only. Your distractions list stays as it is unless you add to it.</p>` : ""}
       </section>
     </section>
   `;
@@ -5536,6 +5594,41 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "toggle-recap-names") {
     editingRecapNames = !editingRecapNames;
     historyRename = null;
+    paintHistoryBody();
+    return;
+  }
+
+  if (action === "move-app" && source) {
+    const { sessionId, kind, key, label, to } = source.dataset;
+    try {
+      sessionReport = await invoke<SessionReport>("reclassify_session_app", {
+        id: Number(sessionId),
+        kind,
+        key,
+        distraction: to === "distraction",
+      });
+      // The session's totals changed: the list, the week and Trends read them too.
+      await refreshSnapshotNow();
+      await Promise.all([refreshHistoryWeek(false), refreshTrends(false)]);
+      const name = label || key;
+      showFeedback(to === "distraction" ? `${name} counts as a distraction here` : `${name} counts as work here`);
+    } catch (error) {
+      showFeedback(errorText(error));
+    }
+    paintHistoryBody();
+    return;
+  }
+
+  if (action === "add-rule-from-report" && source) {
+    const { kind, key } = source.dataset;
+    const target: AppRule["target"] = kind === "website" ? "website" : "app";
+    try {
+      const saved = await invoke<RulesSaved>("update_rules", { rules: [...permanentRules, { target, value: key ?? "" }] });
+      permanentRules = saved.rules;
+      showFeedback("Added to your distractions");
+    } catch (error) {
+      showFeedback(errorText(error));
+    }
     paintHistoryBody();
     return;
   }

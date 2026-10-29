@@ -322,6 +322,17 @@ fn review_session(
 }
 
 #[tauri::command]
+fn reclassify_session_app(
+    id: u64,
+    kind: String,
+    key: String,
+    distraction: bool,
+    state: State<'_, AppState>,
+) -> Result<SessionReport, String> {
+    lock_sessions(&state)?.reclassify_session_app(id, kind, key, distraction)
+}
+
+#[tauri::command]
 fn set_app_name(
     key: String,
     name: String,
@@ -728,6 +739,7 @@ pub fn run() {
             set_app_name,
             review_candidates,
             review_session,
+            reclassify_session_app,
             update_rules,
             get_phrase_library,
             update_phrase_library,

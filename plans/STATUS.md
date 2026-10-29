@@ -54,6 +54,20 @@ pass from Windows, and what is left for a release, is
       (the seed marker lists each line it offered). Starter voices are named
       Derek and Elise on screen, so the card reads "Elise is speaking"
 
+## After the review (2026-10-28, `fix/release-six` and `fix/report-edits-and-status-window`)
+
+- [x] A session's report and review open once, never lost behind a dialog;
+      commands read the clock under the lock; a sleep across a round boundary
+      ends the round at the boundary; one name per action in every window
+- [x] Voice errors show on the Settings tab only; edge bars' tooltips stay in
+      the page (both were failing the WebKit layout check)
+- [x] Report Edit mode: Rename, Count as distraction / Count as work (that
+      session only; `reclassify_session_app`), Add to list for a distraction
+      not on it. Known work follows the move so the review never asks again
+- [x] Status window: "More" instead of "More settings"; nothing to mute or add
+      during a break; the Add button names what is in front ("Add YouTube to
+      distractions") and says why when there is nothing to add
+
 ## Pomodoro (2026-10-26, branch `pomodoro`)
 
 - [x] Start screen: a Timer / Pomodoro switch under the goal. Timer keeps the

@@ -3553,6 +3553,12 @@ audio {
   white-space: nowrap;
 }
 
+.overlay-why {
+  margin: 0;
+  color: var(--sv-muted);
+  font-size: 0.82rem;
+}
+
 .overlay-more-body > p {
   margin: 0;
   color: var(--ink);
@@ -4523,6 +4529,32 @@ button.trend-door-go {
 
 .recap-head > div:first-of-type {
   margin-right: auto;
+}
+
+.recap-apps-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recap-apps-head > div {
+  min-width: 0;
+}
+
+/* Edit mode: the row's actions take a row of their own under the bar, so names and times keep
+   their columns. */
+.recap-app-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 6px;
+  margin-top: -6px;
+}
+
+.recap-app-actions .small-button {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 0.68rem;
 }
 
 .recap-apps {
