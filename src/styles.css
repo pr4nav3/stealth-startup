@@ -6414,3 +6414,16 @@ dt,
     animation: none;
   }
 }
+
+/* The header chip while no session runs: today's streak minutes. Yellow while today is
+   short (a click starts the missing minutes), green once it counts. Ink on both, like the
+   app's other coloured controls, in either theme. */
+.status-chip.streak-chip.is-short {
+  background: var(--sv-yellow);
+  color: var(--sv-colored-ink);
+}
+
+.status-chip.streak-chip.is-kept {
+  background: var(--sv-green);
+  color: var(--sv-colored-ink);
+}

@@ -1395,7 +1395,7 @@ function render(): void {
           <h1>Supervisor</h1>
         </div>
         <div class="topbar-status">
-          <button class="status-chip" type="button" data-tab="session" aria-label="${current ? "Session status" : "Today's focused time; opens the Session tab"}">${escapeHtml(current ? statusChip(current) : todayChip())}</button>
+          ${current ? `<button class="status-chip" type="button" data-tab="session" aria-label="Session status">${escapeHtml(statusChip(current))}</button>` : renderStreakChip()}
           <button class="theme-toggle" type="button" data-action="toggle-theme">${theme === "dark" ? "Dark" : "Light"}</button>
         </div>
       </header>
@@ -5521,6 +5521,17 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "streak-start") {
+    // The missing minutes as a plain timer, on the goal last worked on; the backend's shortest
+    // session is 5 minutes.
+    draft.mode = "timer";
+    draft.duration_minutes = Math.max(5, streakMinutesLeft());
+    draft.goal = draft.goal.trim() || history[0]?.goal || "Keep the streak";
+    preflightOpen = false;
+    await startSession();
+    return;
+  }
+
   if (action === "confirm-start-session") {
     if (!draft.goal.trim()) {
       showFeedback("Name the session");
@@ -7497,10 +7508,23 @@ function permissionNotice(_current: CurrentSession | null): string {
   return "";
 }
 
-/** "TODAY · 1H 12M", or a nudge to start when nothing has been done yet. */
-function todayChip(): string {
+/** Minutes today still needs to count toward the streak (0 once it counts). */
+function streakMinutesLeft(): number {
   const seconds = dayFocusMap().get(dayKey(new Date())) ?? 0;
-  return seconds > 0 ? `Today · ${formatHours(seconds)}` : "Today · nothing yet";
+  return Math.max(0, Math.ceil((STREAK_DAY_SECONDS - seconds) / 60));
+}
+
+/** While no session runs: yellow with the minutes today still needs, one click to start them;
+ *  green once today counts. */
+function renderStreakChip(): string {
+  const left = streakMinutesLeft();
+  const streak = streakDays();
+  if (left === 0) {
+    return `<button class="status-chip streak-chip is-kept" type="button" data-tab="session" aria-label="Today counts toward your streak">Day ${streak} kept</button>`;
+  }
+  const minutes = Math.max(5, left);
+  const text = streak > 0 ? `${left} min to keep your ${streak}-day streak` : `${left} min to start a streak`;
+  return `<button class="status-chip streak-chip is-short" type="button" data-action="streak-start" title="Starts a ${minutes}-minute focus session">${escapeHtml(text)}</button>`;
 }
 
 function statusChip(current: CurrentSession | null): string {
