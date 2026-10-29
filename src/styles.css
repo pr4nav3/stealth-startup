@@ -4616,6 +4616,28 @@ button.recap-bar-col:focus-visible .week-tip {
   transform: translate(-50%, 0);
 }
 
+/* The first and last bars' tips hug their bar's edge instead of centring on it: centred, the
+   hidden tip would hang past the page and give History a sideways scroll. */
+button.recap-bar-col:first-child .week-tip,
+.trend-spark-track:first-child .week-tip {
+  left: 0;
+  transform: translate(0, 6px);
+}
+
+button.recap-bar-col:last-child .week-tip,
+.trend-spark-track:last-child .week-tip {
+  left: auto;
+  right: 0;
+  transform: translate(0, 6px);
+}
+
+button.recap-bar-col:first-child:hover .week-tip,
+button.recap-bar-col:first-child:focus-visible .week-tip,
+button.recap-bar-col:last-child:hover .week-tip,
+button.recap-bar-col:last-child:focus-visible .week-tip {
+  transform: translate(0, 0);
+}
+
 button.recap-bar-col:hover .recap-bar,
 button.recap-bar-col:focus-visible .recap-bar {
   transform: translate(-2px, -2px);

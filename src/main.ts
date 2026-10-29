@@ -1398,7 +1398,7 @@ function render(): void {
       </nav>
 
       ${lastError ? `<section class="notice">${escapeHtml(lastError)}</section>` : ""}
-      ${voiceError ? `<section class="notice">${escapeHtml(voiceError)}</section>` : ""}
+      ${voiceError && activeTab === "settings" ? `<section class="notice">${escapeHtml(voiceError)}</section>` : ""}
       ${permissionNotice(current)}
 
       ${activeTab === "session" ? renderSession(current) : ""}
