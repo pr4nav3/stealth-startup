@@ -4848,13 +4848,14 @@ button.trend-spark-track:focus-visible .week-tip {
 }
 
 .week-app-empty {
-  margin: 8px 0 0;
+  margin: 0;
   color: var(--sv-muted);
   font-size: var(--sv-type-3);
 }
 
 .week-app-cols .eyebrow {
   margin: 0;
+  color: var(--sv-muted);
 }
 
 /* Two boxes side by side, each as tall as its own rows. */
@@ -4922,15 +4923,12 @@ button.trend-spark-track:focus-visible .week-tip {
   margin-right: auto;
 }
 
-.recap-apps-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.recap-apps-head > div {
-  min-width: 0;
+/* The section's title in the ink, its groups' labels in the muted tone below it. */
+.recap-apps-title {
+  margin: 0 0 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
+  color: var(--ink);
 }
 
 .recap-apps {

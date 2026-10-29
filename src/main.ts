@@ -4577,7 +4577,7 @@ function renderAppColumns(apps: RecapApp[], sessionId: number | null, period: "s
     return `
       <div class="recap-app-block">
         <p class="eyebrow">${escapeHtml(title)}${items.length ? ` · ${escapeHtml(formatHours(total))}` : ""}</p>
-        ${items.length ? `<div class="recap-app-group">${renderAppRows(items, sessionId)}</div>` : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}
+        <div class="recap-app-group">${items.length ? renderAppRows(items, sessionId) : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}</div>
       </div>
     `;
   };
@@ -5176,12 +5176,7 @@ function renderSessionReport(report: SessionReport): string {
         ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds), "How long the webcam saw a phone in your hand.") : ""}
       </section>
       <section class="panel recap-apps">
-        <div class="recap-apps-head">
-          <div>
-            <p class="eyebrow">WHERE IT WENT</p>
-            <h2>Apps & sites</h2>
-          </div>
-        </div>
+        <h2 class="eyebrow recap-apps-title">Apps &amp; sites</h2>
         ${report.apps.length === 0 ? `<p class="empty">No app time recorded.</p>` : renderAppColumns(report.apps, report.id, "session")}
       </section>
     </section>
