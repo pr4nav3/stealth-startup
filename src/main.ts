@@ -5523,10 +5523,10 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
 
   if (action === "streak-start") {
-    // The start screen, set to the missing minutes as a plain timer, on the goal last worked on.
+    // The start screen, set to the missing minutes as a plain timer. The goal is the user's to
+    // type, as with the Start button.
     draft.mode = "timer";
     draft.duration_minutes = streakSessionMinutes(streakMinutesLeft());
-    draft.goal = draft.goal.trim() || history[0]?.goal || "";
     await runAction("open-preflight");
     return;
   }
