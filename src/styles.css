@@ -2126,9 +2126,10 @@ button.recap-app-row {
   cursor: pointer;
 }
 
+/* A tint of the ink: dark on the light theme's boxes, light on the dark theme's. */
 button.recap-app-row:hover,
 button.recap-app-row:focus-visible {
-  background: var(--white-soft);
+  background: color-mix(in srgb, var(--sv-ink) 9%, transparent);
 }
 
 button.recap-app-row:active {
@@ -4858,43 +4859,18 @@ button.trend-spark-track:focus-visible .week-tip {
   font-size: var(--sv-type-3);
 }
 
-.week-app-col .eyebrow {
+.week-app-cols .eyebrow {
   margin: 0;
 }
 
-.week-app-total {
-  margin: 2px 0 6px;
-  color: var(--sv-muted);
-  font-family: var(--font-mono);
-  font-size: var(--sv-type-4);
-  letter-spacing: 0.04em;
+/* Two boxes side by side, each as tall as its own rows. In a half-width box the bar shares the
+   room with the name instead of taking its 18rem. */
+.week-app-cols {
+  align-items: start;
 }
 
-.week-app-rows {
-  display: grid;
-}
-
-.week-app-rows .recap-app-row {
-  grid-template-columns: minmax(0, 1fr) minmax(4rem, 1.2fr) 4.5em;
-  gap: 10px;
-  margin: 0;
-  padding: 6px 4px;
-  border-radius: 0;
-  box-sizing: border-box;
-}
-
-.week-app-rows .recap-app-row + .recap-app-row {
-  border-top: 1px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
-}
-
-.week-app-rows .recap-app-track {
-  height: 7px;
-  border: 0;
-  border-radius: 3px;
-}
-
-.week-app-rows .recap-app-track span {
-  border-radius: 3px;
+.week-app-cols .recap-app-row {
+  grid-template-columns: minmax(0, 1fr) minmax(3rem, 1fr) 4.5em;
 }
 
 .recap-app-row.is-distraction .recap-app-track span {

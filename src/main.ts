@@ -4535,13 +4535,13 @@ function renderWeekAppsPane(recap: WeekRecap | null): string {
   }
   const maxApp = Math.max(...[...work, ...distractions].map((app) => app.seconds), 1);
   const editable = recap.apps.some((item) => editableApp(item));
+  // Each side is a report's group: its eyebrow (with the week's total), then its rows in a box.
   const column = (title: string, items: RecapApp[], emptyText: string) => {
     const total = items.reduce((sum, app) => sum + app.seconds, 0);
     return `
-      <div class="week-app-col">
-        <p class="eyebrow">${escapeHtml(title)}</p>
-        ${items.length ? `<p class="week-app-total">${escapeHtml(formatHours(total))}</p>` : ""}
-        ${items.length ? `<div class="week-app-rows">${renderAppRows(items, maxApp)}</div>` : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}
+      <div class="recap-app-block">
+        <p class="eyebrow">${escapeHtml(title)}${items.length ? ` · ${escapeHtml(formatHours(total))}` : ""}</p>
+        ${items.length ? `<div class="recap-app-group">${renderAppRows(items, maxApp)}</div>` : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}
       </div>
     `;
   };
