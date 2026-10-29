@@ -51,9 +51,11 @@ media sessions and still go Away. macOS uses "keep the display awake" assertions
 alone stays Away there; it is untested on a Mac (see `plans/mac-handoff.md`).
 
 **Capture failures count with Away time.** The score is time not on a distraction. Rules apply
-from the next sample and never change a recorded session on their own; the user can, from a
-report's Edit mode or the post-session review, move an app or site between Work and Distractions
-for that one session (and rename it). See `plans/window-history-audit.md`.
+from the next sample and never change a recorded session on their own; the user can. Clicking a
+row of Apps & sites opens a popup (name, a site's address, Counts as Work or Distraction): Counts
+as rewrites the report's session, or every session of the week shown, and puts the item on the
+distractions list or takes it off. The post-session review does the same for the session just
+ended. See `plans/window-history-audit.md`.
 
 **Old history from before this rewrite:** browser time becomes "Other websites" on migration. Title rules convert or get deleted. Do not expect old YouTube title-rows to become `youtube.com`.
 
@@ -65,7 +67,7 @@ for that one session (and rename it). See `plans/window-history-audit.md`.
 
 **Session changes rebuild the Session tab.** Polling is every second, but the page is rebuilt only when what it shows changes (`viewKey`); the clock and status chip are painted in place (`paintLive`). History and Settings are never rebuilt by session changes. A rebuild restores scroll, focus, and caret, and every text field keeps its value in state or sits in an editor that blocks rebuilds. While an editor or a popup is open, or a text field or dropdown has focus, polling only paints the clock, chip, and state slab; the rebuild waits until it closes or loses focus. Measured with a fake backend: 0 rebuilds while nothing changes, one per real change.
 
-**Rules are distractions only (V2).** There is no Relevant or Neutral and no classify step after a session. A site that is the work today is allowed with "Not today" (preflight chip or nudge popup) and the allowance ends with the session. Report rows show time only; the rule toggle on History rows is gone. Old reports keep the decisions recorded at the time; a rule change never changes them. Since 2026-10-28 a report's Edit mode lets the user move a row between Work and Distractions for that session and rename it; the post-session review does the same for the session just ended.
+**Rules are distractions only (V2).** There is no Relevant or Neutral and no classify step after a session. A site that is the work today is allowed with "Not today" (preflight chip or nudge popup) and the allowance ends with the session. Report rows show time only; the rule toggle on History rows is gone. Old reports keep the decisions recorded at the time; a rule change never changes them. Since 2026-10-29 any row of Apps & sites (a report's or the week's) opens a popup to rename it, change a site's address, and set Counts as, which rewrites those sessions and the distractions list together; the post-session review does the same for the session just ended.
 
 **History v4, Voice v2 and the mock agree; the app has not been checked.** Every screen was rendered through `mock.html` with fixtures, not against a real database. Places most likely to differ from the mock: the month picker's `get_focus_days` on a sparse history, session rows' miniature timelines on long sessions, the voice page's status tiles when the worker is really down.
 

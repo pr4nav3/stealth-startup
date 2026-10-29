@@ -731,8 +731,26 @@ let ruleEditor: RuleEditor | null = null;
 let rulePreviewTimer: number | null = null;
 let siteNames: Record<string, string> = {};
 let appNames: Record<string, string> = {};
-let editingRecapNames = false;
-let historyRename: { kind: "app" | "website"; key: string; value: string } | null = null;
+/**
+ * The popup a row of Apps & sites opens: its name, a website's address, and whether it counts as
+ * work or a distraction. One choice for both: it rewrites the sessions it was opened from (the
+ * report's one, or every session of the week shown) and puts the item on the distractions list
+ * or takes it off, so it counts the same way from then on. `listable` is false for a browser,
+ * which can't be a distraction by itself; null until that is known.
+ */
+interface AppEdit {
+  kind: "app" | "website";
+  key: string;
+  label: string;
+  name: string;
+  address: string;
+  distraction: boolean;
+  wasDistraction: boolean;
+  sessionIds: number[];
+  listable: boolean | null;
+  error: string;
+}
+let appEdit: AppEdit | null = null;
 /** "Any distractions here?" after a session: what it counted as work, each one tapped or renamed. */
 interface ReviewItem extends RecapApp {
   distraction: boolean;
@@ -1151,9 +1169,9 @@ function closeTopLayer(): void {
   if (voiceBusy) {
     return;
   }
-  if (historyRename) {
-    historyRename = null;
-    render();
+  if (appEdit) {
+    appEdit = null;
+    paintModalLayer();
     return;
   }
   if (ruleEditor) {
@@ -1259,7 +1277,7 @@ function editorIsOpen(): boolean {
     preflightOpen ||
     sessionRulesOpen ||
     ruleEditor !== null ||
-    historyRename !== null ||
+    appEdit !== null ||
     phraseEditor !== null ||
     newToneDraft !== null ||
     toneRename !== null ||
@@ -4516,7 +4534,7 @@ function renderWeekAppsPane(recap: WeekRecap | null): string {
     return `<section class="panel history-list-panel"><p class="empty">Sessions ran, but Supervisor couldn't name any app or site. Time on the desktop or in a window it couldn't read isn't listed.</p></section>`;
   }
   const maxApp = Math.max(...[...work, ...distractions].map((app) => app.seconds), 1);
-  const nameable = recap.apps.some((item) => item.kind === "app" || item.kind === "website");
+  const editable = recap.apps.some((item) => editableApp(item));
   const column = (title: string, items: RecapApp[], emptyText: string) => {
     const total = items.reduce((sum, app) => sum + app.seconds, 0);
     return `
@@ -4536,7 +4554,7 @@ function renderWeekAppsPane(recap: WeekRecap | null): string {
       </div>
       <div class="week-app-foot">
         <span>${awayLine ? escapeHtml(awayLine) : "Never away from the keyboard during a session."}</span>
-        ${nameable ? `<button type="button" data-action="toggle-recap-names">${editingRecapNames ? "Done naming" : "Edit names"}</button>` : ""}
+        ${editable ? `<span>${APP_EDIT_HINT}</span>` : ""}
       </div>
     </section>
   `;
@@ -4573,22 +4591,6 @@ function appOnList(app: RecapApp): boolean {
   return permanentRules.some((rule) => rule.target === target && rule.value.toLowerCase() === app.key.toLowerCase());
 }
 
-/** In Edit mode on a report: move the row to the other group for this session, and offer the
- *  list to a distraction not yet on it. */
-function renderAppRowActions(app: RecapApp, sessionId: number): string {
-  if (!editableApp(app)) {
-    return "";
-  }
-  const toDistraction = app.group !== "Distractions";
-  const move = `<button class="small-button" type="button" data-action="move-app" data-session-id="${sessionId}" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}" data-label="${attr(app.label)}" data-to="${toDistraction ? "distraction" : "work"}">${toDistraction ? "Count as distraction" : "Count as work"}</button>`;
-  const list = appOnList(app)
-    ? `<button class="small-button" type="button" data-action="remove-rule-from-report" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}">Remove from list</button>`
-    : !toDistraction
-      ? `<button class="small-button" type="button" data-action="add-rule-from-report" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}">Add to list</button>`
-      : "";
-  return `<span class="recap-app-actions">${move}${list}</span>`;
-}
-
 function renderAppGroups(apps: RecapApp[], groups: string[], sessionId: number | null = null): string {
   const maxApp = Math.max(...apps.map((app) => app.seconds), 1);
   return `<div class="recap-app-list">
@@ -4609,45 +4611,193 @@ function renderAppGroups(apps: RecapApp[], groups: string[], sessionId: number |
   </div>`;
 }
 
-/** One line per app or site: name, a bar against the busiest row, the time. Read-only; the
- * distractions list is edited in Settings or during a session, never from a past week. */
+const APP_EDIT_HINT = "Click a row to rename it or change how it counts. A dot marks your distractions list.";
+
+/** One line per app or site: name, a bar against the busiest row, the time. A real app or site
+ *  is a quiet button that opens its popup (see AppEdit); `sessionId` is the report's session,
+ *  or null for the week shown. */
 function renderAppRows(items: RecapApp[], maxApp: number, sessionId: number | null = null): string {
   return items
     .map((app) => {
       const width = Math.round(app.seconds / 60) > 0 ? Math.max(4, Math.round((app.seconds / maxApp) * 100)) : 0;
-      const actions = sessionId !== null && editingRecapNames ? renderAppRowActions(app, sessionId) : "";
+      const tone = app.group === "Distractions" ? "is-distraction" : "";
+      const dot = editableApp(app) && appOnList(app) ? `<i class="recap-app-dot" title="On your distractions list"></i>` : "";
+      const cells = `
+        <span class="recap-app-name">${escapeHtml(app.label)}${dot}</span>
+        <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
+        <strong>${escapeHtml(formatHours(app.seconds))}</strong>
+      `;
+      if (!editableApp(app)) {
+        return `<div class="recap-app-row ${tone}">${cells}</div>`;
+      }
       return `
-        <div class="recap-app-row ${app.group === "Distractions" ? "is-distraction" : ""} ${actions ? "has-actions" : ""}">
-          ${renderRecapAppName(app)}
-          <span class="recap-app-track">${width ? `<span style="width: ${width}%"></span>` : ""}</span>
-          <strong>${escapeHtml(formatHours(app.seconds))}</strong>
-          ${actions}
-        </div>
+        <button type="button" class="recap-app-row is-editable ${tone}" data-action="edit-app" data-kind="${app.kind}" data-key="${attr(app.key)}" data-label="${attr(app.label)}" data-distraction="${app.group === "Distractions"}" data-session-id="${sessionId ?? ""}" aria-label="${attr(`Edit ${app.label}`)}">
+          ${cells}
+        </button>
       `;
     })
     .join("");
 }
 
-function renderRecapAppName(app: RecapApp): string {
-  if ((app.kind !== "website" && app.kind !== "app") || ["untracked", "supervisor", "phone"].includes(app.key)) {
-    return `<span class="recap-app-name">${escapeHtml(app.label)}</span>`;
+/** The popup over History for one app or site. */
+function renderAppEdit(): string {
+  const edit = appEdit;
+  if (!edit) {
+    return "";
   }
-  if (historyRename?.key === app.key && historyRename.kind === app.kind) {
-    return `
-      <span class="recap-app-name recap-rename">
-        <input id="history-rename" maxlength="60" value="${attr(historyRename.value)}" placeholder="${attr(app.label)}" aria-label="Name for ${attr(app.key)}" />
-      </span>
+  const site = edit.kind === "website";
+  const counts = edit.listable === false
+    ? `<p class="app-edit-note">A browser counts by the sites open in it, so it can't be a distraction by itself.</p>`
+    : `
+      <div class="app-edit-field">
+        <span>Counts as</span>
+        <div class="mode-tabs" role="group" aria-label="Counts as">
+          <button class="${edit.distraction ? "" : "active"}" type="button" data-action="app-edit-counts" data-counts="work" aria-pressed="${!edit.distraction}">Work</button>
+          <button class="${edit.distraction ? "active" : ""}" type="button" data-action="app-edit-counts" data-counts="distraction" aria-pressed="${edit.distraction}">Distraction</button>
+        </div>
+      </div>
     `;
-  }
-  if (!editingRecapNames) {
-    return `<span class="recap-app-name">${escapeHtml(app.label)}</span>`;
-  }
   return `
-    <span class="recap-app-name recap-site-name">
-      <span>${escapeHtml(app.label)}</span>
-      <button class="recap-rename-button" type="button" data-history-rename="${attr(app.key)}" data-rename-kind="${app.kind}" aria-label="Rename ${attr(app.label)}" title="Rename · ${attr(app.key)}">Rename</button>
-    </span>
+    <div class="modal-backdrop" role="presentation">
+      <section class="modal-panel app-edit-panel" role="dialog" aria-modal="true" aria-labelledby="app-edit-title">
+        <div class="modal-head app-edit-head">
+          <div>
+            <p class="eyebrow">${site ? "Website" : "App"}</p>
+            <h2 id="app-edit-title">${escapeHtml(appEditTitle(edit))}</h2>
+          </div>
+          <div class="app-edit-actions">
+            <button class="small-button" type="button" data-action="app-edit-cancel">Cancel</button>
+            <button class="small-button primary" type="button" data-action="app-edit-save">Save</button>
+          </div>
+        </div>
+        <label class="app-edit-field">
+          <span>Name</span>
+          <input id="app-edit-name" maxlength="60" value="${attr(edit.name)}" placeholder="${attr(site ? edit.key : edit.label)}" spellcheck="false" />
+        </label>
+        ${site ? `<label class="app-edit-field"><span>Address</span><input id="app-edit-address" maxlength="300" value="${attr(edit.address)}" spellcheck="false" /></label>` : ""}
+        ${counts}
+        ${edit.error ? `<p class="app-edit-error">${escapeHtml(edit.error)}</p>` : ""}
+      </section>
+    </div>
   `;
+}
+
+function appEditTitle(edit: AppEdit): string {
+  return edit.name.trim() || (edit.kind === "website" ? edit.address.trim() || edit.key : edit.label);
+}
+
+/** The name the user has given it, or nothing when it shows its own. */
+function givenName(kind: "app" | "website", key: string): string {
+  return kind === "website" ? siteNames[key] ?? "" : appNames[key] ?? appNames[key.toLowerCase()] ?? "";
+}
+
+async function openAppEdit(source: HTMLElement): Promise<void> {
+  const kind = source.dataset.kind === "website" ? "website" : "app";
+  const key = source.dataset.key ?? "";
+  const label = source.dataset.label ?? key;
+  const sessionId = Number(source.dataset.sessionId || "0");
+  const sessionIds = sessionId ? [sessionId] : (historyWeek?.sessions ?? []).map((item) => item.id);
+  const edit: AppEdit = {
+    kind,
+    key,
+    label,
+    name: givenName(kind, key) || label,
+    address: key,
+    distraction: source.dataset.distraction === "true",
+    wasDistraction: source.dataset.distraction === "true",
+    sessionIds,
+    listable: kind === "website" ? true : null,
+    error: "",
+  };
+  appEdit = edit;
+  paintModalLayer();
+  document.querySelector<HTMLInputElement>("#app-edit-name")?.focus();
+  // An app the list can't hold (a browser) loses the choice; the resolver says which.
+  if (kind === "app") {
+    try {
+      await invoke<AppRule>("resolve_rule_input", { text: key });
+      edit.listable = true;
+    } catch {
+      edit.listable = false;
+    }
+    if (appEdit === edit) {
+      paintModalLayer();
+    }
+  }
+}
+
+/** Name, then address, then how it counts: the list first, then the sessions it was opened from. */
+async function saveAppEdit(): Promise<void> {
+  const edit = appEdit;
+  if (!edit) {
+    return;
+  }
+  const site = edit.kind === "website";
+  let ruleValue = edit.key;
+  if (site) {
+    const typed = edit.address.trim();
+    if (!typed) {
+      edit.error = "Type an address, like youtube.com.";
+      paintModalLayer();
+      return;
+    }
+    if (typed.toLowerCase() !== edit.key.toLowerCase()) {
+      try {
+        const rule = await invoke<AppRule>("resolve_rule_input", { text: typed });
+        if (rule.target !== "website") {
+          throw new Error("Type a web address, like youtube.com.");
+        }
+        ruleValue = rule.value;
+      } catch (error) {
+        edit.error = errorText(error);
+        paintModalLayer();
+        return;
+      }
+    }
+  }
+  try {
+    const name = edit.name.trim() === edit.label && !givenName(edit.kind, edit.key) ? "" : edit.name.trim();
+    if (name !== givenName(edit.kind, edit.key)) {
+      if (site) {
+        siteNames = await invoke<Record<string, string>>("set_site_name", { key: edit.key, name });
+      } else {
+        appNames = await invoke<Record<string, string>>("set_app_name", { key: edit.key, name });
+      }
+    }
+    if (edit.listable !== false) {
+      const target: AppRule["target"] = site ? "website" : "app";
+      const named = (rule: AppRule, value: string) => rule.target === target && rule.value.toLowerCase() === value.toLowerCase();
+      const others = permanentRules.filter((rule) => !named(rule, edit.key) && !named(rule, ruleValue));
+      const rules = edit.distraction ? [{ target, value: ruleValue }, ...others] : others;
+      if (JSON.stringify(rules) !== JSON.stringify(permanentRules)) {
+        permanentRules = (await invoke<RulesSaved>("update_rules", { rules })).rules;
+      }
+    }
+    // Each reclassified session comes back as its report, already carrying the new name.
+    const reclassify = edit.listable !== false && edit.distraction !== edit.wasDistraction;
+    if (reclassify) {
+      for (const id of edit.sessionIds) {
+        const report = await invoke<SessionReport>("reclassify_session_app", { id, kind: edit.kind, key: edit.key, distraction: edit.distraction });
+        if (sessionReport?.id === id) {
+          sessionReport = report;
+        }
+      }
+    } else if (sessionReport && edit.sessionIds.includes(sessionReport.id)) {
+      sessionReport = await invoke<SessionReport>("get_session_report", { id: sessionReport.id });
+    }
+    // Totals or names changed: the week, Trends and the day card read them too.
+    dayCardKey = "";
+    await refreshSnapshotNow();
+    await Promise.all([refreshHistoryWeek(false), refreshTrends(false)]);
+  } catch (error) {
+    edit.error = errorText(error);
+    paintModalLayer();
+    return;
+  }
+  appEdit = null;
+  paintModalLayer();
+  paintHistoryBody();
+  showFeedback(`${appEditTitle(edit)} saved`);
 }
 
 function formatRecovery(totalSeconds: number): string {
@@ -5050,18 +5200,13 @@ function renderSessionReport(report: SessionReport): string {
             <p class="eyebrow">WHERE IT WENT</p>
             <h2>Apps & sites</h2>
           </div>
-          ${
-            report.apps.some((app) => editableApp(app))
-              ? `<button type="button" data-action="toggle-recap-names" aria-pressed="${editingRecapNames}">${editingRecapNames ? "Done" : "Edit"}</button>`
-              : ""
-          }
         </div>
         ${
           report.apps.length === 0
             ? `<p class="empty">No app time recorded.</p>`
             : renderAppGroups(report.apps, APP_GROUPS, report.id)
         }
-        ${editingRecapNames ? `<p class="quiet">Moving a row changes this session only. Your distractions list stays as it is unless you add to it.</p>` : ""}
+        ${report.apps.some((app) => editableApp(app)) ? `<p class="recap-apps-hint">${APP_EDIT_HINT}</p>` : ""}
       </section>
     </section>
   `;
@@ -5470,16 +5615,6 @@ function bindEvents(root: ParentNode = document): void {
     }
   });
 
-  root.querySelectorAll<HTMLButtonElement>("[data-history-rename]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const key = button.dataset.historyRename ?? "";
-      const kind = button.dataset.renameKind as "app" | "website";
-      historyRename = { kind, key, value: kind === "website" ? siteNames[key] ?? "" : appNames[key] ?? "" };
-      paintHistoryBody();
-      (document.getElementById("history-rename") as HTMLInputElement | null)?.select();
-    });
-  });
-
   if (!pickerDismissBound) {
     pickerDismissBound = true;
     document.addEventListener("click", (event) => {
@@ -5499,20 +5634,29 @@ function bindEvents(root: ParentNode = document): void {
     historySearch = searchInput.value;
     scheduleHistorySearch();
   });
-  const renameInput = root.querySelector("#history-rename") as HTMLInputElement | null;
-  renameInput?.addEventListener("input", () => {
-    if (historyRename) {
-      historyRename.value = renameInput.value;
-    }
-  });
-  renameInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !composing(event)) {
-      event.preventDefault();
-      void saveHistoryRename();
-    }
-  });
-  renameInput?.addEventListener("blur", () => {
-    void saveHistoryRename();
+  // The app popup's fields: the title follows the name as it is typed; Enter saves.
+  root.querySelectorAll<HTMLInputElement>("#app-edit-name, #app-edit-address").forEach((input) => {
+    input.addEventListener("input", () => {
+      if (!appEdit) {
+        return;
+      }
+      if (input.id === "app-edit-name") {
+        appEdit.name = input.value;
+      } else {
+        appEdit.address = input.value;
+      }
+      appEdit.error = "";
+      const title = document.getElementById("app-edit-title");
+      if (title) {
+        title.textContent = appEditTitle(appEdit);
+      }
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !composing(event)) {
+        event.preventDefault();
+        void saveAppEdit();
+      }
+    });
   });
 
   bindPhraseEditor(root);
@@ -5661,7 +5805,7 @@ function paintPreflightLayer(): void {
 
 /** The confirm boxes and the session-over card, over whatever page is showing. */
 function renderModalLayer(): string {
-  return renderHistoryConfirm() + renderQuitConfirm() + renderSessionOver() + renderShareModal();
+  return renderHistoryConfirm() + renderQuitConfirm() + renderSessionOver() + renderShareModal() + renderAppEdit();
 }
 
 function paintModalLayer(): void {
@@ -6032,8 +6176,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (action === "open-trends") {
     historyView = "trends";
     sessionReport = null;
-    editingRecapNames = false;
-    historyRename = null;
     trendPage = 0;
     pendingAnimations.add("trends");
     await refreshTrends(false);
@@ -6062,8 +6204,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "close-recap") {
     historyView = "list";
-    editingRecapNames = false;
-    historyRename = null;
     animateOnArrival("history");
     await refreshHistoryWeek();
     return;
@@ -6110,67 +6250,30 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
 
   if (action === "history-pane") {
     historyPane = source?.dataset.pane === "apps" ? "apps" : "sessions";
-    editingRecapNames = false;
-    historyRename = null;
     paintHistoryBody();
     return;
   }
 
-  if (action === "toggle-recap-names") {
-    editingRecapNames = !editingRecapNames;
-    historyRename = null;
-    paintHistoryBody();
+  if (action === "edit-app" && source) {
+    await openAppEdit(source);
     return;
   }
 
-  if (action === "move-app" && source) {
-    const { sessionId, kind, key, label, to } = source.dataset;
-    try {
-      sessionReport = await invoke<SessionReport>("reclassify_session_app", {
-        id: Number(sessionId),
-        kind,
-        key,
-        distraction: to === "distraction",
-      });
-      // The session's totals changed: the list, the week, Trends and the day card read them too.
-      dayCardKey = "";
-      await refreshSnapshotNow();
-      await Promise.all([refreshHistoryWeek(false), refreshTrends(false)]);
-      const name = label || key;
-      showFeedback(to === "distraction" ? `${name} counts as a distraction here` : `${name} counts as work here`);
-    } catch (error) {
-      showFeedback(errorText(error));
-    }
-    paintHistoryBody();
+  if (action === "app-edit-counts" && appEdit) {
+    appEdit.distraction = source?.dataset.counts === "distraction";
+    appEdit.error = "";
+    paintModalLayer();
     return;
   }
 
-  if (action === "remove-rule-from-report" && source) {
-    const { kind, key } = source.dataset;
-    const target: AppRule["target"] = kind === "website" ? "website" : "app";
-    try {
-      const rules = permanentRules.filter((rule) => !(rule.target === target && rule.value.toLowerCase() === (key ?? "").toLowerCase()));
-      const saved = await invoke<RulesSaved>("update_rules", { rules });
-      permanentRules = saved.rules;
-      showFeedback("Taken off your distractions");
-    } catch (error) {
-      showFeedback(errorText(error));
-    }
-    paintHistoryBody();
+  if (action === "app-edit-cancel") {
+    appEdit = null;
+    paintModalLayer();
     return;
   }
 
-  if (action === "add-rule-from-report" && source) {
-    const { kind, key } = source.dataset;
-    const target: AppRule["target"] = kind === "website" ? "website" : "app";
-    try {
-      const saved = await invoke<RulesSaved>("update_rules", { rules: [...permanentRules, { target, value: key ?? "" }] });
-      permanentRules = saved.rules;
-      showFeedback("Added to your distractions");
-    } catch (error) {
-      showFeedback(errorText(error));
-    }
-    paintHistoryBody();
+  if (action === "app-edit-save") {
+    await saveAppEdit();
     return;
   }
 
@@ -6825,29 +6928,6 @@ function paintRuleEditorLive(): void {
       nameInput.value = editor.name;
     }
   }
-}
-
-async function saveHistoryRename(): Promise<void> {
-  const rename = historyRename;
-  if (!rename) {
-    return;
-  }
-  historyRename = null;
-  try {
-    if (rename.kind === "website") {
-      siteNames = await invoke<Record<string, string>>("set_site_name", { key: rename.key, name: rename.value });
-    } else {
-      appNames = await invoke<Record<string, string>>("set_app_name", { key: rename.key, name: rename.value });
-    }
-    weekRecap?.apps.forEach((app) => {
-      if (app.kind === rename.kind && app.key === rename.key) {
-        app.label = rename.kind === "website" ? siteName(rename.key) : appNames[rename.key] ?? app.label;
-      }
-    });
-  } catch (error) {
-    showFeedback(errorText(error));
-  }
-  afterPointer(paintHistoryBody);
 }
 
 async function persistPermanentRuleChanges(previous: AppRule[]): Promise<void> {

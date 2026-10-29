@@ -61,9 +61,11 @@ pass from Windows, and what is left for a release, is
       ends the round at the boundary; one name per action in every window
 - [x] Voice errors show on the Settings tab only; edge bars' tooltips stay in
       the page (both were failing the WebKit layout check)
-- [x] Report Edit mode: Rename, Count as distraction / Count as work (that
-      session only; `reclassify_session_app`), Add to list for a distraction
-      not on it. Known work follows the move so the review never asks again
+- [x] Apps & sites rows open a popup (2026-10-29, replacing Edit mode): Name,
+      Address for a site, Counts as Work / Distraction. Counts as rewrites the
+      report's session or the week's sessions (`reclassify_session_app`) and the
+      distractions list together; a dot marks what is on the list. Bars share
+      their columns. Known work follows the move so the review never asks again
 - [x] Status window: "More" instead of "More settings"; nothing to mute or add
       during a break; the Add button names what is in front ("Add YouTube to
       distractions") and says why when there is nothing to add

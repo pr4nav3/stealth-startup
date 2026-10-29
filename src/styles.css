@@ -2107,38 +2107,109 @@ dt {
   content: "";
 }
 
-.recap-app-name.recap-site-name {
+/* A row that opens its popup: quiet until the mouse is on it, like the list it sits in. */
+button.recap-app-row {
+  width: calc(100% + 12px);
+  min-height: 0;
+  height: auto;
+  margin: 0 -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  cursor: pointer;
+}
+
+button.recap-app-row:hover,
+button.recap-app-row:focus-visible {
+  background: var(--white-soft);
+}
+
+button.recap-app-row:active {
+  transform: none;
+  box-shadow: none;
+}
+
+.recap-apps-hint {
+  margin: 0;
+  color: var(--sv-muted);
+  font-size: var(--sv-type-4);
+}
+
+/* On the distractions list. */
+.recap-app-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 7px;
+  border: 1.5px solid var(--sv-border);
+  border-radius: 50%;
+  background: var(--sv-coral);
+  vertical-align: middle;
+}
+
+/* The app popup: the dialog, its fields and the start screen's two-way toggle. */
+.modal-panel.app-edit-panel {
+  display: grid;
+  gap: 14px;
+  width: min(400px, 100%);
+  padding: 18px 20px 20px;
+}
+
+.app-edit-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+}
+
+.app-edit-head h2 {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.app-edit-actions {
+  display: flex;
+  flex: none;
   gap: 8px;
 }
 
-.recap-site-name span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.app-edit-field {
+  display: grid;
+  gap: 6px;
 }
 
-.recap-rename-button {
-  min-height: 26px;
-  flex: 0 0 auto;
-  padding: 0 7px;
-  background: var(--panel);
-  box-shadow: none;
+.app-edit-field > span {
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
-.recap-app-name.recap-rename {
-  display: block;
-  overflow: visible;
+.app-edit-field input {
+  width: 100%;
 }
 
-.recap-rename input {
-  min-height: 32px;
-  padding: 0 8px;
-  background: var(--panel);
-  box-shadow: none;
+.app-edit-field .mode-tabs {
+  margin: 0;
+}
+
+.app-edit-note,
+.app-edit-error {
+  margin: 0;
   font-size: var(--sv-type-3);
+}
+
+.app-edit-note {
+  color: var(--sv-muted);
 }
 
 
@@ -4804,7 +4875,7 @@ button.trend-spark-track:focus-visible .week-tip {
 }
 
 .week-app-rows .recap-app-row {
-  grid-template-columns: minmax(0, 1fr) minmax(4rem, 1.2fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(4rem, 1.2fr) 4.5em;
   gap: 10px;
   margin: 0;
   padding: 6px 4px;
@@ -4899,21 +4970,6 @@ button.trend-spark-track:focus-visible .week-tip {
 
 .recap-apps-head > div {
   min-width: 0;
-}
-
-/* Edit mode: the row's actions take a row of their own under the bar, so names and times keep
-   their columns. */
-.recap-app-actions {
-  display: flex;
-  grid-column: 1 / -1;
-  gap: 6px;
-  margin-top: -6px;
-}
-
-.recap-app-actions .small-button {
-  min-height: 24px;
-  padding: 0 8px;
-  font-size: 0.68rem;
 }
 
 .recap-apps {
@@ -5484,7 +5540,7 @@ button.recap-bar-col:active .recap-bar {
 
 .recap-app-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(4rem, 18rem) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(4rem, 18rem) 4.5em;
   gap: 12px;
   align-items: center;
 }
@@ -5526,6 +5582,7 @@ button.recap-bar-col:active .recap-bar {
   font-family: inherit;
   font-size: var(--sv-type-3);
   font-weight: inherit;
+  text-align: right;
   white-space: nowrap;
 }
 

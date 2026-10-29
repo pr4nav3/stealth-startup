@@ -74,6 +74,7 @@
       let library = {custom_tones: q.get("tones") ? q.get("tones").split(",") : [], custom_phrases: q.get("tones") ? q.get("tones").split(",").map((t, i) => ({id: "custom-" + i, tone: t, moment: "nudge", text: "A line for " + t + "."})) : [], phrase_overrides: [], hidden_phrases: []};
       const summary = (p) => ({...p, clip_count: p.clips.length, clips: p.clips.map(c => ({...c}))});
       const siteNamesMock = {};
+      const appNamesMock = {};
       // The running session: its goal and nudges. A practice (from the first run) is caught 6 s in.
       const live = {goal: "Mock session", strictness: "normal", nudges: 0};
       const handlers = {
@@ -90,7 +91,7 @@
         stop_session: () => { q.set("live", "0"); q.delete("drift"); if (!hist.some(s => s.id === 1)) hist.unshift({id:1, goal:live.goal, started_at:new Date().toISOString(), duration_seconds:liveElapsed, focus_seconds:Math.round(liveElapsed*0.8), distracted_seconds:Math.round(liveElapsed*0.15), idle_seconds:Math.round(liveElapsed*0.05), nudges:0, top_hints:["VS Code"]}); return handlers.get_session_snapshot(); },
         review_candidates: () => [{group:"Work",kind:"app",key:"spotify",label:"Spotify",seconds:540},{group:"Work",kind:"website",key:"news.ycombinator.com",label:"news.ycombinator.com",seconds:360},{group:"Work",kind:"app",key:"code - insiders",label:"Code - Insiders",seconds:180}],
         review_session: a => { rules.push(...a.distractions); return {rules: rules.map(r => ({...r}))}; },
-        set_app_name: () => ({}), set_site_name: a => { if (a.name.trim()) siteNamesMock[a.key] = a.name.trim(); else delete siteNamesMock[a.key]; return {...siteNamesMock}; },
+        set_app_name: a => { if (a.name.trim()) appNamesMock[a.key] = a.name.trim(); else delete appNamesMock[a.key]; return {...appNamesMock}; }, set_site_name: a => { if (a.name.trim()) siteNamesMock[a.key] = a.name.trim(); else delete siteNamesMock[a.key]; return {...siteNamesMock}; },
         // A report row moved between Work and Distractions: the report comes back regrouped.
         reclassify_session_app: a => { const r = handlers.get_session_report({id: a.id}); r.apps.forEach(x => { if (x.kind === a.kind && x.key === a.key) x.group = a.distraction ? "Distractions" : "Work"; }); return r; },
         update_rules: a => { const seen = new Set(); const kept = a.rules.filter(r => { const k = r.target + ':' + r.value.trim().toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }); rules.splice(0, rules.length, ...kept.map(r => ({...r}))); return {rules: rules.map(r => ({...r}))}; },
@@ -107,7 +108,7 @@
         release_voice_worker: () => null,
         cancel_voice_generation: () => null,
         list_voice_profiles: () => profiles.map(summary),
-        get_site_names: () => ({...siteNamesMock}), get_app_names: () => ({}),
+        get_site_names: () => ({...siteNamesMock}), get_app_names: () => ({...appNamesMock}),
         get_session_snapshot: () => ({status: q.get("live") === "1" ? "active" : "idle", settings, current: q.get("live") === "1" ? {id:1, goal:live.goal, duration_seconds:1800, elapsed_seconds:liveElapsed, remaining_seconds:1800-liveElapsed, strictness:live.strictness, status: q.get("pomo") && q.get("pomo") !== "work" ? "paused" : "active", snoozed_until_seconds:null, metrics:{focused_seconds:60,distracted_seconds:0,idle_seconds:0,phone_seconds:0,nudges:live.nudges}, evidence:[], focus: q.get("drift") === "1" ? {sample:{captured_at:"", platform:"windows", app_name:"chrome", app_label:"Google Chrome", process_path:"", app_identity:"", app_key:null, process_id:1, window_title:null, window_id:"w1", bounds:{x:0,y:0,width:1,height:1}, idle_seconds:0, permissions:{screen_recording:"granted"}, shell_surface:false, browser:null, media_playing:false}, activity:{kind:"website", key:"youtube.com", label:"YouTube", app_id:"chrome", app_label:"Google Chrome"}, markable:true, state:"distracted", distracting:true, matched_rule:{target:"website", value:"youtube.com"}, seconds_on_current_window:70, interrupt:true, should_nudge:false, next_nudge_in_seconds:null} : null, exceptions: q.get("allowed") === "1" ? [{target:"website", value:"youtube.com"}] : [], pomodoro: q.get("pomo") ? {round: 2, rounds: 4, work_seconds: 1500, break_seconds: 300, phase: q.get("pomo"), phase_remaining_seconds: q.get("pomo") === "work" ? 754 : q.get("pomo") === "break" ? 192 : 0, rounds_focused_seconds: [1500, 1380], moments: q.get("pomo") === "work" ? 2 : q.get("pomo") === "break" ? 3 : 4} : null, camera: q.get("phone") === "1" ? {live:true,present:true,phone:true,phone_seconds:12,phone_distracted:true} : {live:false,present:false,phone:false,phone_seconds:0,phone_distracted:false}} : null, history:hist}),
         get_trends: () => trendsData,
         // Every week since the first session, and the same summed by month. ?longtrends=1 adds about
