@@ -4395,9 +4395,9 @@ button.wp-day.is-future:disabled {
   white-space: nowrap;
 }
 
-/* Four weeks of bars, no axis; the viewed week is solid, the running week dashed. */
+/* Four weeks of bars, no axis; the viewed week is solid, the running week an outline. */
 /* The same bars as the week's days, in ink rather than green: the viewed week is solid, the
-   rest sit back, the running week is a dashed outline, an empty week a short outline. Every
+   rest sit back, the running week is a hollow outline, an empty week a short outline. Every
    colour is a theme token, so dark mode flips them with the panel. */
 .trend-spark {
   display: flex;
@@ -4484,7 +4484,6 @@ button.trend-spark-track:focus-visible .week-tip {
 }
 
 .trend-spark-bar.is-running {
-  border-style: dashed;
   border-color: var(--sv-muted);
   background: transparent;
 }
@@ -5047,7 +5046,7 @@ button.recap-bar-col:active .recap-bar {
   opacity: 0.8;
 }
 
-/* Lines: the finished periods joined, a dashed typical line, the period in progress hollow. */
+/* Lines: the finished periods joined, a dashed typical line, the period in progress unjoined. */
 .trend-line-plot {
   position: relative;
   height: 120px;
@@ -5096,10 +5095,8 @@ button.recap-bar-col:active .recap-bar {
   background: var(--sv-coral);
 }
 
-/* The period in progress: filled like the others, with a dashed edge to say it isn't done. */
-.trend-point.is-now {
-  border-style: dashed;
-}
+/* The period in progress is a point like the others; the line stops short of it, which says
+   it isn't done. */
 
 .trend-point:hover,
 .trend-point:focus-visible {
