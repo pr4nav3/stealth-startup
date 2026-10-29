@@ -146,6 +146,10 @@ pub struct ReportSpan {
     pub label: String,
     pub source: String,
     pub state: String,
+    /// The session was paused (or on a Pomodoro break) just before this span. Pauses are cut out
+    /// of the timeline, so without this the spans on either side would read as one run.
+    #[serde(default)]
+    pub after_pause: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1134,12 +1138,12 @@ impl SessionStorage {
 
     /// The answers to "were any of these a distraction?": this session's time on each named
     /// distraction becomes distracted time, and the rest is remembered as work.
-    pub fn review_session(&self, session_id: u64, distractions: &[String], work: &[String]) -> Result<(), String> {
+    pub fn review_session(&self, session_id: u64, distractions: &[(String, String)], work: &[String]) -> Result<(), String> {
         let tx = self.conn.unchecked_transaction().map_err(|error| error.to_string())?;
-        for key in distractions {
+        for (kind, key) in distractions {
             tx.execute("UPDATE span SET state = 'distracted'
-                        WHERE session_id = ?1 AND activity_key = ?2 AND state = 'focused'",
-                params![session_id, key]).map_err(|error| error.to_string())?;
+                        WHERE session_id = ?1 AND kind = ?2 AND activity_key = ?3 AND state = 'focused'",
+                params![session_id, kind, key]).map_err(|error| error.to_string())?;
         }
         let mut known = self.known_work()?;
         for key in work {
@@ -1147,7 +1151,7 @@ impl SessionStorage {
                 known.push(key.clone());
             }
         }
-        known.retain(|key| !distractions.contains(key));
+        known.retain(|key| !distractions.iter().any(|(_, named)| named == key));
         self.set_setting(KNOWN_WORK_KEY, &serde_json::to_string(&known).map_err(|error| error.to_string())?)?;
         self.recompute_session_metrics(session_id)?;
         tx.commit().map_err(|error| error.to_string())
@@ -2079,6 +2083,10 @@ impl SessionStorage {
         self.conn
             .execute("DELETE FROM session WHERE ended_at IS NOT NULL", [])
             .map_err(|error| error.to_string())?;
+        // What the review learned belongs to that history.
+        self.conn
+            .execute("DELETE FROM setting WHERE key = ?1", [KNOWN_WORK_KEY])
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -2119,11 +2127,29 @@ impl SessionStorage {
                     label,
                     source: if legacy_shell { "none".to_string() } else { row.get(6)? },
                     state,
+                    after_pause: false,
                 })
             })
             .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())
+        let mut spans = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+        let pauses = self.pause_offsets(session_id)?;
+        for span in &mut spans {
+            span.after_pause = span.started_offset_seconds > 0 && pauses.contains(&span.started_offset_seconds);
+        }
+        Ok(spans)
+    }
+
+    /// Where the session was paused, by hand or for a Pomodoro break: the offsets where the
+    /// timeline was cut.
+    fn pause_offsets(&self, session_id: u64) -> Result<Vec<u64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT at_offset_seconds FROM event WHERE session_id = ?1 AND kind = 'pause'")
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([session_id], |row| row.get::<_, i64>(0).map(|value| value.max(0) as u64))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
     fn load_events_for_session(&self, session_id: u64) -> Result<Vec<ReportEvent>, String> {
@@ -2230,7 +2256,7 @@ fn count_drifts(spans: &[ReportSpan]) -> u64 {
     let mut in_focus_track = false;
     let mut previous_end = 0;
     for span in spans {
-        if span.started_offset_seconds > previous_end {
+        if span.started_offset_seconds > previous_end || span.after_pause {
             in_focus_track = false;
         }
         previous_end = span.started_offset_seconds.saturating_add(span.seconds);
@@ -2257,7 +2283,7 @@ fn drift_recoveries(spans: &[ReportSpan]) -> (Vec<u64>, u64) {
     let mut was_focused = false;
     let mut previous_end = 0;
     for span in spans {
-        if span.started_offset_seconds > previous_end {
+        if span.started_offset_seconds > previous_end || span.after_pause {
             drifting = None;
             was_focused = false;
         }
@@ -2285,7 +2311,7 @@ fn focused_stretches(spans: &[ReportSpan]) -> Vec<u64> {
     let mut current = 0u64;
     let mut previous_end = 0;
     for span in spans {
-        if span.started_offset_seconds > previous_end && current > 0 {
+        if (span.started_offset_seconds > previous_end || span.after_pause) && current > 0 {
             stretches.push(current);
             current = 0;
         }
@@ -2396,7 +2422,7 @@ fn fold_days(rows: Vec<(String, i64, i64)>) -> Vec<DailyFocus> {
     days.into_iter()
         .map(|(date, (focus_seconds, run_seconds, session_count))| DailyFocus {
             date,
-            focus_percent: if run_seconds == 0 { 0 } else { (focus_seconds * 100) / run_seconds },
+            focus_percent: rounded_percent(focus_seconds, run_seconds),
             focus_seconds,
             session_count,
         })
@@ -2648,6 +2674,7 @@ mod tests {
             label: "VS Code".to_string(),
             source: "window".to_string(),
             state: state.to_string(),
+            after_pause: false,
         }
     }
 
@@ -3675,6 +3702,21 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_ends_a_stretch_of_work() {
+        let storage = SessionStorage::open_in_memory().unwrap();
+        let id = storage.insert_session("Pomodoro", Strictness::Normal, "2026-09-22T12:00:00Z", 3000).unwrap();
+        // Two rounds of 25 minutes with a break between: the timeline has no gap, only a pause event.
+        storage.insert_span(id, &app("Code"), "focused", 0, 1500).unwrap();
+        storage.insert_event(id, 1500, "pause", None).unwrap();
+        storage.insert_span(id, &app("Code"), "focused", 1500, 1500).unwrap();
+        storage.close_session(id, "2026-09-22T13:00:00Z", "completed", 3000).unwrap();
+        let report = storage.get_session_report(id).unwrap();
+        assert_eq!(report.longest_stretch_seconds, 1500, "a break ends a stretch");
+        assert_eq!(report.median_stretch_seconds, 1500);
+        assert!(report.spans[1].after_pause && !report.spans[0].after_pause);
+    }
+
+    #[test]
     fn an_app_moves_between_work_and_distraction_for_one_session_only() {
         let storage = SessionStorage::open_in_memory().unwrap();
         let id = storage.insert_session("Move", Strictness::Normal, "2026-09-22T12:00:00Z", 900).unwrap();
@@ -3705,7 +3747,7 @@ mod tests {
         storage.insert_span(id, &app("Spotify"), "focused", 0, 300).unwrap();
         storage.insert_span(id, &app("Code"), "focused", 300, 600).unwrap();
         storage.close_session(id, "2026-09-22T12:15:00Z", "stopped", 900).unwrap();
-        storage.review_session(id, &["spotify".to_string()], &["code".to_string()]).unwrap();
+        storage.review_session(id, &[("app".to_string(), "spotify".to_string())], &["code".to_string()]).unwrap();
         let report = storage.get_session_report(id).unwrap();
         assert_eq!((report.focused_seconds, report.distracted_seconds), (600, 300));
         assert_eq!(storage.known_work().unwrap(), vec!["code".to_string()]);

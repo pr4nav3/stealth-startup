@@ -230,7 +230,10 @@ impl SessionManager {
     /// After a session: the apps and sites named distractions go on the list and count as
     /// distracted time in that session; the ones named work are not asked about again.
     pub fn review_session(&mut self, id: u64, distractions: Vec<AppRule>, work: Vec<String>, now: Duration) -> Result<RulesSaved, String> {
-        let keys: Vec<String> = distractions.iter().map(|rule| rule.value.to_lowercase()).collect();
+        let keys: Vec<(String, String)> = distractions
+            .iter()
+            .map(|rule| (match rule.target { RuleTarget::Website => "website", RuleTarget::App => "app" }.to_string(), rule.value.to_lowercase()))
+            .collect();
         self.storage()?.review_session(id, &keys, &work)?;
         let mut rules = self.rules();
         rules.extend(distractions);
@@ -449,6 +452,19 @@ impl SessionManager {
     pub fn allow_current_for_session(&mut self, now: Duration) -> SessionSnapshot {
         if let Some(session) = self.current.as_mut() {
             session.allow_current(now, self.storage.as_ref());
+        }
+        self.snapshot(now)
+    }
+
+    /// From the live card's chips: allow a listed distraction for this session, or take that
+    /// allowance back. The engine judges by it from the next sample.
+    pub fn set_session_exception(&mut self, rule: AppRule, allowed: bool, now: Duration) -> SessionSnapshot {
+        if let Some(session) = self.current.as_mut() {
+            session.exceptions.retain(|exception| exception != &rule);
+            if allowed {
+                session.exceptions.push(rule);
+            }
+            session.engine.set_exceptions(session.exceptions.clone());
         }
         self.snapshot(now)
     }

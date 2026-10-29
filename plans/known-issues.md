@@ -77,6 +77,8 @@ for that one session (and rename it). See `plans/window-history-audit.md`.
 
 ## Voice
 
+**Decisions still open after the 2026-10-28 logic pass.** A session start re-pins the status window (a test says so on purpose; "Unpin" lasts one session). "Break over" plays a back-to-work line, not a line of its own. A break that runs out waits for the user forever. The tray's Pause/Resume starts the next round early during a break. A pause cancels a 5-minute mute. Focused % divides by the whole session, so time away lowers it (the copy now says so).
+
 **Starter clips are machine-checked, not listened to.** Since 2026-10-25 the starter voices (named Derek
 and Elise on screen) ship all 24 bundled lines, the 20 tone lines plus 4 Phone lines (`src-tauri/voices/<id>/`), copied into the starter profiles once. Each was
 picked from four seeded takes by length against its words; nobody has heard them. A user who

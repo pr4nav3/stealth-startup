@@ -322,6 +322,13 @@ fn review_session(
 }
 
 #[tauri::command]
+fn set_session_exception(rule: focus::AppRule, allowed: bool, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
+    let now = state.started_at.elapsed();
+    Ok(sessions.set_session_exception(rule, allowed, now))
+}
+
+#[tauri::command]
 fn reclassify_session_app(
     id: u64,
     kind: String,
@@ -740,6 +747,7 @@ pub fn run() {
             review_candidates,
             review_session,
             reclassify_session_app,
+            set_session_exception,
             update_rules,
             get_phrase_library,
             update_phrase_library,
@@ -1164,8 +1172,19 @@ fn set_status_window_size(
     window
         .set_size(tauri::LogicalSize::new(width, height))
         .map_err(|error| error.to_string())?;
+    // A card (centred) shows whether or not the session timer is on: with the timer off the
+    // window is hidden the rest of the time, so it comes out for the card and goes back after.
+    let timer_shown = app
+        .try_state::<AppState>()
+        .map(|state| state.sessions.lock().map(|sessions| sessions.status_window_enabled()).unwrap_or(true))
+        .unwrap_or(true);
     if center {
         let _ = window.set_always_on_top(true);
+        if !timer_shown {
+            let _ = window.show();
+        }
+    } else if !timer_shown {
+        let _ = window.hide();
     } else if let Some(state) = app.try_state::<AppState>() {
         let pin = state
             .sessions
@@ -1349,6 +1368,7 @@ fn start_session_ticker(app: AppHandle) {
     let mut last_loop = app.state::<AppState>().started_at.elapsed();
     let mut nudges_seen = (0, 0);
     let mut moments_seen = (0, 0);
+    let mut was_running = false;
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
 
@@ -1362,6 +1382,12 @@ fn start_session_ticker(app: AppHandle) {
             }
             last_loop = now;
             let had_current = sessions.has_current();
+            // A new session starts its counts over, whatever its id (0 with history off).
+            if had_current && !was_running {
+                nudges_seen = (0, 0);
+                moments_seen = (0, 0);
+            }
+            was_running = had_current;
             let snapshot = sessions.tick(now);
             // A phone nudge can come from a webcam frame or this tick; both show up here.
             if new_nudge(&mut nudges_seen, &snapshot) {

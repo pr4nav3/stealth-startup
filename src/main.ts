@@ -193,6 +193,8 @@ interface ReportSpan {
   activity_key: string;
   label: string;
   state: string;
+  /** The session was paused, or on a break, just before this span. */
+  after_pause?: boolean;
 }
 
 interface ReportEvent {
@@ -842,7 +844,14 @@ async function init(): Promise<void> {
     phraseOverrides = Object.fromEntries(
       loadedPhraseLibrary.phrase_overrides.filter((phrase) => bundled.has(phrase.id)).map((phrase) => [phrase.id, phrase]),
     );
-    history.forEach((item) => knownHistoryIds.add(item.id));
+    // Every past session is known, except the newest one no report was ever offered for: a
+    // session ended by quitting, or finished while the window was away, is offered on launch.
+    const offered = Number(readLocal("review.lastOffered") ?? "0");
+    history.forEach((item, index) => {
+      if (index > 0 || item.id <= offered) {
+        knownHistoryIds.add(item.id);
+      }
+    });
     void refreshCaptureAccess();
     // Coming back from System Settings is when a permission changes.
     window.addEventListener("focus", () => void refreshCaptureAccess());
@@ -1641,7 +1650,7 @@ function renderSoFarTiles(current: CurrentSession): string {
   const tile = (label: string, value: string, title: string) =>
     `<div class="sofar-tile" title="${attr(title)}"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`;
   return [
-    tile("Focused", formatHours(current.metrics.focused_seconds), "Time not spent on a distraction"),
+    tile("Focused", formatHours(current.metrics.focused_seconds), "Time on work: not on a distraction, your phone, or away"),
     tile("Longest", formatHours(longest), "Longest unbroken run of work"),
     tile("Nudges", String(current.metrics.nudges), "Times Supervisor spoke up"),
   ].join("");
@@ -1650,24 +1659,19 @@ function renderSoFarTiles(current: CurrentSession): string {
 /** The distractions, with the ones allowed for this session struck through. */
 function renderSessionDistractions(exceptions: AppRule[]): string {
   const rules = permanentRules.slice().reverse();
-  const shown = rules.slice(0, 6);
-  const chips = shown.map((rule) => {
-    const allowed = exceptions.some((exception) => sameRule(exception, rule));
-    return `<span class="${allowed ? "is-allowed" : ""}" title="${attr(allowed ? "Allowed once, until this session ends" : "")}">${escapeHtml(ruleName(rule))}</span>`;
-  });
-  if (rules.length > shown.length && chips.length) {
-    const last = chips.pop();
-    chips.push(`<span class="session-rule-tail">${last}<span class="session-rule-more">...</span></span>`);
+  if (rules.length === 0) {
+    return `<p class="session-rules-empty">Nothing on the list yet.</p>`;
   }
-  const body = chips.length ? chips.join("") : `<span class="no-session-rules">None yet. Everything counts as work.</span>`;
-  const allowed = exceptions.map((exception) => ruleName(exception));
+  const chips = rules
+    .map((rule, index) => {
+      const allowed = exceptions.some((exception) => exception.target === rule.target && exception.value === rule.value);
+      return `<button type="button" class="rule-chip rule-chip-distracting ${allowed ? "is-allowed" : ""}" data-action="toggle-session-exception" data-rule-index="${index}" aria-pressed="${allowed}" title="${attr(allowed ? "Allowed once. Tap to count it as a distraction again." : "Tap to allow it once, for this session.")}">${escapeHtml(ruleName(rule))}</button>`;
+    })
+    .join("");
+  const allowed = rules.filter((rule) => exceptions.some((exception) => exception.target === rule.target && exception.value === rule.value)).map(ruleName);
   return `
-    <section class="session-rule-set">
-      <div>
-        ${body}
-      </div>
-      ${allowed.length ? `<p class="session-allowed">Allowed once: ${escapeHtml(allowed.join(", "))}</p>` : ""}
-    </section>
+    <div class="chips session-rule-chips">${chips}</div>
+    ${allowed.length ? `<p class="session-allowed">Allowed once: ${escapeHtml(allowed.join(", "))}</p>` : ""}
   `;
 }
 
@@ -1706,7 +1710,7 @@ function renderSessionReview(review: { items: ReviewItem[]; saving: boolean }): 
         <p class="review-intro">These counted as work. Tap any that weren't.</p>
         <div class="review-chips">${chips}</div>
         <div class="review-foot">
-          <button class="review-later" type="button" data-action="review-later">Ask me later</button>
+          <button class="review-later" type="button" data-action="review-later">Skip</button>
           <button class="${marked ? "danger" : "primary"}" type="button" data-action="review-save" ${review.saving ? "disabled" : ""}>${marked ? `Add ${marked} to distractions` : "All work"}</button>
         </div>
       </section>
@@ -1738,6 +1742,7 @@ async function saveSessionReview(): Promise<void> {
     });
     permanentRules = saved.rules;
     sessionReview = null;
+    dayCardKey = "";
     await openHistoryReport(review.id);
   } catch (error) {
     review.saving = false;
@@ -2176,7 +2181,8 @@ function onboardingSteps(): OnboardingStep[] {
     {
       id: "voice",
       title: "Clone a voice",
-      copy: "Record twenty seconds of anyone, and that's who nudges you back.",
+      copy: "Record twenty seconds of anyone, and that's who nudges you back. Derek and Elise are ready if you'd rather not.",
+      optional: true,
       done: (voiceBackend?.profiles ?? []).some(
         (profile) => !(STARTER_PROFILE_IDS as readonly string[]).includes(profile.profile_id) && Boolean(profile.reference_path),
       ),
@@ -4157,7 +4163,7 @@ function renderHistoryItem(item: SessionSummary): string {
       </div>
       <div class="history-item-stats">
         <dl>
-          <div title="Time not spent on a distraction"><dt>Focused</dt><dd>${escapeHtml(formatHours(item.focus_seconds))}</dd></div>
+          <div title="Time on work: not on a distraction, your phone, or away"><dt>Focused</dt><dd>${escapeHtml(formatHours(item.focus_seconds))}</dd></div>
           <div title="How long the session ran"><dt>Duration</dt><dd>${formatDuration(item.duration_seconds)}</dd></div>
           <div title="Times Supervisor spoke up about a distraction"><dt>Nudges</dt><dd>${item.nudges}</dd></div>
         </dl>
@@ -4185,11 +4191,12 @@ function renderAppRowActions(app: RecapApp, sessionId: number): string {
   }
   const toDistraction = app.group !== "Distractions";
   const move = `<button class="small-button" type="button" data-action="move-app" data-session-id="${sessionId}" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}" data-label="${attr(app.label)}" data-to="${toDistraction ? "distraction" : "work"}">${toDistraction ? "Count as distraction" : "Count as work"}</button>`;
-  const add =
-    !toDistraction && !appOnList(app)
+  const list = appOnList(app)
+    ? `<button class="small-button" type="button" data-action="remove-rule-from-report" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}">Remove from list</button>`
+    : !toDistraction
       ? `<button class="small-button" type="button" data-action="add-rule-from-report" data-kind="${attr(app.kind)}" data-key="${attr(app.key)}">Add to list</button>`
       : "";
-  return `<span class="recap-app-actions">${move}${add}</span>`;
+  return `<span class="recap-app-actions">${move}${list}</span>`;
 }
 
 function renderAppGroups(apps: RecapApp[], groups: string[], sessionId: number | null = null): string {
@@ -4641,9 +4648,10 @@ function renderSessionReport(report: SessionReport): string {
       </section>
       <section class="report-stats" aria-label="Session stats">
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds), "How long the session ran. Paused time isn't counted.")}
-        ${reportStat("Focused", `${report.focus_percent}%`, "How much of the session you spent off your distractions.")}
+        ${reportStat("Focused", `${report.focus_percent}%`, "The share of the session you were on work. Away and asleep time count against it.")}
         ${reportStat("Longest stretch", formatMinutes(report.longest_stretch_seconds), "Your longest run of work without a distraction or stepping away.")}
         ${reportStat("Nudges", String(report.nudge_count), "How many times Supervisor spoke up to pull you back.")}
+        ${pomodoroStat(report)}
         ${report.phone_seconds > 0 ? reportStat("Phone", formatClockWithUnit(report.phone_seconds), "How long the webcam saw a phone in your hand.") : ""}
       </section>
       <section class="panel recap-apps">
@@ -4673,6 +4681,16 @@ function renderSessionReport(report: SessionReport): string {
 const flippedStats = new Set<string>();
 
 /** A stat tile that turns over on click to say, in plain words, what the number is. */
+/** "4 × 25 min" for a Pomodoro session, from the event its start wrote ("25/5x4"). */
+function pomodoroStat(report: SessionReport): string {
+  const plan = report.events.find((event) => event.kind === "pomodoro")?.detail?.match(/^(\d+)\/(\d+)x(\d+)$/);
+  if (!plan) {
+    return "";
+  }
+  const rounds = report.events.filter((event) => event.kind === "round_over").length + 1;
+  return reportStat("Rounds", `${Math.min(rounds, Number(plan[3]))} of ${plan[3]}`, `Pomodoro: ${plan[1]}-minute rounds with ${plan[2]}-minute breaks. Breaks are not in the timeline or the duration.`);
+}
+
 function reportStat(labelText: string, value: string, help: string): string {
   const flipped = flippedStats.has(labelText);
   return `
@@ -5367,6 +5385,19 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     return;
   }
 
+  if (action === "toggle-session-exception" && source) {
+    const rule = permanentRules.slice().reverse()[Number(source.dataset.ruleIndex)];
+    const current = snapshot?.current;
+    if (!rule || !current) {
+      return;
+    }
+    const allowed = !current.exceptions.some((exception) => exception.target === rule.target && exception.value === rule.value);
+    if (await invokeSnapshot("set_session_exception", { rule, allowed })) {
+      showFeedback(allowed ? `${ruleName(rule)} allowed for this session` : `${ruleName(rule)} counts again`);
+    }
+    return;
+  }
+
   if (action === "nudge-stop" || action === "nudge-replay") {
     void emit("nudge-control", action === "nudge-stop" ? "stop" : "replay");
     return;
@@ -5607,11 +5638,27 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
         key,
         distraction: to === "distraction",
       });
-      // The session's totals changed: the list, the week and Trends read them too.
+      // The session's totals changed: the list, the week, Trends and the day card read them too.
+      dayCardKey = "";
       await refreshSnapshotNow();
       await Promise.all([refreshHistoryWeek(false), refreshTrends(false)]);
       const name = label || key;
       showFeedback(to === "distraction" ? `${name} counts as a distraction here` : `${name} counts as work here`);
+    } catch (error) {
+      showFeedback(errorText(error));
+    }
+    paintHistoryBody();
+    return;
+  }
+
+  if (action === "remove-rule-from-report" && source) {
+    const { kind, key } = source.dataset;
+    const target: AppRule["target"] = kind === "website" ? "website" : "app";
+    try {
+      const rules = permanentRules.filter((rule) => !(rule.target === target && rule.value.toLowerCase() === (key ?? "").toLowerCase()));
+      const saved = await invoke<RulesSaved>("update_rules", { rules });
+      permanentRules = saved.rules;
+      showFeedback("Taken off your distractions");
     } catch (error) {
       showFeedback(errorText(error));
     }
@@ -7636,12 +7683,10 @@ function selectedNudgeClip(nudgeCount: number, phone = false): VoiceClipSummary 
       .filter((clip): clip is VoiceClipSummary => Boolean(clip));
   const phoneReady = phone ? readyIn("phone") : [];
   const ready = phoneReady.length > 0 ? phoneReady : readyIn("nudge");
+  // No nudge line in this personality: the voice stays quiet, as the Voice page says. A
+  // session-over or round-over line is never a nudge.
   if (ready.length === 0) {
-    const clips = voice.profile?.clips ?? [];
-    if (clips.length === 0) {
-      return null;
-    }
-    return clips[(Math.max(1, nudgeCount) - 1) % clips.length];
+    return null;
   }
   return ready[(Math.max(1, nudgeCount) - 1) % ready.length];
 }
@@ -8526,6 +8571,23 @@ async function runHistorySearch(query: string): Promise<void> {
   paintHistoryBody();
 }
 
+/** Browser storage, which can be absent or throw (private windows, cleared site data). */
+function readLocal(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocal(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Nothing to do: the report is simply offered again next time.
+  }
+}
+
 /** The newest session not yet seen, left unseen until its report opens (or the caller decides
  *  it never will). Anything older than it is marked seen: only the latest gets a report. */
 function noteNewHistory(items: SessionSummary[]): number | null {
@@ -8563,6 +8625,9 @@ async function openHistoryReport(id: number, review = false): Promise<void> {
     activeTab = "history";
     lastError = "";
     knownHistoryIds.add(id);
+    if (review) {
+      writeLocal("review.lastOffered", String(id));
+    }
   } catch (error) {
     lastError = errorText(error);
     historyView = "list";
@@ -8869,7 +8934,7 @@ function focusedStretches(spans: ReportSpan[]): number[] {
   let current = 0;
   let previousEnd = 0;
   for (const span of spans) {
-    if (span.started_offset_seconds > previousEnd && current > 0) {
+    if ((span.started_offset_seconds > previousEnd || span.after_pause) && current > 0) {
       stretches.push(current);
       current = 0;
     }

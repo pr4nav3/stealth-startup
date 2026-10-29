@@ -67,6 +67,19 @@ pass from Windows, and what is left for a release, is
 - [x] Status window: "More" instead of "More settings"; nothing to mute or add
       during a break; the Add button names what is in front ("Add YouTube to
       distractions") and says why when there is nothing to add
+- [x] Logic pass (two audits over the week's rewrites): a pause or a break now
+      ends a stretch of work (`after_pause` on spans; longest stretch, attention
+      span, recovery and drifts all honour it, in the backend and the live "So
+      far" tile); a personality with no nudge line stays quiet instead of
+      playing any clip; the distraction card shows even with the session timer
+      hidden; Allow once can be given and taken back from the live card's
+      chips (`set_session_exception`); a Pomodoro report shows its rounds; a
+      session ended by quitting is offered its report on the next launch; the
+      day card re-reads a session after a move or review; "Skip" instead of
+      "Ask me later"; Remove from list on a report row; Delete all history
+      forgets the review's answers; the review matches rows by kind and key;
+      Focused copy says what it measures; the day card's percent rounds like
+      the report's; sessions with history off keep their voice
 
 ## Pomodoro (2026-10-26, branch `pomodoro`)
 
