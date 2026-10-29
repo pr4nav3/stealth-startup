@@ -5547,6 +5547,11 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     // type, as with the Start button.
     draft.mode = "timer";
     draft.duration_minutes = streakSessionMinutes(streakMinutesLeft());
+    // The start screen lives on the Session tab; from History or Settings, go there first (the
+    // tab button carries the leaving steps: voice screen, webcam preview, week picker).
+    if (activeTab !== "session") {
+      document.querySelector<HTMLButtonElement>('nav.tabs [data-tab="session"]')?.click();
+    }
     await runAction("open-preflight");
     return;
   }
