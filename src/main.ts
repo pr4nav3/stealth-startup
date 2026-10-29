@@ -2616,10 +2616,15 @@ function previewSite(editor: RuleEditor): string | null {
   return preview && "value" in preview && preview.target === "website" ? preview.value : null;
 }
 
+/** True once what was typed resolved to a site or an app. */
+function rulePreviewReady(editor: RuleEditor): boolean {
+  return Boolean(editor.value.trim() && editor.preview && "value" in editor.preview);
+}
+
 function renderRulePreview(editor: RuleEditor): string {
   const preview = editor.preview;
   if (!editor.value.trim() || !preview) {
-    return `<span class="rule-preview-note">You'll see what this matches before you save.</span>`;
+    return `<span class="rule-preview-note">Paste a link or type a name.</span>`;
   }
   if ("error" in preview) {
     return `<span class="rule-preview-error">${escapeHtml(preview.error)}</span>`;
@@ -2627,9 +2632,8 @@ function renderRulePreview(editor: RuleEditor): string {
   const site = preview.target === "website";
   const value = site ? preview.value : appNames[preview.value.toLowerCase()] ?? preview.value;
   return `
-    <span class="rule-kind">${site ? "Site" : "App"}</span>
     <strong class="rule-preview-value">${escapeHtml(value)}</strong>
-    <span class="rule-preview-note">${site ? "Every page on this site" : "App windows; browser websites use site rules"}</span>
+    <span class="rule-kind">${site ? "The website" : "The app"}</span>
   `;
 }
 
@@ -2642,10 +2646,9 @@ function renderRuleEditor(editor: RuleEditor): string {
         <input id="rule-value" name="value" maxlength="300" spellcheck="false" value="${attr(editor.value)}" placeholder="youtube.com or Spotify" />
       </label>
       <label class="rule-name-field" ${site ? "" : "hidden"}>
-        <span>Shown as</span>
+        <span>Name</span>
         <input id="rule-name" name="name" maxlength="60" value="${attr(editor.name)}" placeholder="${attr(site ?? "")}" />
       </label>
-      <p class="rule-entry-help">Paste a web address to match every page on that site, or enter an app name to match its windows. Check the match below before saving.</p>
       <p class="rule-preview" id="rule-preview" aria-live="polite">${renderRulePreview(editor)}</p>
       ${
         editor.index !== null && editor.confirmDelete
@@ -2655,7 +2658,7 @@ function renderRuleEditor(editor: RuleEditor): string {
               <button type="button" data-rule-action="keep">Keep it</button>
             </div>`
           : `<div class="rule-editor-actions">
-              <button class="primary" type="submit">Save</button>
+              <button class="primary ${rulePreviewReady(editor) ? "" : "is-quiet"}" type="submit">Save</button>
               ${editor.index === null ? "" : `<button class="danger" type="button" data-rule-action="delete" data-rule-index="${editor.index}">Delete</button>`}
               <button type="button" data-rule-action="cancel">Cancel</button>
             </div>`
@@ -6483,6 +6486,7 @@ function paintRuleEditorLive(): void {
   const nameInput = document.getElementById("rule-name") as HTMLInputElement | null;
   if (preview) {
     preview.innerHTML = renderRulePreview(editor);
+    preview.closest("form")?.querySelector('button[type="submit"]')?.classList.toggle("is-quiet", !rulePreviewReady(editor));
   }
   if (nameInput) {
     const site = previewSite(editor);

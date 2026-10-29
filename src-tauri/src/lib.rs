@@ -315,7 +315,10 @@ fn resolve_rule_input(text: String, state: State<'_, AppState>) -> Result<focus:
     let names = lock_sessions(&state)?.app_names().unwrap_or_default();
     let rule = focus::AppRule::from_input_with_apps(&text, &names)?;
     if rule.names_a_browser() {
-        return Err("A browser can't be a distraction on its own. Add the website instead (youtube.com).".to_string());
+        let name = names.get(&rule.value).cloned().unwrap_or_else(|| text.trim().to_string());
+        return Err(format!(
+            "{name} is a browser, so it can't be a distraction by itself. Add the website instead, like youtube.com."
+        ));
     }
     Ok(rule)
 }

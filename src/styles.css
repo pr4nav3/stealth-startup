@@ -1998,16 +1998,25 @@ dt {
   display: flex;
   flex-wrap: wrap;
   grid-column: 1;
-  align-items: center;
+  align-items: baseline;
+  align-self: center;
   gap: 8px;
   min-width: 0;
-  min-height: 40px;
+  margin: 0;
   font-size: var(--sv-type-3);
 }
 
 .rule-editor .rule-editor-actions {
   grid-column: 2;
   justify-self: end;
+  align-self: center;
+}
+
+/* Save sits back until the line says there is something to save; Enter still tries. */
+.rule-editor-actions .primary.is-quiet {
+  background: var(--panel);
+  color: var(--sv-muted);
+  box-shadow: none;
 }
 
 .rule-editor-ask {
@@ -2016,15 +2025,11 @@ dt {
 }
 
 .rule-kind {
-  border: var(--border);
-  border-radius: 4px;
-  padding: 4px 6px;
-  background: var(--warning);
-  color: var(--sv-colored-ink);
+  color: var(--sv-muted);
   font-family: var(--font-mono);
   font-size: var(--sv-type-4);
   font-weight: 500;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   line-height: 1;
   text-transform: uppercase;
 }
@@ -2054,13 +2059,6 @@ dt {
   border-radius: 3px;
   background: var(--danger);
   content: "";
-}
-
-.rule-entry-help {
-  grid-column: 1 / -1;
-  margin: 0;
-  color: var(--sv-muted);
-  font-size: var(--sv-type-3);
 }
 
 .recap-app-name.recap-site-name {

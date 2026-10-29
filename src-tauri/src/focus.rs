@@ -324,11 +324,11 @@ impl AppRule {
             [key] => return Ok(Self::app(key)),
             [] => {}
             _ => return Err(format!(
-                "More than one app is called {text}. Rate the one you mean from History, or rename one first."
+                "More than one app is called {text}. Rename one of them from a session report first."
             )),
         }
         Self::from_input(text).ok_or_else(|| {
-            "Enter a website (youtube.com) or an app name (Spotify), not a page title or path".to_string()
+            "Type a website like youtube.com or an app like Spotify.".to_string()
         })
     }
 
