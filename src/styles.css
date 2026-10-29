@@ -775,9 +775,10 @@ h1 {
   opacity: 0;
 }
 
-/* Backwards, not both: a held end frame would pin the transform and stop the hover lift. */
+/* Backwards, not both: a held end frame would pin the transform and stop the hover lift. The
+   curve eases out without overshooting, so no day grows past its size and settles back. */
 .cal-grid.is-animated .cal-day {
-  animation: cal-pop 320ms cubic-bezier(0.2, 0.9, 0.3, 1.2) backwards;
+  animation: cal-pop 320ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 /* A past day lifts like a raised button and its date slides out for its focused time. */
@@ -840,14 +841,13 @@ h1 {
   }
 }
 
+/* Only a start frame: each day eases into its own look, so a faded future day or a day from
+   another month never flashes at full strength first. It slides, never scales, so it is drawn
+   at its real size throughout. */
 @keyframes cal-pop {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: none;
+    transform: translateY(6px);
   }
 }
 
@@ -4204,20 +4204,19 @@ button.wp-day.is-future:disabled {
 
 /* Bars rise from the baseline once, left to right; `backwards` keeps them flat through the delay
    and leaves hover transforms alone once done. */
+/* Bars grow up from the baseline by their real height, never by scaling: a scaled bar is drawn
+   soft and a hair small until it ends, then snaps to full size. Each bar's own height is the end
+   frame. The curve eases out without overshooting. */
 .week-hero-bars.is-animated .recap-bar.is-on,
 .trend-bars.is-animated .recap-bar.is-on,
 .trend-spark.is-animated .trend-spark-bar {
-  transform-origin: bottom;
   animation: bar-rise 600ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   animation-delay: calc(var(--i, 0) * 55ms);
 }
 
 @keyframes bar-rise {
   from {
-    transform: scaleY(0);
-  }
-  to {
-    transform: scaleY(1);
+    height: 0;
   }
 }
 

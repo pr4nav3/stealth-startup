@@ -702,6 +702,8 @@ let preflightBlocksOpen = false;
 let preflightAdvancedOpen = false;
 let sessionRulesOpen = false;
 let paintedViewKey = "";
+/** History's data is loading after a tab switch; the poll leaves the page to that one draw. */
+let historyArriving = false;
 let overlayMoreOpen = false;
 let distractionDismissedFor = "";
 let distractionLatchKey = "";
@@ -1025,7 +1027,7 @@ async function refreshSnapshotNow(): Promise<void> {
     const current = snapshot?.current ?? null;
     // While something is being edited or typed into, only paint in place. The rebuild
     // waits for the next tick after the editor closes or the field loses focus.
-    if (editorIsOpen() || typingInField() || viewKey() === paintedViewKey) {
+    if (editorIsOpen() || typingInField() || historyArriving || viewKey() === paintedViewKey) {
       paintLive(current);
     } else {
       render();
@@ -4901,17 +4903,17 @@ function bindEvents(root: ParentNode = document): void {
         ruleEditor = null;
       }
       closeWeekPicker();
-      render();
-      if (activeTab === "history") {
-        // Redraw only if the data moved: a redraw now would cut the charts' rise short.
-        const before = historyDataKey();
-        void refreshTrends(false)
-          .then(() => refreshHistoryWeek(false))
-          .then(() => {
-            if (activeTab === "history" && historyDataKey() !== before) {
-              render();
-            }
-          });
+      if (next === "history") {
+        // Fresh data first, then one draw: a second draw mid-rise would snap the bars to full height.
+        historyArriving = true;
+        void Promise.all([refreshTrends(false), refreshHistoryWeek(false)]).then(() => {
+          historyArriving = false;
+          if (activeTab === "history") {
+            render();
+          }
+        });
+      } else {
+        render();
       }
       if (leavingWebcam) {
         void stopWebcamPreview();
@@ -8337,11 +8339,6 @@ async function refreshTrends(shouldRender = true): Promise<void> {
   if (shouldRender) {
     render();
   }
-}
-
-/** What the History list draws from, to tell whether a refresh changed anything. */
-function historyDataKey(): string {
-  return JSON.stringify([trends, historyWeek, weekRecap, appNames]);
 }
 
 async function refreshHistoryWeek(shouldRender = true): Promise<void> {
