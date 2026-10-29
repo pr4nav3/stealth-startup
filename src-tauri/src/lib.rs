@@ -82,8 +82,8 @@ async fn start_session(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SessionSnapshot, String> {
-    let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let now = state.started_at.elapsed();
 
     sessions.start(input, now);
     let should_show_status = sessions.status_window_enabled();
@@ -103,36 +103,42 @@ async fn start_session(
 
 #[tauri::command]
 fn get_session_snapshot(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.snapshot(now))
+    Ok(sessions.snapshot(now))
 }
 
 #[tauri::command]
 fn pause_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    let snapshot = lock_sessions(&state)?.pause(now);
+    let snapshot = sessions.pause(now);
+    drop(sessions);
     sync_session_webcam(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
 fn resume_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    let snapshot = lock_sessions(&state)?.resume(now);
+    let snapshot = sessions.resume(now);
+    drop(sessions);
     sync_session_webcam(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
 fn snooze_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.snooze(now, 5 * 60))
+    Ok(sessions.snooze(now, 5 * 60))
 }
 
 #[tauri::command]
 fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
-    let now = state.started_at.elapsed();
     let mut sessions = lock_sessions(&state)?;
+    let now = state.started_at.elapsed();
     let ended = sessions.has_current();
     let snapshot = sessions.stop(now);
     drop(sessions);
@@ -148,20 +154,23 @@ fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<SessionSna
 
 #[tauri::command]
 async fn flag_current_distracting(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.flag_current(now))
+    Ok(sessions.flag_current(now))
 }
 
 #[tauri::command]
 async fn allow_current_for_session(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.allow_current_for_session(now))
+    Ok(sessions.allow_current_for_session(now))
 }
 
 #[tauri::command]
 async fn allow_current_always(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.allow_current_always(now))
+    Ok(sessions.allow_current_always(now))
 }
 
 #[tauri::command]
@@ -221,8 +230,9 @@ fn delete_all_history(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn dismiss_storage_notice(state: State<'_, AppState>) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.dismiss_storage_notice(now))
+    Ok(sessions.dismiss_storage_notice(now))
 }
 
 #[tauri::command]
@@ -306,8 +316,9 @@ fn review_session(
     work: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<session::RulesSaved, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    lock_sessions(&state)?.review_session(id, distractions, work, now)
+    sessions.review_session(id, distractions, work, now)
 }
 
 #[tauri::command]
@@ -324,8 +335,9 @@ async fn update_rules(
     rules: Vec<focus::AppRule>,
     state: State<'_, AppState>,
 ) -> Result<session::RulesSaved, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    Ok(lock_sessions(&state)?.update_rules(rules, now))
+    Ok(sessions.update_rules(rules, now))
 }
 
 #[tauri::command]
@@ -354,8 +366,10 @@ fn show_status_window(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    let snapshot = lock_sessions(&state)?.set_status_window_enabled(true, now);
+    let snapshot = sessions.set_status_window_enabled(true, now);
+    drop(sessions);
 
     show_status_window_internal(&app)?;
     Ok(snapshot)
@@ -367,8 +381,10 @@ fn set_status_window_enabled(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    let snapshot = lock_sessions(&state)?.set_status_window_enabled(enabled, now);
+    let snapshot = sessions.set_status_window_enabled(enabled, now);
+    drop(sessions);
     let should_show_status = enabled && snapshot.current.is_some();
 
     if should_show_status {
@@ -385,8 +401,10 @@ fn set_status_window_on_top(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SessionSnapshot, String> {
+    let mut sessions = lock_sessions(&state)?;
     let now = state.started_at.elapsed();
-    let snapshot = lock_sessions(&state)?.set_status_window_on_top(enabled, now);
+    let snapshot = sessions.set_status_window_on_top(enabled, now);
+    drop(sessions);
 
     set_status_window_on_top_internal(&app, enabled)?;
     if enabled {
@@ -775,8 +793,10 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 // Quitting mid-session ends it as stopped, saving its last seconds, rather than
                 // leaving it open for the next launch to mark abandoned.
+                let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 let now = state.started_at.elapsed();
-                state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).stop(now);
+                sessions.stop(now);
+                drop(sessions);
                 // Cancel first: a release alone waits for a running clip to finish.
                 voice::cancel_generation(&state.voice_worker);
                 voice::release_worker(&state.voice_worker);
@@ -1410,10 +1430,11 @@ fn with_sessions(
     action: impl FnOnce(&mut SessionManager, std::time::Duration),
 ) {
     let state = app.state::<AppState>();
+    // The lock first, then the clock (see the commands); and a panic under the lock must not
+    // make every tray action and webcam frame vanish for the rest of the run.
+    let mut sessions = state.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let now = state.started_at.elapsed();
-    if let Ok(mut sessions) = state.sessions.lock() {
-        action(&mut sessions, now);
-    };
+    action(&mut sessions, now);
 }
 
 #[cfg(test)]

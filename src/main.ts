@@ -990,28 +990,49 @@ async function refreshSnapshot(): Promise<void> {
   }
 }
 
+/** Takes a snapshot in, from the poll or from a command's reply. A session that just ended
+ *  opens its report and review once, from whichever arrives first; while a dialog or editor is
+ *  open it stays pending and opens when the next snapshot finds the way clear. True when the
+ *  report is opening (the caller draws nothing). */
+function applySnapshot(next: SessionSnapshot): boolean {
+  snapshot = next;
+  settings = next.settings;
+  history = next.history;
+  if (!next.current && sessionRulesOpen) {
+    sessionRulesOpen = false;
+    ruleEditor = null;
+  }
+  // The session ended on its own while Quit was asking: there is nothing left to end.
+  if (!next.current) {
+    quitConfirmOpen = false;
+  }
+  const newest = noteNewHistory(history);
+  if (!newest || !historyHydrated) {
+    return false;
+  }
+  if (appView !== "main" || next.current) {
+    // The status window never shows reports; a new session already running has moved on.
+    knownHistoryIds.add(newest);
+    return false;
+  }
+  // Not while a dialog or editor is open: a recording or clip job would vanish behind History.
+  if (!editorIsOpen()) {
+    void openHistoryReport(newest, true);
+    return true;
+  }
+  return false;
+}
+
 async function refreshSnapshotNow(): Promise<void> {
   try {
-    snapshot = await invoke<SessionSnapshot>("get_session_snapshot");
-    settings = snapshot.settings;
-    history = snapshot.history;
-    if (!snapshot.current && sessionRulesOpen) {
-      sessionRulesOpen = false;
-      ruleEditor = null;
+    const next = await invoke<SessionSnapshot>("get_session_snapshot");
+    if (applySnapshot(next)) {
+      return;
     }
-    // The session ended on its own while Quit was asking: there is nothing left to end.
-    if (!snapshot.current) {
-      quitConfirmOpen = false;
-    }
-    const newest = noteNewHistory(history);
     if (appView === "main") {
       ensureSelectedVoice();
-      // Not while a dialog or editor is open: a recording or clip job would vanish behind History.
-      if (historyHydrated && newest && !snapshot.current && !editorIsOpen()) {
-        void openHistoryReport(newest, true);
-        return;
-      }
-      if (historyHydrated && newest && activeTab === "history") {
+      if (activeTab === "history" && history[0] && !knownHistoryIds.has(history[0].id)) {
+        knownHistoryIds.add(history[0].id);
         void refreshTrends(false);
         void refreshHistoryWeek();
       }
@@ -1820,9 +1841,9 @@ function renderOverlay(current: CurrentSession | null): string {
       ${
         current
           ? `
-            <div class="overlay-actions">
-              <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${isOnBreak(current) ? "Next round" : escapeHtml(resumeLabel(current as CurrentSession))}</button>
-              <button class="danger" type="button" data-action="stop">Stop</button>
+            <div class="overlay-actions ${isOnBreak(current) ? "is-break" : ""}">
+              <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${escapeHtml(resumeLabel(current as CurrentSession))}</button>
+              <button class="danger" type="button" data-action="stop">End session</button>
             </div>
             <details class="overlay-more" ${overlayMoreOpen ? "open" : ""}>
               <summary>More settings</summary>
@@ -1894,7 +1915,7 @@ function renderMomentOverlay(current: CurrentSession): string {
         <div class="moment-gap"></div>
       </section>
       <div class="interrupt-actions moment-actions">
-        <button class="primary" type="button" data-action="dismiss-moment">Start break</button>
+        <button class="primary" type="button" data-action="dismiss-moment">Got it</button>
       </div>
     </main>
   `;
@@ -5942,6 +5963,11 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   }
   if (action === "close-session-over") {
     sessionOver = null;
+    const ended = history[0];
+    if (ended && !snapshot?.current && sessionReport?.id !== ended.id) {
+      await openHistoryReport(ended.id, !knownHistoryIds.has(ended.id));
+      return;
+    }
     paintModalLayer();
     return;
   }
@@ -5994,9 +6020,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
   if (ok && action.startsWith("mark-")) {
     const name = snapshot?.current?.focus?.activity.label || "last window";
     showFeedback(`Distraction: ${name}`);
-  }
-  if (ok && action === "stop" && history[0]) {
-    await openHistoryReport(history[0].id, true);
   }
 }
 
@@ -6339,11 +6362,11 @@ async function persistPhraseLibrary(): Promise<boolean> {
 
 async function invokeSnapshot(command: string, args?: Record<string, unknown>, paint = true): Promise<boolean> {
   try {
-    snapshot = await invoke<SessionSnapshot>(command, args);
-    settings = snapshot.settings;
-    history = snapshot.history;
-    history.forEach((item) => knownHistoryIds.add(item.id));
+    const next = await invoke<SessionSnapshot>(command, args);
     lastError = "";
+    if (applySnapshot(next)) {
+      return true;
+    }
   } catch (error) {
     lastError = errorText(error);
     render();
@@ -8410,14 +8433,17 @@ async function runHistorySearch(query: string): Promise<void> {
   paintHistoryBody();
 }
 
+/** The newest session not yet seen, left unseen until its report opens (or the caller decides
+ *  it never will). Anything older than it is marked seen: only the latest gets a report. */
 function noteNewHistory(items: SessionSummary[]): number | null {
   let newest: number | null = null;
   for (const item of items) {
     if (!knownHistoryIds.has(item.id)) {
       if (newest === null) {
         newest = item.id;
+      } else {
+        knownHistoryIds.add(item.id);
       }
-      knownHistoryIds.add(item.id);
     }
   }
   return newest;

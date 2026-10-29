@@ -3464,6 +3464,12 @@ audio {
   gap: 8px;
 }
 
+/* On a break the first button says "Start round 3", too long for half the card: it takes a
+   row of its own. */
+.overlay-actions.is-break {
+  grid-template-columns: 1fr;
+}
+
 .overlay-actions button {
   min-height: 28px;
   padding: 0 8px;

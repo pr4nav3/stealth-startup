@@ -82,7 +82,7 @@
         get_rules: () => rules.map(r => ({...r})),
         resolve_rule_input: a => { const t = a.text.trim(); if (!t) throw "Enter a website or an app name"; const m = t.match(/^(?:https?:\/\/)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})/i); if (m) { const parts = m[1].toLowerCase().split("."); return {target:"website", value: parts.slice(-2).join(".")}; } return {target:"app", value:t}; },
         // ?live=1: End session stops it and opens its report with "Any distractions here?".
-        stop_session: () => { q.set("live", "0"); return handlers.get_session_snapshot(); },
+        stop_session: () => { q.set("live", "0"); if (!hist.some(s => s.id === 1)) hist.unshift({id:1, goal:"Mock session", started_at:new Date().toISOString(), duration_seconds:liveElapsed, focus_seconds:Math.round(liveElapsed*0.8), distracted_seconds:Math.round(liveElapsed*0.15), idle_seconds:Math.round(liveElapsed*0.05), nudges:0, top_hints:["VS Code"]}); return handlers.get_session_snapshot(); },
         review_candidates: () => [{group:"Work",kind:"app",key:"spotify",label:"Spotify",seconds:540},{group:"Work",kind:"website",key:"news.ycombinator.com",label:"news.ycombinator.com",seconds:360},{group:"Work",kind:"app",key:"code - insiders",label:"Code - Insiders",seconds:180}],
         review_session: a => { rules.push(...a.distractions); return {rules: rules.map(r => ({...r}))}; },
         set_app_name: () => ({}), set_site_name: () => ({}),

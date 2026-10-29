@@ -331,8 +331,8 @@ impl SessionManager {
     /// The ticker went silent from `from` to `now` (sleep or a freeze): nobody observed it.
     pub fn record_lost_time(&mut self, from: Duration, now: Duration) {
         if let Some(session) = self.current.as_mut() {
-            // A sleep that ran past the timer counts only up to its end.
-            let now = session.capped_at_end(now);
+            // A sleep that ran past the timer, or past the round's end, counts only up to there.
+            let now = session.capped_at_round_end(now);
             if session.is_recording() && now > from {
                 session.record_lost_time(from, now, self.storage.as_ref());
             }
@@ -705,18 +705,21 @@ impl Session {
         };
         // The last round's end is the session's end (`is_expired`), not a break.
         if recording && plan.round < plan.rounds && elapsed >= plan.work_seconds * u64::from(plan.round) {
+            // The round ended when its work ran out, which after a sleep is earlier than this
+            // tick: the break starts there, so the time asleep is the break's, not the round's.
+            let at = self.capped_at_round_end(now).max(self.last_accounted_at);
             // Pause first: it accounts the round's last second before its focus is read.
-            self.pause(now, storage);
+            self.pause(at, storage);
             let focused = self.metrics.focused_seconds;
             let Some(plan) = self.pomodoro.as_mut() else {
                 return;
             };
             plan.rounds_focused_seconds.push(focused.saturating_sub(plan.focused_at_round_start));
-            plan.break_until = Some(now.as_secs() + plan.break_seconds);
+            plan.break_until = Some(at.as_secs() + plan.break_seconds);
             plan.break_over = false;
             plan.moments += 1;
             let round = plan.round.to_string();
-            self.persist_event(now, "round_over", Some(&round), storage);
+            self.persist_event(at, "round_over", Some(&round), storage);
             return;
         }
         let Some(plan) = self.pomodoro.as_mut() else {
@@ -1230,6 +1233,25 @@ impl Session {
 
     fn is_expired(&self, now: Duration) -> bool {
         self.raw_timer_elapsed_seconds(now) >= self.duration_seconds
+    }
+
+    /// `now`, or the moment the current round's work ran out if that came first (and never
+    /// past the session's end). Outside a Pomodoro round it is `capped_at_end`.
+    fn capped_at_round_end(&self, now: Duration) -> Duration {
+        let now = self.capped_at_end(now);
+        let Some(plan) = self.pomodoro.as_ref() else {
+            return now;
+        };
+        if !self.is_recording() || plan.break_until.is_some() || plan.round >= plan.rounds {
+            return now;
+        }
+        let boundary = plan.work_seconds * u64::from(plan.round);
+        let elapsed = self.raw_timer_elapsed_seconds(now);
+        if elapsed > boundary {
+            now - Duration::from_secs(elapsed - boundary)
+        } else {
+            now
+        }
     }
 
     /// `now`, or the moment the timer ran out if that came first.
@@ -3115,6 +3137,45 @@ mod tests {
         let snapshot = manager.snapshot(seconds(701));
         assert!(snapshot.current.is_none(), "the last round ends the session");
         assert_eq!(snapshot.history[0].focus_seconds, 600);
+    }
+
+    #[test]
+    fn a_sleep_across_a_round_boundary_ends_the_round_there() {
+        let mut manager = test_manager();
+        let mut plan = input("Lab", Strictness::Normal);
+        plan.pomodoro = Some(PomodoroInput { work_minutes: 5, break_minutes: 1, rounds: 2 });
+        manager.start(plan, seconds(0));
+        let id = manager.snapshot(seconds(0)).current.unwrap().id;
+        for t in 0..=240 {
+            record(&mut manager, sample("Code", "lab.md", 0.0), seconds(t));
+        }
+        // The lid closes at 4 min and opens at 15 min: the round ended at 5 min, its break ran
+        // out at 6, and the session has been waiting since.
+        manager.record_lost_time(seconds(240), seconds(900));
+        manager.tick(seconds(900));
+        manager.tick(seconds(901));
+        let current = manager.snapshot(seconds(901)).current.unwrap();
+        let pomodoro = current.pomodoro.unwrap();
+        assert_eq!((pomodoro.phase, pomodoro.round), ("break_over", 1));
+        assert_eq!(pomodoro.rounds_focused_seconds, vec![240]);
+        assert_eq!(current.elapsed_seconds, 300, "the sleep past the round is not the round's");
+
+        // Round 2 is a full round, and the session ends with it.
+        manager.resume(seconds(901));
+        for t in 901..=1201 {
+            record(&mut manager, sample("Code", "lab.md", 0.0), seconds(t));
+        }
+        assert!(manager.snapshot(seconds(1202)).current.is_none());
+        let report = manager.session_report(id).unwrap();
+        assert_eq!(report.duration_seconds, 600);
+        let unknown: u64 = report.spans.iter().filter(|span| span.state == "unknown").map(|span| span.seconds).sum();
+        assert_eq!(unknown, 60, "asleep from 4 to 5 min is the round's unknown minute");
+        let mut cursor = 0;
+        for span in &report.spans {
+            assert_eq!(span.started_offset_seconds, cursor);
+            cursor += span.seconds;
+        }
+        assert_eq!(cursor, 600);
     }
 
     fn record(
