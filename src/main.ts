@@ -2630,7 +2630,8 @@ function renderRulePreview(editor: RuleEditor): string {
     return `<span class="rule-preview-error">${escapeHtml(preview.error)}</span>`;
   }
   const site = preview.target === "website";
-  const value = site ? preview.value : appNames[preview.value.toLowerCase()] ?? preview.value;
+  // A site reads as the name typed beside it, or its address until there is one.
+  const value = site ? editor.name.trim() || preview.value : appNames[preview.value.toLowerCase()] ?? preview.value;
   return `
     <span class="rule-kind">${site ? "Website" : "App"}</span>
     <strong class="rule-preview-value">${escapeHtml(value)}</strong>
@@ -5170,6 +5171,10 @@ function bindEvents(root: ParentNode = document): void {
     if (ruleEditor) {
       ruleEditor.name = (event.currentTarget as HTMLInputElement).value;
       ruleEditor.nameTouched = true;
+      const preview = document.getElementById("rule-preview");
+      if (preview) {
+        preview.innerHTML = renderRulePreview(ruleEditor);
+      }
     }
   });
 
