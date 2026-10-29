@@ -1174,8 +1174,11 @@ fn hide_status_window(app: &AppHandle) {
 /// closing line. Sent once per session, from wherever it ended.
 const SESSION_END_EVENT: &str = "session-end";
 
+/// The main window comes to the front, so the closing line is heard with its card and report
+/// in view, not as a voice from nowhere.
 fn session_ended(app: &AppHandle) {
     hide_status_window(app);
+    show_main_window(app);
     let _ = app.emit(SESSION_END_EVENT, ());
 }
 

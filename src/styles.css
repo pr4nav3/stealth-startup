@@ -791,12 +791,44 @@ h1 {
   animation: cal-pop 320ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
-/* A past day lifts like a raised button and its date slides out for its focused time. */
+/* A past day lifts like a raised button and its date slides out for its focused time. The
+   clip hides the sliding date and time at the day's edge, but leaves the right and bottom open
+   by its shadow's 4px, so the shadow and the hover strip below still show and still count. */
 .cal-day {
-  overflow: hidden;
+  clip-path: inset(0 -4px -4px 0 round 5px);
   transition:
     transform 140ms ease-out,
     box-shadow 140ms ease-out;
+}
+
+/* A card that lifts under the mouse keeps the strip it moves off as part of itself. Without it,
+   with the cursor on a bottom or right edge the card slides out from under it, drops back,
+   and lifts again, over and over. The strip sits behind the card's content, so buttons inside
+   still take their own clicks. */
+.cal-day,
+.voice-card.is-pickable,
+button.share-door,
+button.share-pick,
+.panel.trend-door,
+button.wp-day {
+  position: relative;
+}
+
+:is(
+    .cal-day:not(.is-future),
+    .voice-card.is-pickable,
+    .week-hero-stat,
+    .report-stat,
+    button.share-door:not([aria-disabled="true"]),
+    button.share-pick,
+    .panel.trend-door,
+    .trend-point
+  ):hover::after,
+.wp-week:hover button.wp-day:not(:disabled)::after {
+  position: absolute;
+  inset: 0 -3px -3px 0;
+  z-index: -1;
+  content: "";
 }
 
 .cal-day:not(.is-future):hover {
