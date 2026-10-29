@@ -9665,22 +9665,22 @@ const CARD_MONO = "ui-monospace, Menlo, Consolas, monospace";
 const CARD_SANS = "Inter, system-ui, sans-serif";
 
 /** A card-sized canvas at 2x with the card's frame drawn: hard shadow, the grid paper, the
- *  border. The rest of the PNG is transparent. The context is already inside the card. */
+ *  border. Only the rounded corners and the strip the shadow leaves are transparent. */
 function cardCanvas(height: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
   const scale = 2;
   const width = CARD_WIDTH;
-  const pad = 14;
   const shadow = 8;
   const radius = 12;
+  // The image is the card and its shadow, nothing around them: pasted somewhere that fills
+  // transparency with white, a margin would show as a white frame.
   const canvas = document.createElement("canvas");
-  canvas.width = (width + pad * 2) * scale;
-  canvas.height = (height + pad * 2) * scale;
+  canvas.width = (width + shadow) * scale;
+  canvas.height = (height + shadow) * scale;
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     return null;
   }
   ctx.scale(scale, scale);
-  ctx.translate(pad, pad);
   const palette = cardPalette();
 
   ctx.fillStyle = palette.shadow;

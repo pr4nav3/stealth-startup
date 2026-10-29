@@ -4443,7 +4443,7 @@ button.share-door[aria-disabled="true"] strong {
 }
 
 .share-preview-empty {
-  aspect-ratio: 668 / 520;
+  aspect-ratio: 648 / 520;
 }
 
 /* A card that copies on click: no button box of its own, it lifts like the cards beside it. */
