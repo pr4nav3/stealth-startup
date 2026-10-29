@@ -4023,7 +4023,21 @@ button.wp-day.is-today {
   font-weight: 700;
 }
 
-button.wp-day.is-selected {
+/* A row is a week; it lays out as its days. Hovering any day lifts the whole week it would
+   pick; the week that is showing keeps its yellow. */
+.wp-week {
+  display: contents;
+}
+
+.wp-week:hover button.wp-day:not(:disabled) {
+  outline: 2px solid var(--sv-ink);
+  outline-offset: -1px;
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 var(--sv-shadow-color);
+}
+
+button.wp-day.is-selected,
+.wp-week:hover button.wp-day.is-selected {
   outline: 3px solid var(--sv-yellow);
   outline-offset: -1px;
 }

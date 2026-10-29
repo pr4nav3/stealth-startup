@@ -3873,7 +3873,9 @@ function renderWeekPicker(weekStart: string, oldestMonday: string | null): strin
       ? `${parseDayKey(day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}, ${formatHours(info.focus_seconds)} focused`
       : parseDayKey(day).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
     return `<button type="button" class="${classes}" data-action="pick-week" data-day="${day}" ${future ? "disabled" : ""} aria-label="${attr(label)}" title="${attr(label)}">${Number(day.slice(8))}</button>`;
-  }).join("");
+  });
+  // Each week is one row, so hovering any of its days lights the whole week: the thing a click picks.
+  const rows = Array.from({ length: cells.length / 7 }, (_, week) => `<div class="wp-week">${cells.slice(week * 7, week * 7 + 7).join("")}</div>`).join("");
   return `
     <div class="panel week-picker" role="dialog" aria-label="Pick a week">
       <div class="week-picker-head">
@@ -3883,7 +3885,7 @@ function renderWeekPicker(weekStart: string, oldestMonday: string | null): strin
       </div>
       <div class="week-picker-grid">
         ${["M", "T", "W", "T", "F", "S", "S"].map((d) => `<span class="wp-dow" aria-hidden="true">${d}</span>`).join("")}
-        ${cells}
+        ${rows}
       </div>
       <p class="week-picker-note">Click any day to see its week. Greener days had more focused time.</p>
     </div>
