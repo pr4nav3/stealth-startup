@@ -2289,9 +2289,10 @@ function paintFirstRun(): void {
   paintSlot("first-run-layer", renderFirstRun());
 }
 
-/** The name the practice asks the user to open: the newest distraction, as its chip shows it. */
+/** The name the practice asks the user to open, as its chip shows it: the newest website on the
+ *  list (a tab is quicker to open than an app), else the newest app. */
 function practiceTarget(): string | null {
-  const rule = permanentRules[0];
+  const rule = permanentRules.find((item) => item.target === "website") ?? permanentRules[0];
   return rule ? ruleName(rule) : null;
 }
 
@@ -2312,7 +2313,7 @@ function renderFirstRun(): string {
     voice: "Who should nudge you?",
     list: "These count as distractions",
     catch: "Get caught once",
-    done: "That's Supervisor",
+    done: "You're all set",
   };
   const back = index > 0 && !practice ? `<button type="button" data-action="first-run-back">Back</button>` : "<span></span>";
   return `
@@ -2342,15 +2343,15 @@ function renderFirstRunBody(step: FirstRunStep, back: string): string {
           ${missing ? `<button type="button" data-action="onboard-accessibility">Open System Settings</button>` : `<span class="first-run-ok">Allowed</span>`}
         </div>
       </section>
-      <p class="first-run-where">${missing ? "Turn on Supervisor in the list, then come back here. Without it, every website counts as Other websites." : "macOS remembers this. You won't be asked again."}</p>
+      <p class="first-run-where">${missing ? "Turn Supervisor on in the list, then come back here. Without it, Supervisor can't tell one website from another." : "macOS remembers this. You won't be asked again."}</p>
       <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-next">Next</button></div>
     `;
   }
   if (step === "voice") {
     return `
-      <p class="first-run-copy">Press play to hear each one. Pick one, and it speaks up when a distraction stays open.</p>
+      <p class="first-run-copy">Press play to hear each voice. The one you pick speaks up when you get distracted.</p>
       <div class="voice-list first-run-voices">${availableVoices().map((voice) => renderVoiceCard(voice, false)).join("")}</div>
-      <p class="first-run-where">Change it anytime in Settings › Voice. You can record anyone's voice there too.</p>
+      <p class="first-run-where">You can change it, or record anyone's voice, in Settings › Voice.</p>
       <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-next">Next</button></div>
     `;
   }
@@ -2370,14 +2371,14 @@ function renderFirstRunBody(step: FirstRunStep, back: string): string {
         </label>
         <span class="explain">Vision models spot a phone in your hand. They run only on this computer.</span>
       </section>
-      <p class="first-run-where">Both are in Settings: Distractions, and Webcam.</p>
+      <p class="first-run-where">You can change both later in Settings.</p>
       <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-next">Next</button></div>
     `;
   }
   if (step === "catch") {
     const target = practiceTarget();
     const voice = practiceVoiceName();
-    const speaks = voice ? `the card pops up and ${escapeHtml(voice)} speaks` : "the card pops up";
+    const speaks = voice ? `a card pops up on your screen and ${escapeHtml(voice)} tells you to get back to work` : "a card pops up on your screen";
     if (!target) {
       return `
         <p class="first-run-copy">There's nothing on your distractions list to practise with. Go back and add one.</p>
@@ -2386,27 +2387,27 @@ function renderFirstRunBody(step: FirstRunStep, back: string): string {
     }
     if (!practice) {
       return `
-        <p class="first-run-copy">Start a practice, then open <b>${escapeHtml(target)}</b> and leave it in front. In about 30 seconds ${speaks}. The practice isn't saved.</p>
+        <p class="first-run-copy">Press Start practice, then open <b>${escapeHtml(target)}</b> and leave it open. After about 30 seconds, ${speaks}. This practice isn't saved.</p>
         <div class="first-run-actions">${back}<button class="primary" type="button" data-action="first-run-practice">Start practice</button></div>
       `;
     }
     if (!practice.caught) {
       return `
-        <p class="first-run-copy">Now open <b>${escapeHtml(target)}</b> and leave it there. Supervisor is watching.</p>
+        <p class="first-run-copy">Open <b>${escapeHtml(target)}</b> now and leave it open. Supervisor is watching.</p>
         <p class="first-run-live" id="first-run-live">${escapeHtml(firstRunLiveText(snapshot?.current ?? null))}</p>
         <div class="first-run-actions"><button type="button" data-action="first-run-end-practice">End practice</button><span></span></div>
       `;
     }
     return `
-      <p class="first-run-copy">That's the card you'll get whenever a distraction stays open, whatever's in front. Back to work closes it. Allow once lets it be for that session.</p>
+      <p class="first-run-copy">That's how it works. In a session, whenever a distraction stays open, this card pops up${voice ? ` and ${escapeHtml(voice)} speaks` : ""}.</p>
+      <p class="first-run-where">On the card, Back to work closes it. Allow once lets that site or app stay open for the rest of the session.</p>
       <div class="first-run-actions"><span></span><button class="primary" type="button" data-action="first-run-end-practice">Next</button></div>
     `;
   }
-  const voice = practiceVoiceName();
   return `
-    <p class="first-run-copy">Leave a distraction open and ${voice ? `${escapeHtml(voice)} speaks up` : "the card pops up"}. Your first 25 minutes starts your streak.</p>
-    <p class="first-run-where">Everything you set up is in Settings. Your sessions land in History.</p>
-    <div class="first-run-actions"><button type="button" data-action="first-run-close">Later</button><button class="primary" type="button" data-action="onboard-session">Start 25 minutes</button></div>
+    <p class="first-run-copy">Start a session whenever you want to focus: press Start Focus Session on the Session tab.</p>
+    <p class="first-run-where">Everything you set up is in Settings, and finished sessions show up in History.</p>
+    <div class="first-run-actions"><span></span><button class="primary" type="button" data-action="first-run-close">Done</button></div>
   `;
 }
 
@@ -5958,19 +5959,6 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
       lastError = errorText(error);
       render();
     }
-    return;
-  }
-
-  if (action === "onboard-session") {
-    firstRunOpen = false;
-    firstRunStep = null;
-    writeLocal(FIRST_RUN_KEY, "1");
-    // The streak's daily minimum, so the first session also starts the streak.
-    draft.duration_minutes = STREAK_DAY_SECONDS / 60;
-    await runAction("open-preflight");
-    // A first session should show the rules it runs on.
-    preflightBlocksOpen = true;
-    render();
     return;
   }
 
