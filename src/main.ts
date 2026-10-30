@@ -12,7 +12,6 @@ type FocusState = "focused" | "suspicious" | "distracted" | "idle";
 type Tab = "session" | "settings" | "history";
 type AppView = "main" | "overlay";
 type SettingsView = "home" | "voice" | "webcam";
-type WebcamGaze = "at_pc" | "away_from_pc" | "at_phone";
 type WebcamReaction = "alarm" | "voice";
 type VoiceTone = string;
 type VoiceSource = "none" | "starter" | "custom";
@@ -482,7 +481,6 @@ interface RecordedVoice {
 
 interface WebcamFrame {
   face_in_frame: boolean;
-  gaze: WebcamGaze | null;
   person_in_frame?: boolean;
   present?: boolean;
   phone_in_frame: boolean;
@@ -2382,9 +2380,9 @@ function renderFirstRunBody(step: FirstRunStep, back: string): string {
       <section class="panel first-run-block">
         <p class="eyebrow">Webcam</p>
         <label class="setting-row toggle-row">
-          <span>Turn on webcam monitoring</span>
+          <span>Turn on webcam models</span>
           <span class="toggle-field">
-            <input id="first-run-webcam" class="toggle-input" type="checkbox" ${settings.webcam_enabled ? "checked" : ""} aria-label="Turn on webcam monitoring" />
+            <input id="first-run-webcam" class="toggle-input" type="checkbox" ${settings.webcam_enabled ? "checked" : ""} aria-label="Turn on webcam models" />
             <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
           </span>
         </label>
@@ -2699,6 +2697,7 @@ function renderSettings(): string {
           </label>
         </div>
         <small class="field-help defaults-help">Strictness is ${STRICTNESS_HELP.charAt(0).toLowerCase()}${STRICTNESS_HELP.slice(1)}</small>
+        <small class="field-help">The session timer is the small window in the top right corner while a session runs.</small>
       </section>
 
       <div class="settings-feature-grid">
@@ -2744,16 +2743,13 @@ function renderWebcamSettings(): string {
       <div class="subpage-head">
         <button type="button" data-action="back-settings">Back</button>
         <div>
-          <p class="eyebrow">WEBCAM MONITORING</p>
+          <p class="eyebrow">WEBCAM</p>
           <h2>Live camera check</h2>
         </div>
       </div>
 
       <section class="webcam-home">
         <section class="state-slab webcam-stage ${webcamStateClass(frame, alerting)}" aria-live="polite">
-          <div class="state-head">
-            <span id="webcam-chip" class="${webcamSettings.phoneUse ? "" : "is-off"}">${webcamStatusChip()}</span>
-          </div>
           <h2 id="webcam-title">${escapeHtml(webcamTitle(frame, alerting))}</h2>
           <p id="webcam-copy">${escapeHtml(webcamCopy(frame, alerting))}</p>
           <div class="webcam-frame-wrap${frame?.jpeg ? " is-live" : ""}" id="webcam-frame-wrap">
@@ -2767,9 +2763,9 @@ function renderWebcamSettings(): string {
           <section class="panel">
             <p class="eyebrow">Settings</p>
             <label class="setting-row toggle-row">
-              <span>Turn on webcam monitoring</span>
+              <span>Turn on webcam models</span>
               <span class="toggle-field">
-                <input id="webcam-phone-use" class="toggle-input" type="checkbox" ${webcamSettings.phoneUse ? "checked" : ""} aria-label="Turn on webcam monitoring" />
+                <input id="webcam-phone-use" class="toggle-input" type="checkbox" ${webcamSettings.phoneUse ? "checked" : ""} aria-label="Turn on webcam models" />
                 <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
               </span>
             </label>
@@ -2780,7 +2776,7 @@ function renderWebcamSettings(): string {
                 <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
               </span>
             </label>
-            <label class="setting-row">
+            <label class="setting-row camera-row">
               <span>Camera</span>
               <select id="webcam-camera" aria-label="Camera">${cameraOptions()}</select>
             </label>
@@ -2788,7 +2784,7 @@ function renderWebcamSettings(): string {
           <section class="panel webcam-test-panel">
             <p class="eyebrow">Camera test</p>
             ${renderWebcamMetrics(frame)}
-            <p class="quiet">No images saved. Vision models run only on this computer. A phone in view counts as a distraction and gets a nudge; leaving your desk counts as Away.</p>
+            <p class="quiet">No images saved. Vision models run only on this computer.<span class="quiet-more">A phone in view counts as a distraction; leaving your desk marks you as away.</span></p>
           </section>
         </div>
       </section>
@@ -3996,13 +3992,6 @@ function renderDownloadBusyModal(): string {
         : phase === "cancelling"
           ? "Cancelling download"
           : "Downloading the voice engine";
-  const copy = upToDate
-    ? "Already up to date. Nothing was downloaded."
-    : done
-      ? "The voice engine is installed. Generated lines play without it."
-      : checking
-        ? "Checking the installed files. Nothing is downloading."
-        : download?.message ?? "Downloading the voice engine.";
   const eta = done
     ? "Done"
     : phase === "checking"
@@ -4026,9 +4015,8 @@ function renderDownloadBusyModal(): string {
   return `
     <div class="modal-backdrop busy-backdrop" role="presentation">
       <section class="modal-panel busy-panel" role="dialog" aria-modal="true" aria-live="polite">
-        <p class="eyebrow">VOICE WORKER</p>
+        <p class="eyebrow">VOICE ENGINE</p>
         <h2>${escapeHtml(title)}</h2>
-        <p>${escapeHtml(copy)}</p>
         ${
           upToDate
             ? ""
@@ -4215,7 +4203,7 @@ function renderHistoryToolbar(weekStart: string): string {
       <div id="week-picker-slot" class="slot">${weekPickerOpen ? renderWeekPicker(weekStart, oldestMonday) : ""}</div>
       <label class="history-search">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
-        <input id="history-search" type="search" value="${attr(historySearch)}" placeholder="Search all sessions" aria-label="Search sessions by goal" autocomplete="off" spellcheck="false" />
+        <input id="history-search" type="search" value="${attr(historySearch)}" placeholder="Search session names" aria-label="Search sessions by name" autocomplete="off" spellcheck="false" />
       </label>
     </div>
   `;
@@ -4517,7 +4505,7 @@ function renderSearchResults(): string {
       <p class="eyebrow">${count} matching “${escapeHtml(query)}”</p>
       ${results.length >= SEARCH_LIMIT ? `<p>Showing the newest ${SEARCH_LIMIT}</p>` : ""}
     </div>
-    ${renderSessionsPane(results, "No session goal contains that.")}
+    ${renderSessionsPane(results, "No session name matches that.")}
   `;
 }
 
@@ -5178,7 +5166,7 @@ function renderSessionReport(report: SessionReport): string {
       </section>
       <section class="report-stats" aria-label="Session stats">
           ${reportStat("Duration", formatClockWithUnit(report.duration_seconds), "How long the session ran. Paused time isn't counted.")}
-        ${reportStat("Focused", `${report.focus_percent}%`, "Of your time at the desk, the share you were on work. Away and asleep time count for neither side.")}
+        ${reportStat("Focused", `${report.focus_percent}%`, "Of your time at the desk, the share you were on work. Away does not count.")}
         ${reportStat("Longest stretch", formatMinutes(report.longest_stretch_seconds), "Your longest run of work without a distraction or stepping away.")}
         ${reportStat("Nudges", String(report.nudge_count), "How many times Supervisor spoke up to pull you back.")}
         ${pomodoroStat(report)}
@@ -7250,10 +7238,6 @@ function paintDownloadProgress(): void {
   if (title) {
     title.textContent = download.phase === "cancelling" ? "Cancelling download" : "Downloading the voice engine";
   }
-  const copy = document.querySelector(".busy-panel h2 + p");
-  if (copy) {
-    copy.textContent = download.message || "Downloading the voice engine.";
-  }
   const meta = document.querySelectorAll(".download-meta span");
   if (meta[0]) {
     meta[0].textContent = total > 0 ? `${formatBytes(downloaded)} / ${formatBytes(total)}` : formatBytes(downloaded);
@@ -7896,11 +7880,6 @@ function paintWebcamDom(): void {
       img.alt = "";
     }
   }
-  const chip = document.getElementById("webcam-chip");
-  if (chip) {
-    chip.textContent = webcamStatusChip();
-    chip.classList.toggle("is-off", !webcamSettings.phoneUse);
-  }
   const title = document.getElementById("webcam-title");
   if (title) {
     title.textContent = webcamTitle(frame, alerting);
@@ -7938,29 +7917,17 @@ function webcamWouldAlert(frame: WebcamFrame | null): boolean {
   return frame.looking_at_phone;
 }
 
+/** Red with a phone out, green with someone in frame, plain otherwise. */
 function webcamStateClass(frame: WebcamFrame | null, alerting: boolean): string {
   if (alerting) {
     return "state-distracted";
   }
-  if (!frame?.face_in_frame) {
-    return "";
-  }
-  if (frame.gaze === "at_pc") {
-    return "state-focused";
-  }
-  if (frame.gaze === "away_from_pc") {
-    return "state-muted";
-  }
-  return "state-distracted";
-}
-
-function webcamStatusChip(): string {
-  return webcamSettings.phoneUse ? "LIVE" : "OFF";
+  return frame?.face_in_frame ? "state-focused" : "";
 }
 
 function webcamWaitingCopy(): string {
   if (!webcamSettings.phoneUse) {
-    return "Monitoring off";
+    return "Camera off";
   }
   if (webcamError) {
     return "Camera unavailable";
@@ -7969,44 +7936,29 @@ function webcamWaitingCopy(): string {
 }
 
 function webcamTitle(frame: WebcamFrame | null, alerting: boolean): string {
-  if (!webcamSettings.phoneUse || !frame) {
-    return "Webcam preview";
+  if (!webcamSettings.phoneUse) {
+    return "Webcam models off";
+  }
+  if (!frame) {
+    return "Webcam models on";
   }
   if (alerting) {
-    return "On the phone";
+    return "Phone in view";
   }
-  if (!frame.face_in_frame) {
-    return "Out of frame";
-  }
-  if (frame.gaze === "at_pc") {
-    return "At the screen";
-  }
-  if (frame.gaze === "away_from_pc") {
-    return "Looking away";
-  }
-  if (frame.gaze === "at_phone") {
-    return "On the phone";
-  }
-  return "Watching";
+  return frame.face_in_frame ? "In frame" : "Out of frame";
 }
 
 function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
   if (!webcamSettings.phoneUse) {
-    return "Turn on webcam monitoring to get reminded to put down your phone.";
+    return "Turn them on to get a nudge when your phone comes out.";
+  }
+  if (!frame) {
+    return "Waiting for the first picture.";
   }
   if (alerting) {
-    return webcamSettings.strict ? "Phone is in frame." : "Looking at a phone in the camera.";
+    return "Your phone is out.";
   }
-  if (!frame?.face_in_frame) {
-    return "Sit in view of the webcam.";
-  }
-  if (frame.gaze === "at_pc") {
-    return "Head toward the screen.";
-  }
-  if (frame.phone_in_frame) {
-    return "Phone is visible. Looking at the screen, so this is not a phone hit yet.";
-  }
-  return "Looking away. No phone in the camera.";
+  return frame.face_in_frame ? "You're in view, no phone out." : "Sit in view of the webcam.";
 }
 
 async function fireWebcamAlert(): Promise<void> {
@@ -9652,9 +9604,15 @@ function dayTitle(day: string): string {
   return parseDayKey(day).toLocaleDateString(undefined, { weekday: "long" });
 }
 
-/** The full date with the year, on the app card and the PNG alike. */
+/** The full date with the year, on the app card. */
 function cardDate(day: string): string {
   return parseDayKey(day).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** The PNG's date, written out: "30 October, 2026". */
+function cardDayLabel(day: string): string {
+  const date = parseDayKey(day);
+  return `${date.getDate()} ${date.toLocaleDateString(undefined, { month: "long" })}, ${date.getFullYear()}`;
 }
 
 /** While today is short of the streak threshold, the card says how far there is to go. */
@@ -9904,26 +9862,30 @@ async function copyCard(): Promise<void> {
   const summary = summarizeDay(dayCard);
   const streak = streakDays(summary.day);
   const width = CARD_WIDTH;
-  const drawn = cardCanvas(316, true);
+  const tileH = 84;
+  const tilesY = 176;
+  const drawn = cardCanvas(tilesY + tileH + 4 + CARD_PAD, true);
   if (!drawn) {
     return;
   }
   const { canvas, ctx } = drawn;
   const palette = cardPalette();
 
-  ctx.fillStyle = palette.muted;
-  ctx.font = `600 14px ${CARD_MONO}`;
-  ctx.fillText("SUPERVISOR", CARD_PAD, 32);
+  // The same header as the week and month cards: the wordmark, then the eyebrow over the date.
+  ctx.fillStyle = palette.ink;
+  ctx.font = `750 24px ${CARD_SANS}`;
+  ctx.fillText("Supervisor", CARD_PAD, CARD_PAD);
   ctx.textAlign = "right";
-  ctx.fillText(cardDate(summary.day).toUpperCase(), width - CARD_PAD, 32);
+  ctx.fillStyle = palette.muted;
+  ctx.font = `600 15px ${CARD_MONO}`;
+  ctx.fillText("YOUR DAY", width - CARD_PAD, CARD_PAD + 2);
+  ctx.fillStyle = palette.ink;
+  ctx.font = `650 28px ${CARD_SANS}`;
+  ctx.fillText(cardDayLabel(summary.day), width - CARD_PAD, CARD_PAD + 24);
   ctx.textAlign = "left";
 
-  ctx.fillStyle = palette.ink;
-  fitCanvasText(ctx, dayTitle(summary.day), 700, CARD_SANS, 30, 20, width - CARD_PAD * 2 - 170);
-  ctx.fillText(dayTitle(summary.day), CARD_PAD, 62);
-
   const stripX = CARD_PAD;
-  const stripY = 112;
+  const stripY = 108;
   const stripW = width - CARD_PAD * 2;
   const stripH = 44;
   ctx.save();
@@ -9950,7 +9912,7 @@ async function copyCard(): Promise<void> {
   ];
   const tileGap = 12;
   const tileW = (width - CARD_PAD * 2 - tileGap * 2) / 3;
-  stats.forEach(([label, value], index) => drawCardTile(ctx, CARD_PAD + index * (tileW + tileGap), 186, tileW, 94, label, value));
+  stats.forEach(([label, value], index) => drawCardTile(ctx, CARD_PAD + index * (tileW + tileGap), tilesY, tileW, tileH, label, value));
 
   await copyCanvas(canvas);
 }

@@ -166,8 +166,16 @@ select {
 
 /* The same drawn arrow on every OS. A native select ignores the border and background on a
    Mac and paints a glossy macOS pop-up button inside the box instead. */
+select option {
+  background: var(--panel);
+  color: var(--ink);
+}
+
 select {
   appearance: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 0 34px 0 12px;
   background-image:
     linear-gradient(45deg, transparent 50%, var(--ink) 50%),
@@ -752,7 +760,7 @@ h1 {
   border-color: var(--sv-border);
   background: transparent;
   color: var(--ink);
-  opacity: 0.35;
+  opacity: 0.6;
 }
 
 .cal-day.is-on {
@@ -762,7 +770,7 @@ h1 {
 }
 
 .cal-day.is-out.is-on {
-  opacity: 0.45;
+  opacity: 0.6;
 }
 
 .cal-day.is-today {
@@ -777,7 +785,7 @@ h1 {
   border-color: var(--sv-border);
   background: transparent;
   color: var(--ink);
-  opacity: 0.4;
+  opacity: 0.6;
 }
 
 /* Hidden until the focus days load, so the calendar pops in once, with its colours. */
@@ -809,6 +817,7 @@ h1 {
 .voice-card.is-pickable,
 button.share-door,
 button.share-pick,
+button.share-card,
 .panel.trend-door,
 button.wp-day {
   position: relative;
@@ -821,6 +830,7 @@ button.wp-day {
     .report-stat,
     button.share-door:not([aria-disabled="true"]),
     button.share-pick,
+    button.share-card,
     .panel.trend-door,
     .trend-point
   ):hover::after,
@@ -898,15 +908,17 @@ button.wp-day {
   color: var(--ink);
 }
 
-.last-session-card {
+/* The hint sits centred between the card and the panel's edge: the same 10px gap above as
+   padding below, and any spare height split around it. */
+.panel.last-session-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px 16px 16px;
+  padding: 14px 16px 10px;
 }
 
 .share-hint {
-  margin: -2px 0 0;
+  margin: auto 0;
   color: var(--sv-muted);
   font-family: var(--font-mono);
   font-size: 0.62rem;
@@ -936,6 +948,18 @@ button.wp-day {
   text-align: left;
   text-transform: none;
   cursor: pointer;
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+button.share-card:hover,
+button.share-card:focus-visible {
+  transform: translate(-2px, -2px);
+  box-shadow: 5px 5px 0 var(--sv-shadow-color);
+}
+
+button.share-card:active {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--sv-shadow-color);
 }
 
 /* Before the first session: the same shape, drawn as an outline. */
@@ -1232,8 +1256,11 @@ button[data-action="cancel-delete-voice"] {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.webcam-side .setting-row:last-child {
-  min-height: 46px;
+/* The camera's name can be long, so it gets the whole row under its label. */
+.webcam-side .setting-row.camera-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 8px 0 10px;
 }
 
 .webcam-side .setting-row > span:first-child,
@@ -1272,26 +1299,13 @@ button[data-action="cancel-delete-voice"] {
   color: var(--sv-colored-ink);
 }
 
-.webcam-stage .state-head {
-  font-size: var(--sv-type-4);
-}
-
-.webcam-stage .state-head span {
-  text-transform: uppercase;
-}
-
-.webcam-stage .state-head span:last-child {
-  background: var(--acid);
-  color: #141410;
-}
-
-.webcam-stage .state-head span.is-off {
-  background: var(--white-soft);
-  color: var(--ink);
-}
-
 .webcam-side .quiet {
   font-size: var(--sv-type-3);
+}
+
+.quiet-more {
+  display: block;
+  margin-top: 8px;
 }
 
 .webcam-metrics .metric span {
@@ -4122,9 +4136,9 @@ button.wp-day:active {
 }
 
 button.wp-day.is-out {
-  border-color: color-mix(in srgb, var(--sv-ink) 20%, transparent);
+  border-color: color-mix(in srgb, var(--sv-ink) 35%, transparent);
   background: transparent;
-  color: color-mix(in srgb, var(--sv-ink) 40%, transparent);
+  color: color-mix(in srgb, var(--sv-ink) 60%, transparent);
 }
 
 button.wp-day.l1 {
@@ -4171,9 +4185,9 @@ button.wp-day.is-selected,
 button.wp-day.is-future,
 button.wp-day.is-future:disabled {
   border-style: dashed;
-  border-color: color-mix(in srgb, var(--sv-ink) 30%, transparent);
+  border-color: color-mix(in srgb, var(--sv-ink) 40%, transparent);
   background: transparent;
-  color: color-mix(in srgb, var(--sv-ink) 45%, transparent);
+  color: color-mix(in srgb, var(--sv-ink) 60%, transparent);
   opacity: 1;
 }
 
@@ -4573,6 +4587,7 @@ button.share-pick {
   box-shadow: none;
   cursor: pointer;
   transition: transform 120ms ease-out;
+  will-change: transform;
 }
 
 button.share-pick:hover,
