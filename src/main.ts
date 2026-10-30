@@ -4994,7 +4994,7 @@ function renderTrendsBody(): string {
       ${renderTrendCard({
         tone: "span",
         title: "Attention span",
-        hint: "typical unbroken stretch of work",
+        hint: "unbroken stretch of work",
         value: spanNow != null ? formatMinutes(spanNow) : spanSoFar != null ? formatMinutes(spanSoFar) : "—",
         suffix: spanNow != null ? "typical" : spanSoFar != null ? "so far" : "",
         pill: trendPill(spanNow, spanBefore, before.length, 60, formatMinutes, false),

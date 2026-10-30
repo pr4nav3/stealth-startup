@@ -1678,9 +1678,11 @@ dt {
   font-weight: 650;
 }
 
+/* The page's cream, so the dropdown reads apart from its row. */
 .default-control > select {
   width: 148px;
   flex: 0 0 auto;
+  background-color: var(--paper);
 }
 
 .explain {
