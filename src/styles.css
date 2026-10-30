@@ -4916,8 +4916,6 @@ button.trend-spark-track:focus-visible .week-tip {
   margin: 0 0 8px;
   font-size: var(--sv-type-1);
   font-weight: 500;
-  padding-bottom: 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--sv-ink) 18%, transparent);
   color: var(--ink);
 }
 

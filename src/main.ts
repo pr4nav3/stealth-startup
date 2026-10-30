@@ -4736,11 +4736,18 @@ async function saveAppEdit(): Promise<void> {
         appNames = await invoke<Record<string, string>>("set_app_name", { key: edit.key, name });
       }
     }
-    if (edit.listable !== false) {
+    // The list changes only when Counts as was changed, or a listed site's address was: a row
+    // in Work can be on the list (allowed once that session), and a rename must not drop it.
+    const countsChanged = edit.distraction !== edit.wasDistraction;
+    const addressChanged = ruleValue.toLowerCase() !== edit.key.toLowerCase();
+    if (edit.listable !== false && (countsChanged || addressChanged)) {
       const target: AppRule["target"] = site ? "website" : "app";
       const named = (rule: AppRule, value: string) => rule.target === target && rule.value.toLowerCase() === value.toLowerCase();
       const others = permanentRules.filter((rule) => !named(rule, edit.key) && !named(rule, ruleValue));
-      const rules = edit.distraction ? [{ target, value: ruleValue }, ...others] : others;
+      const listed = permanentRules.some((rule) => named(rule, edit.key));
+      // A new address keeps the item on the list it was on; Counts as decides otherwise.
+      const keep = countsChanged ? edit.distraction : listed;
+      const rules = keep ? [{ target, value: ruleValue }, ...others] : others;
       if (JSON.stringify(rules) !== JSON.stringify(permanentRules)) {
         permanentRules = (await invoke<RulesSaved>("update_rules", { rules })).rules;
       }
