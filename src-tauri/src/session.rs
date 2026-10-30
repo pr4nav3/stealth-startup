@@ -316,6 +316,9 @@ impl SessionManager {
             None => 0,
         };
         let mut session = Session::new(session_id, goal, duration_seconds, strictness, rules, exceptions, now);
+        for rule in session.exceptions.clone() {
+            session.persist_event(now, "allowed", Some(&allowed_detail(&rule)), self.storage.as_ref());
+        }
         if let Some(plan) = pomodoro {
             let detail = format!("{}/{}x{}", plan.work_seconds / 60, plan.break_seconds / 60, plan.rounds);
             session.persist_event(now, "pomodoro", Some(&detail), self.storage.as_ref());
@@ -463,12 +466,18 @@ impl SessionManager {
     /// From the live card's chips: allow a listed distraction for this session, or take that
     /// allowance back. The engine judges by it from the next sample.
     pub fn set_session_exception(&mut self, rule: AppRule, allowed: bool, now: Duration) -> SessionSnapshot {
+        let storage = self.storage.as_ref();
         if let Some(session) = self.current.as_mut() {
+            let had = session.exceptions.contains(&rule);
             session.exceptions.retain(|exception| exception != &rule);
             if allowed {
-                session.exceptions.push(rule);
+                session.exceptions.push(rule.clone());
             }
             session.engine.set_exceptions(session.exceptions.clone());
+            // Kept with the session, so its report can say what was allowed.
+            if allowed != had {
+                session.persist_event(now, if allowed { "allowed" } else { "unallowed" }, Some(&allowed_detail(&rule)), storage);
+            }
         }
         self.snapshot(now)
     }
@@ -1026,7 +1035,7 @@ impl Session {
         self.exceptions.retain(|exception| !exception.matches(&focus.activity));
         self.rules.insert(0, rule.clone());
         self.rules = keep_current_rules(std::mem::take(&mut self.rules));
-        self.remark_current(&focus, Some(rule), now, storage, "Marked distraction", "marked_distracting");
+        self.remark_current(&focus, Some(rule), now, storage, "Marked distraction", "marked_distracting", None);
         Some(self.rules.clone())
     }
 
@@ -1035,10 +1044,11 @@ impl Session {
         let Some((focus, rule)) = self.current_rule() else {
             return;
         };
+        let detail = allowed_detail(&rule);
         if !self.exceptions.contains(&rule) {
             self.exceptions.push(rule);
         }
-        self.remark_current(&focus, None, now, storage, "Allowed this session", "allowed_for_session");
+        self.remark_current(&focus, None, now, storage, "Allowed this session", "allowed", Some(&detail));
     }
 
     /// The rule on the window in front goes, for good. Returns the rules to persist.
@@ -1046,7 +1056,7 @@ impl Session {
         let (focus, _) = self.current_rule()?;
         self.rules.retain(|rule| !rule.matches(&focus.activity));
         self.exceptions.retain(|exception| !exception.matches(&focus.activity));
-        self.remark_current(&focus, None, now, storage, "Rule removed", "rule_removed");
+        self.remark_current(&focus, None, now, storage, "Rule removed", "rule_removed", None);
         Some(self.rules.clone())
     }
 
@@ -1060,6 +1070,7 @@ impl Session {
         storage: Option<&SessionStorage>,
         evidence: &str,
         event: &str,
+        detail: Option<&str>,
     ) {
         if self.is_recording() {
             self.account_current(now);
@@ -1084,7 +1095,7 @@ impl Session {
             }
         }
         self.push_event(now, evidence, "RULE");
-        self.persist_event(now, event, None, storage);
+        self.persist_event(now, event, detail, storage);
     }
 
     fn finish(&mut self, now: Duration, storage: Option<&SessionStorage>) {
@@ -1795,6 +1806,12 @@ fn clean_goal(goal: String) -> String {
     }
 }
 
+/** The `detail` of an "allowed" or "unallowed" event: "website:youtube.com", "app:slack". */
+fn allowed_detail(rule: &AppRule) -> String {
+    let target = if rule.target == RuleTarget::Website { "website" } else { "app" };
+    format!("{target}:{}", rule.value.trim().to_lowercase())
+}
+
 fn clean_rules(rules: Vec<AppRule>) -> Vec<AppRule> {
     keep_current_rules(
         rules
@@ -1973,6 +1990,29 @@ mod tests {
         let slipping = manager.session_report(id).unwrap().spans.iter()
             .filter(|span| span.state == "suspicious").count();
         assert_eq!(slipping, 1);
+    }
+
+    #[test]
+    fn allowing_a_distraction_is_kept_with_the_session() {
+        let mut manager = test_manager();
+        let mut start = input("Allow", Strictness::Normal);
+        start.exceptions = Some(vec![AppRule::website("reddit.com")]);
+        manager.start(start, seconds(0));
+        let id = manager.snapshot(seconds(0)).current.unwrap().id;
+        manager.set_session_exception(AppRule::website("youtube.com"), true, seconds(5));
+        // Already allowed: nothing new to record.
+        manager.set_session_exception(AppRule::website("youtube.com"), true, seconds(6));
+        manager.set_session_exception(AppRule::website("reddit.com"), false, seconds(7));
+        manager.stop(seconds(10));
+        let events: Vec<(String, Option<String>)> = manager.session_report(id).unwrap().events.into_iter()
+            .filter(|event| event.kind.ends_with("allowed"))
+            .map(|event| (event.kind, event.detail))
+            .collect();
+        assert_eq!(events, vec![
+            ("allowed".to_string(), Some("website:reddit.com".to_string())),
+            ("allowed".to_string(), Some("website:youtube.com".to_string())),
+            ("unallowed".to_string(), Some("website:reddit.com".to_string())),
+        ]);
     }
 
     #[test]

@@ -2185,6 +2185,27 @@ button.recap-app-row:active {
   margin: 0;
 }
 
+/* Work in the app's green, Distraction in its red, as everywhere else. */
+.app-edit-field .mode-tabs button.active[data-counts="work"] {
+  background: var(--sv-green);
+  color: var(--sv-colored-ink);
+}
+
+.app-edit-field .mode-tabs button.active[data-counts="distraction"] {
+  background: var(--danger);
+  color: var(--sv-colored-ink);
+}
+
+/* "Allowed" after a name: the smallest label, muted. */
+.recap-app-tag {
+  margin-left: 8px;
+  color: var(--sv-muted);
+  font-family: var(--font-mono);
+  font-size: var(--sv-type-4);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .app-edit-note,
 .app-edit-error {
   margin: 0;

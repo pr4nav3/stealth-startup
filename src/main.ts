@@ -747,6 +747,8 @@ interface AppEdit {
   wasDistraction: boolean;
   sessionIds: number[];
   listable: boolean | null;
+  /** Allowed once in the report's session, so its time there counted as work. */
+  allowed: boolean;
   error: string;
 }
 let appEdit: AppEdit | null = null;
@@ -4563,7 +4565,12 @@ function editableApp(app: RecapApp): boolean {
 
 /** Apps & sites, in a report or a week: Work beside Distractions, each an eyebrow with its
  *  total and its rows in a box; any Away time and the hint on a line underneath. */
-function renderAppColumns(apps: RecapApp[], sessionId: number | null, period: "session" | "week"): string {
+/** What the session allowed once, at any point: "website:youtube.com", "app:slack". */
+function allowedInReport(report: SessionReport): Set<string> {
+  return new Set(report.events.filter((event) => event.kind === "allowed" && event.detail).map((event) => (event.detail ?? "").toLowerCase()));
+}
+
+function renderAppColumns(apps: RecapApp[], sessionId: number | null, period: "session" | "week", allowed = new Set<string>()): string {
   const work = apps.filter((app) => app.group === "Work");
   const distractions = apps.filter((app) => app.group === "Distractions");
   const away = apps.filter((app) => app.group === "Away");
@@ -4572,7 +4579,7 @@ function renderAppColumns(apps: RecapApp[], sessionId: number | null, period: "s
     return `
       <div class="recap-app-block">
         <p class="eyebrow">${escapeHtml(title)}${items.length ? ` · ${escapeHtml(formatHours(total))}` : ""}</p>
-        <div class="recap-app-group">${items.length ? renderAppRows(items, sessionId) : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}</div>
+        <div class="recap-app-group">${items.length ? renderAppRows(items, sessionId, allowed) : `<p class="week-app-empty">${escapeHtml(emptyText)}</p>`}</div>
       </div>
     `;
   };
@@ -4591,19 +4598,21 @@ const APP_EDIT_HINT = "Click a row to rename it or change how it counts.";
 
 /** One line per app or site: its name and its time. A real app or site is a quiet button that
  *  opens its popup (see AppEdit); `sessionId` is the report's session, or null for the week. */
-function renderAppRows(items: RecapApp[], sessionId: number | null = null): string {
+function renderAppRows(items: RecapApp[], sessionId: number | null = null, allowed = new Set<string>()): string {
   return items
     .map((app) => {
       const tone = app.group === "Distractions" ? "is-distraction" : "";
+      // A listed distraction the session allowed once: it sits in Work, and says why.
+      const wasAllowed = app.group === "Work" && allowed.has(`${app.kind}:${app.key.toLowerCase()}`);
       const cells = `
-        <span class="recap-app-name">${escapeHtml(app.label)}</span>
+        <span class="recap-app-name">${escapeHtml(app.label)}${wasAllowed ? `<span class="recap-app-tag">Allowed</span>` : ""}</span>
         <strong>${escapeHtml(formatHours(app.seconds))}</strong>
       `;
       if (!editableApp(app)) {
         return `<div class="recap-app-row ${tone}">${cells}</div>`;
       }
       return `
-        <button type="button" class="recap-app-row is-editable ${tone}" data-action="edit-app" data-kind="${app.kind}" data-key="${attr(app.key)}" data-label="${attr(app.label)}" data-distraction="${app.group === "Distractions"}" data-session-id="${sessionId ?? ""}" aria-label="${attr(`Edit ${app.label}`)}">
+        <button type="button" class="recap-app-row is-editable ${tone}" data-action="edit-app" data-kind="${app.kind}" data-key="${attr(app.key)}" data-label="${attr(app.label)}" data-distraction="${app.group === "Distractions"}" data-allowed="${wasAllowed}" data-session-id="${sessionId ?? ""}" aria-label="${attr(`Edit ${app.label}`)}">
           ${cells}
         </button>
       `;
@@ -4621,6 +4630,7 @@ function renderAppEdit(): string {
   const counts = edit.listable === false
     ? `<p class="app-edit-note">A browser counts by the sites open in it, so it can't be a distraction by itself.</p>`
     : `
+      ${edit.allowed ? `<p class="app-edit-note">Allowed once this session, so its time counted as work. It's still on your distractions list.</p>` : ""}
       <div class="app-edit-field">
         <span>Counts as</span>
         <div class="mode-tabs" role="group" aria-label="Counts as">
@@ -4679,6 +4689,7 @@ async function openAppEdit(source: HTMLElement): Promise<void> {
     wasDistraction: source.dataset.distraction === "true",
     sessionIds,
     listable: kind === "website" ? true : null,
+    allowed: source.dataset.allowed === "true",
     error: "",
   };
   appEdit = edit;
@@ -5175,7 +5186,7 @@ function renderSessionReport(report: SessionReport): string {
       </section>
       <section class="panel recap-apps">
         <h2 class="eyebrow recap-apps-title">Apps &amp; sites</h2>
-        ${report.apps.length === 0 ? `<p class="empty">No app time recorded.</p>` : renderAppColumns(report.apps, report.id, "session")}
+        ${report.apps.length === 0 ? `<p class="empty">No app time recorded.</p>` : renderAppColumns(report.apps, report.id, "session", allowedInReport(report))}
       </section>
     </section>
   `;
