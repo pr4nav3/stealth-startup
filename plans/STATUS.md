@@ -64,8 +64,14 @@ pass from Windows, and what is left for a release, is
 - [x] Apps & sites rows open a popup (2026-10-29, replacing Edit mode): Name,
       Address for a site, Counts as Work / Distraction. Counts as rewrites the
       report's session or the week's sessions (`reclassify_session_app`) and the
-      distractions list together; a dot marks what is on the list. Bars share
-      their columns. Known work follows the move so the review never asks again
+      distractions list together; a rename alone never changes the list. Rows
+      are names and times only, Work and Distractions side by side in the
+      report and the week. Known work follows the move so the review never
+      asks again
+- [x] Allow once is kept with the session ("allowed" / "unallowed" events): the
+      report tags that row ALLOWED in its Work box and its popup says why; the
+      week stays unmarked. Only sessions run since 2026-10-29 carry it. Counts
+      as shows Work in green and Distraction in red
 - [x] Status window: "More" instead of "More settings"; nothing to mute or add
       during a break; the Add button names what is in front ("Add YouTube to
       distractions") and says why when there is nothing to add
@@ -349,7 +355,7 @@ Needs a person (details in `plans/review-2026-10-25.md`):
 3. **Decide Windows distribution** (direct download with SmartScreen, or the
    Microsoft Store), then build its installer.
 4. **Live test pass on Windows** with the running copy closed: a V2 session
-   with "Not today" and "Never a distraction", History with real weeks, a voice
+   with Allow once and Always allow, History with real weeks, a voice
    tone end to end, a webcam session, quit and confirm no worker survives, and
    closing the window (it now hides).
 5. **Back up the Mac signing certificate** into a password manager.
