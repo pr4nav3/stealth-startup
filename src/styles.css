@@ -2848,6 +2848,11 @@ button.personality-more:active {
 
 .line-state.is-bad,
 .clips-hint.is-bad {
+  color: #c63f27;
+}
+
+[data-theme="dark"] .line-state.is-bad,
+[data-theme="dark"] .clips-hint.is-bad {
   color: var(--sv-coral);
 }
 
@@ -6025,10 +6030,14 @@ button.history-item {
   box-shadow: none;
 }
 
-/* The voice row in the theme's outer card colour, its play button in the inner one. */
+/* The voice row a shade off the card behind it, its play button lighter again. */
 .session-over-card .interrupt-voice {
-  background: var(--panel);
+  background: var(--paper);
   color: var(--ink);
+}
+
+[data-theme="dark"] .session-over-card .interrupt-voice {
+  background: var(--panel);
 }
 
 .session-over-card .state-slab.interrupt-alert .interrupt-voice-who {
@@ -6042,6 +6051,10 @@ button.history-item {
 .session-over-card .voice-orb-core {
   background: var(--white-soft);
   color: var(--ink);
+}
+
+[data-theme="dark"] .session-over-card .voice-orb-core {
+  background: #62615b;
 }
 
 .confirm-panel p {
