@@ -940,6 +940,49 @@ pub fn start_model_download(
     Ok(download_snapshot(&download, &root))
 }
 
+/// Weights and worker both in place: the only state the daily check has anything to update.
+pub fn engine_installed(app: &AppHandle) -> bool {
+    voice_root(app).is_ok_and(|root| model_status_for(&root, false).installed && voice_runtime::status(&root).installed)
+}
+
+const UPDATE_CHECK_FILE: &str = "last-update-check";
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+pub fn update_check_due(app: &AppHandle) -> bool {
+    let Ok(root) = voice_root(app) else {
+        return false;
+    };
+    let last = fs::read_to_string(root.join(UPDATE_CHECK_FILE))
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .map(|secs| UNIX_EPOCH + Duration::from_secs(secs));
+    last.map_or(true, |at| SystemTime::now().duration_since(at).map_or(true, |since| since >= UPDATE_CHECK_EVERY))
+}
+
+pub fn mark_update_checked(app: &AppHandle) {
+    if let Ok(root) = voice_root(app) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let _ = fs::write(root.join(UPDATE_CHECK_FILE), now.to_string());
+    }
+}
+
+/// For a check nobody asked for: `None` while it runs, then whether it fetched anything. A
+/// failure (offline, manifest missing) is swallowed, so the popup never shows an error the
+/// user did not cause.
+pub fn settle_quiet_check(state: &Arc<Mutex<VoiceDownloadState>>) -> Option<bool> {
+    let mut download = state.lock().ok()?;
+    match download.phase {
+        VoiceDownloadPhase::Checking | VoiceDownloadPhase::Downloading | VoiceDownloadPhase::Cancelling => None,
+        VoiceDownloadPhase::Complete => Some(!download.up_to_date),
+        VoiceDownloadPhase::Error => {
+            download.phase = VoiceDownloadPhase::Idle;
+            download.error = None;
+            Some(false)
+        }
+        VoiceDownloadPhase::Idle => Some(false),
+    }
+}
+
 /// Whether a check or download is running, so nothing deletes the files under it.
 pub fn download_active(state: &Arc<Mutex<VoiceDownloadState>>) -> bool {
     state.lock().map(|download| matches!(

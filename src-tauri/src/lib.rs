@@ -31,7 +31,6 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const OVERLAY_WINDOW_LABEL: &str = "overlay";
 const OVERLAY_WIDTH: f64 = 312.0;
 const OVERLAY_HEIGHT: f64 = 286.0;
-const OVERLAY_MARGIN: i32 = 18;
 
 /// Session time: a monotonic clock that keeps running while the computer sleeps, so a closed
 /// lid shows up as a gap (lost time, an expired timer) instead of vanishing. `Instant` does
@@ -747,6 +746,7 @@ pub fn run() {
             setup_tray(app)?;
             start_session_ticker(app.handle().clone());
             start_voice_worker_ticker(app.handle().clone());
+            start_voice_update_check(app.handle().clone());
             #[cfg(debug_assertions)]
             start_automation(app.handle().clone());
             Ok(())
@@ -1276,7 +1276,6 @@ fn place_status_window(
     let scale = window
         .scale_factor()
         .unwrap_or_else(|_| monitor.scale_factor());
-    let margin = (f64::from(OVERLAY_MARGIN) * scale).round() as i32;
     let fallback_size = tauri::PhysicalSize::new(
         (OVERLAY_WIDTH * scale).round() as u32,
         (OVERLAY_HEIGHT * scale).round() as u32,
@@ -1286,20 +1285,53 @@ fn place_status_window(
     } else {
         window.outer_size().unwrap_or(fallback_size)
     };
-    let min_x = area.position.x + margin;
-    let max_x = area.position.x + area.size.width as i32 - size.width as i32 - margin;
+    let min_x = area.position.x;
+    let max_x = area.position.x + area.size.width as i32 - size.width as i32;
     let (x, y) = if center {
         (
             area.position.x + (area.size.width as i32 - size.width as i32) / 2,
             area.position.y + (area.size.height as i32 - size.height as i32) / 2,
         )
     } else {
-        (max_x.max(min_x), area.position.y + margin)
+        (max_x.max(min_x), area.position.y)
     };
 
     window
         .set_position(tauri::PhysicalPosition::new(x, y))
         .map_err(|error| error.to_string())
+}
+
+/// Once a day, with the voice engine installed and nothing using it, the same check as the
+/// popup's button runs on its own: a new worker build downloads without anyone asking. A check
+/// that cannot reach the manifests says nothing; the button is there for a check that should.
+fn start_voice_update_check(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(120));
+        let state = app.state::<AppState>();
+        let in_session = lock_sessions(&state).map(|sessions| sessions.should_poll_activity()).unwrap_or(true);
+        if in_session
+            || state.voice_worker.is_busy()
+            || voice::download_active(&state.voice_download)
+            || !voice::engine_installed(&app)
+            || !voice::update_check_due(&app)
+        {
+            continue;
+        }
+        voice::mark_update_checked(&app);
+        voice::release_worker(&state.voice_worker);
+        if voice::start_model_download(app.clone(), Arc::clone(&state.voice_download)).is_err() {
+            continue;
+        }
+        let fetched = loop {
+            std::thread::sleep(Duration::from_secs(2));
+            if let Some(fetched) = voice::settle_quiet_check(&state.voice_download) {
+                break fetched;
+            }
+        };
+        if fetched {
+            let _ = app.emit("voice-engine-updated", ());
+        }
+    });
 }
 
 fn start_voice_worker_ticker(app: AppHandle) {

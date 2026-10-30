@@ -830,6 +830,9 @@ const webcamSettings = {
 };
 let webcamFrame: WebcamFrame | null = null;
 let webcamError = "";
+/** The worker said the GPU could not run the models this run; the app runs them on the processor instead. */
+let webcamGpuFailed = false;
+const GPU_FALLBACK_COPY = "The GPU couldn't run the webcam models, so they're running on the processor instead.";
 let webcamHitStreak = 0;
 let webcamAlarmAtMs = 0;
 let webcamPreviewStarted = false;
@@ -916,6 +919,11 @@ async function init(): Promise<void> {
   if (appView === "main") {
     await listen<WebcamFrame>("webcam-frame", (event) => {
       applyWebcamFrame(event.payload);
+    });
+    // The daily check found and installed a new worker build.
+    await listen("voice-engine-updated", async () => {
+      await refreshVoiceStatus(false);
+      showFeedback("Voice engine updated", 3000);
     });
     // The backend sends this once per nudge, the moment it is due (a webview timer would be
     // throttled while the window is minimized).
@@ -2776,6 +2784,7 @@ function renderWebcamSettings(): string {
                 <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
               </span>
             </label>
+            <small id="webcam-gpu-note" class="field-help is-bad"${webcamGpuFailed && settings.webcam_gpu ? "" : " hidden"}>${GPU_FALLBACK_COPY}</small>
             <label class="setting-row camera-row">
               <span>Camera</span>
               <select id="webcam-camera" aria-label="Camera">${cameraOptions()}</select>
@@ -2784,12 +2793,18 @@ function renderWebcamSettings(): string {
           <section class="panel webcam-test-panel">
             <p class="eyebrow">Camera test</p>
             ${renderWebcamMetrics(frame)}
-            <p class="quiet">No images saved. Vision models run only on this computer.<span class="quiet-more">A phone in view counts as a distraction; leaving your desk marks you as away.</span></p>
+            <p class="quiet">No images saved. Vision models run only on this computer.<span class="quiet-more">A phone in view counts as a distraction; leaving your desk marks you as away. Needs ${osFloor()}.</span></p>
           </section>
         </div>
       </section>
     </section>
   `;
+}
+
+/** The oldest system the frozen webcam worker runs on (its OpenCV and numpy builds set it). */
+function osFloor(): string {
+  const mac = captureAccess ? captureAccess.platform === "macos" : /Mac/.test(navigator.platform);
+  return mac ? "macOS 14 or later" : "Windows 10 or later";
 }
 
 /** Named cameras where the OS lists them; otherwise the first four indexes. The saved one always shows. */
@@ -3599,7 +3614,7 @@ function renderModelInfoModal(): string {
           installed && voiceDownload?.phase === "complete" && voiceDownload.up_to_date
             ? "Up to date: nothing to download. It only runs while lines are being generated."
             : installed
-            ? "It only runs while lines are being generated. Check for updates downloads only what is missing."
+            ? "It only runs while lines are being generated. Supervisor looks for updates once a day on its own; this button looks now."
             : `A one-time download of about ${escapeHtml(formatBytes(model?.required_bytes ?? 0))}. Generated lines play without it; generating new ones needs it.`
         }</p>
         <div class="modal-actions">
@@ -7772,6 +7787,7 @@ async function setWebcamGpu(enabled: boolean): Promise<void> {
     if (box) {
       box.checked = settings.webcam_gpu;
     }
+    paintWebcamDom();
   });
 }
 
@@ -7832,7 +7848,11 @@ async function stopWebcamPreview(): Promise<void> {
 
 function applyWebcamFrame(frame: WebcamFrame): void {
   if (frame.error) {
-    webcamError = frame.error;
+    if (frame.error.includes("GPU mode") && !webcamGpuFailed) {
+      webcamGpuFailed = true;
+      showFeedback(GPU_FALLBACK_COPY, 5000);
+    }
+    webcamError = frame.error.includes("GPU mode") ? GPU_FALLBACK_COPY : frame.error;
     if (!frame.jpeg) {
       webcamHitStreak = 0;
       if (settingsView === "webcam" && activeTab === "settings") {
@@ -7893,6 +7913,10 @@ function paintWebcamDom(): void {
   if (liveError) {
     liveError.textContent = webcamError;
     liveError.hidden = !webcamSettings.phoneUse || !webcamError;
+  }
+  const gpuNote = document.getElementById("webcam-gpu-note");
+  if (gpuNote) {
+    gpuNote.hidden = !(webcamGpuFailed && settings.webcam_gpu);
   }
   const metrics = document.querySelector(".webcam-metrics");
   if (metrics) {

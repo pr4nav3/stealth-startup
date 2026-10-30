@@ -71,6 +71,13 @@ pass from Windows, and what is left for a release, is
 - [x] Away comes only from the webcam (nobody in view for a minute, no input since) or
       from sleep (2026-10-30). The 3-minute idle rule and the media check are gone, so no
       one working is marked Away by mistake; without a camera there is no Away at all
+- [x] The voice engine looks for updates by itself (2026-10-30): once a day, two minutes
+      after launch, when it is installed and nothing is using it, the same check as the
+      popup's button runs quietly; a new worker build installs and a toast says so, a
+      failed check says nothing. The webcam worker ships inside the app, so it updates
+      only with the app. A failed GPU start now shows a plain line under Run on GPU and
+      a toast; the webcam page names the OS floor; the session timer sits flush in the
+      corner
 - [x] Allow once is kept with the session ("allowed" / "unallowed" events): the
       report tags that row ALLOWED in its Work box and its popup says why; the
       week stays unmarked. Only sessions run since 2026-10-29 carry it. Counts
