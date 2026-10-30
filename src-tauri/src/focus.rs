@@ -4,17 +4,6 @@ use crate::website;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// No keyboard or mouse input for this long means the user is away. Shorter pauses (reading,
-/// thinking, writing on paper) stay with the window in front. A real break is dated back to
-/// the last input once noticed, so waiting this long costs no accuracy. It is the same for
-/// every strictness: whether someone is at the computer is a fact, not a preference.
-/// Capture looks for media playing only past this point, so that lookup is rare.
-pub const AWAY_AFTER_SECONDS: u64 = 180;
-
-/// Media playing in the app in front means the user is watching, listening, or on a call, for
-/// at most this long without input. Past it, autoplay or a forgotten call counts as Away.
-const MEDIA_PRESENCE_LIMIT_SECONDS: f64 = 45.0 * 60.0;
-
 #[derive(Debug)]
 pub struct FocusEngine {
     config: FocusConfig,
@@ -31,9 +20,7 @@ pub struct FocusEngine {
     nudged_here: bool,
     /// Muted engines keep judging time but never ask for a nudge.
     muted: bool,
-    /// From the webcam: someone is in view (counts like media playing), or nobody has been
-    /// in view, without input, long enough to be away.
-    camera_present: bool,
+    /// From the webcam: nobody has been in view, without input, long enough to be away.
     camera_away: bool,
 }
 
@@ -49,7 +36,6 @@ impl FocusEngine {
             last_nudge_at: None,
             nudged_here: false,
             muted: false,
-            camera_present: false,
             camera_away: false,
         }
     }
@@ -72,7 +58,7 @@ impl FocusEngine {
             self.nudged_here = false;
         }
 
-        if self.is_away(sample) {
+        if self.camera_away {
             self.hold(now);
             return self.snapshot(sample, activity, FocusState::Idle, None, false, None, now);
         }
@@ -132,8 +118,7 @@ impl FocusEngine {
         self.muted
     }
 
-    pub fn set_camera(&mut self, present: bool, away: bool) {
-        self.camera_present = present;
+    pub fn set_camera_away(&mut self, away: bool) {
         self.camera_away = away;
     }
 
@@ -159,17 +144,6 @@ impl FocusEngine {
         } else {
             FocusState::Distracted
         }
-    }
-
-    /// No input past the threshold is Away, unless media is playing in the app in front or the
-    /// webcam sees someone. The webcam seeing nobody makes it Away sooner.
-    pub fn is_away(&self, sample: &ActivitySample) -> bool {
-        self.camera_away
-            || sample.idle_seconds.is_some_and(|seconds| {
-                seconds >= AWAY_AFTER_SECONDS as f64
-                    && !((sample.media_playing || self.camera_present)
-                        && seconds < MEDIA_PRESENCE_LIMIT_SECONDS)
-            })
     }
 
     fn next_nudge_in_seconds(
@@ -561,30 +535,19 @@ mod tests {
     }
 
     #[test]
-    fn idle_samples_do_not_nudge_or_count_toward_the_site() {
+    fn away_samples_do_not_nudge_or_count_toward_the_site() {
         let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
         let youtube = Activity::website("chrome", "youtube.com");
 
+        engine.set_camera_away(true);
         let idle = observe(&mut engine, &youtube, 200.0, 100);
+        engine.set_camera_away(false);
         let returned = observe(&mut engine, &youtube, 0.0, 101);
 
         assert_eq!(idle.state, FocusState::Idle);
         assert!(!idle.should_nudge);
         assert_eq!(returned.state, FocusState::Suspicious);
         assert!(!returned.should_nudge);
-    }
-
-    #[test]
-    fn media_in_front_keeps_an_idle_user_present_until_the_limit() {
-        let mut engine = test_engine(vec![AppRule::website("youtube.com")]);
-        let youtube = Activity::website("chrome", "youtube.com");
-
-        assert_eq!(observe_media(&mut engine, &youtube, 200.0, true, 0).state, FocusState::Suspicious);
-        let watching = observe_media(&mut engine, &youtube, 220.0, true, 20);
-        assert_eq!(watching.state, FocusState::Distracted);
-        assert!(watching.should_nudge);
-        // 45 minutes without input: autoplay with nobody there.
-        assert_eq!(observe_media(&mut engine, &youtube, 2700.0, true, 40).state, FocusState::Idle);
     }
 
     #[test]
@@ -633,16 +596,6 @@ mod tests {
     }
 
     fn observe(engine: &mut FocusEngine, activity: &Activity, idle_seconds: f64, at: u64) -> FocusSnapshot {
-        observe_media(engine, activity, idle_seconds, false, at)
-    }
-
-    fn observe_media(
-        engine: &mut FocusEngine,
-        activity: &Activity,
-        idle_seconds: f64,
-        media_playing: bool,
-        at: u64,
-    ) -> FocusSnapshot {
         let sample = ActivitySample {
             captured_at: "2026-08-12T00:00:00Z".to_string(),
             platform: "macos",
@@ -659,7 +612,6 @@ mod tests {
             permissions: CapturePermissions { screen_recording: PermissionState::Granted, accessibility: PermissionState::NotRequired },
             shell_surface: false,
             browser: None,
-            media_playing,
         };
         engine.record_sample(&sample, activity, Duration::from_secs(at))
     }

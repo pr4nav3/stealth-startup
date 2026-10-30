@@ -68,6 +68,9 @@ pass from Windows, and what is left for a release, is
       are names and times only, Work and Distractions side by side in the
       report and the week. Known work follows the move so the review never
       asks again
+- [x] Away comes only from the webcam (nobody in view for a minute, no input since) or
+      from sleep (2026-10-30). The 3-minute idle rule and the media check are gone, so no
+      one working is marked Away by mistake; without a camera there is no Away at all
 - [x] Allow once is kept with the session ("allowed" / "unallowed" events): the
       report tags that row ALLOWED in its Work box and its popup says why; the
       week stays unmarked. Only sessions run since 2026-10-29 carry it. Counts

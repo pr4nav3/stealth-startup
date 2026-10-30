@@ -262,7 +262,6 @@ mod tests {
                 address: address.map(str::to_string),
                 editing,
             }),
-            media_playing: false,
         }
     }
 

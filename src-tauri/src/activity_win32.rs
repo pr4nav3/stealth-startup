@@ -3,7 +3,7 @@ use crate::app_identity::{host_script, host_script_label, is_shared_host, window
 use crate::website::is_browser;
 use super::activity_normalize::{
     app_label, app_name_from_process_path, classify_foreground_surface, is_inside_dir,
-    media_is_in_front, normalize_title_for_browser, normalize_title_text, ForegroundDisposition,
+    normalize_title_for_browser, normalize_title_text, ForegroundDisposition,
     RawForegroundIdentity,
 };
 use std::collections::HashMap;
@@ -12,10 +12,6 @@ use std::sync::{Mutex, OnceLock};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use windows::core::{w, BOOL, HSTRING, PCWSTR, PWSTR};
 use windows::ApplicationModel::AppInfo;
-use windows::Media::Control::{
-    GlobalSystemMediaTransportControlsSessionManager as MediaSessions,
-    GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
-};
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_INSUFFICIENT_BUFFER, HANDLE, HWND, LPARAM, MAX_PATH, RECT, UNICODE_STRING,
@@ -43,28 +39,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// Longest path Windows can return (the extended-length path limit).
 const PROCESS_IMAGE_PATH_CHARS: usize = 32768;
-
-/// Whether the window in front is playing media, per the system media controls (what the
-/// volume flyout's player shows). A failed read counts as not playing: idle stays Away.
-pub(super) fn media_playing_in_front(sample: &ActivitySample) -> bool {
-    let in_browser = is_browser(&sample.app_name.to_lowercase());
-    playing_media().unwrap_or_default().iter().any(|(source_app, title)| {
-        media_is_in_front(&sample.app_name, sample.window_title.as_deref(), in_browser, source_app, title)
-    })
-}
-
-/// App id and media title of every session that is playing right now.
-fn playing_media() -> windows::core::Result<Vec<(String, String)>> {
-    let mut playing = Vec::new();
-    for session in MediaSessions::RequestAsync()?.get()?.GetSessions()? {
-        if session.GetPlaybackInfo()?.PlaybackStatus()? != PlaybackStatus::Playing {
-            continue;
-        }
-        let title = session.TryGetMediaPropertiesAsync()?.get()?.Title()?;
-        playing.push((session.SourceAppUserModelId()?.to_string(), title.to_string()));
-    }
-    Ok(playing)
-}
 
 /// Use the same OS metadata as foreground capture to relabel older app history.
 pub(super) fn running_app_labels(keys: &[String]) -> HashMap<String, String> {
@@ -247,7 +221,6 @@ fn build_sample(
         permissions,
         shell_surface,
         browser,
-        media_playing: false,
     }
 }
 

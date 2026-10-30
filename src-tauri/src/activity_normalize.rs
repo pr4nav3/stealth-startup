@@ -248,36 +248,6 @@ pub fn app_label(app_name: &str, description: Option<&str>) -> String {
         .to_string()
 }
 
-/// What Edge reports for a site that gives no media details. Which tab plays can't be told.
-const UNTITLED_BROWSER_MEDIA: &[&str] = &["a site is playing media"];
-
-/// Whether a playing media session belongs to the window in front. `source_app` is the
-/// session's app id ("Spotify.exe", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", "MSEdge").
-/// A browser plays for all its tabs, so it counts when the media title is in the window title,
-/// which names the active tab, or when it won't say what plays. Other apps also match by their
-/// exe name in the app id.
-pub fn media_is_in_front(
-    app_name: &str,
-    window_title: Option<&str>,
-    in_browser: bool,
-    source_app: &str,
-    media_title: &str,
-) -> bool {
-    let media_title = media_title.trim().to_lowercase();
-    // Very short titles ("A", "Go") would match almost any window title.
-    let title_in_front = media_title.chars().count() >= 3
-        && window_title.is_some_and(|title| title.to_lowercase().contains(&media_title));
-    let app = exe_stem_lower(app_name);
-    let same_app = !app.is_empty()
-        && source_app
-            .split(|ch: char| !ch.is_alphanumeric())
-            .any(|part| part.eq_ignore_ascii_case(&app));
-    if in_browser {
-        return title_in_front || (same_app && UNTITLED_BROWSER_MEDIA.contains(&media_title.as_str()));
-    }
-    title_in_front || same_app
-}
-
 fn exe_stem_lower(exe_name: &str) -> String {
     let stem = std::path::Path::new(exe_name)
         .file_stem()
@@ -296,41 +266,6 @@ pub fn strip_zero_width(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn browser_media_counts_only_for_the_tab_in_front() {
-        let youtube = Some("Lo-fi beats to study to - YouTube");
-        assert!(media_is_in_front("chrome", youtube, true, "Chrome", "Lo-fi beats to study to"));
-        // Music in a background tab while reading mail: the browser plays, but not in front.
-        assert!(!media_is_in_front("chrome", Some("Inbox - Gmail"), true, "Chrome", "Lo-fi beats to study to"));
-        assert!(!media_is_in_front("chrome", youtube, true, "Chrome", ""));
-        assert!(!media_is_in_front("chrome", youtube, true, "Chrome", "Lo"));
-    }
-
-    #[test]
-    fn untitled_browser_media_counts_for_that_browser_in_front() {
-        let page = Some("Lecture 4 | Some University");
-        assert!(media_is_in_front("msedge", page, true, "MSEdge", "A site is playing media"));
-        // Edge playing behind Chrome is not Chrome playing.
-        assert!(!media_is_in_front("chrome", page, true, "MSEdge", "A site is playing media"));
-    }
-
-    #[test]
-    fn app_media_counts_by_its_app_id_or_title() {
-        assert!(media_is_in_front("Spotify", Some("Spotify Premium"), false, "Spotify.exe", "Song"));
-        assert!(media_is_in_front(
-            "Spotify",
-            Some("Spotify Premium"),
-            false,
-            "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
-            "Song",
-        ));
-        assert!(media_is_in_front("vlc", Some("Lecture 4.mp4 - VLC media player"), false, "", "Lecture 4.mp4"));
-        // Spotify playing behind an editor is not the editor playing.
-        assert!(!media_is_in_front("Code", Some("main.rs - Supervisor"), false, "Spotify.exe", "Song"));
-        // Part of an app id is not an app id.
-        assert!(!media_is_in_front("App", Some("Main window"), false, "Microsoft.WindowsApps!Player", "Song"));
-    }
 
     #[test]
     fn placeholder_titles_become_none() {

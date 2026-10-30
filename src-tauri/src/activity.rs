@@ -49,10 +49,6 @@ pub struct ActivitySample {
     /// Set only when a browser is in front.
     #[serde(skip)]
     pub browser: Option<BrowserRead>,
-    /// The app in front is playing media, so a user who isn't typing may be watching or
-    /// listening. Looked up only once input has stopped; `false` until then.
-    #[serde(skip)]
-    pub media_playing: bool,
 }
 
 /// What the browser's address bar said. `address: None` means it could not be read.
@@ -93,20 +89,9 @@ pub fn current_activity_sample() -> Result<ActivitySample, String> {
     // The capture calls Cocoa every second from a plain thread; without a pool the objects it
     // autoreleases are only freed when the thread exits, so memory would grow all session.
     #[cfg(target_os = "macos")]
-    return objc2::rc::autoreleasepool(|_| capture_with_media());
+    return objc2::rc::autoreleasepool(|_| capture_foreground(capture_permissions(), idle_seconds()));
     #[cfg(not(target_os = "macos"))]
-    capture_with_media()
-}
-
-fn capture_with_media() -> Result<ActivitySample, String> {
-    let mut sample = capture_foreground(capture_permissions(), idle_seconds())?;
-    let input_stopped = sample
-        .idle_seconds
-        .is_some_and(|seconds| seconds >= crate::focus::AWAY_AFTER_SECONDS as f64);
-    if input_stopped && !sample.shell_surface {
-        sample.media_playing = media_playing_in_front(&sample);
-    }
-    Ok(sample)
+    capture_foreground(capture_permissions(), idle_seconds())
 }
 
 fn capture_foreground(
@@ -193,23 +178,6 @@ fn capture_foreground(
     }
 }
 
-/// Windows: the system media controls. macOS: a "keep the display awake" power assertion,
-/// which browsers hold only while video plays on screen and call apps hold during calls.
-#[cfg(target_os = "windows")]
-fn media_playing_in_front(sample: &ActivitySample) -> bool {
-    activity_win32::media_playing_in_front(sample)
-}
-
-#[cfg(target_os = "macos")]
-fn media_playing_in_front(sample: &ActivitySample) -> bool {
-    crate::macos::keeps_display_awake(sample.process_id)
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn media_playing_in_front(_sample: &ActivitySample) -> bool {
-    false
-}
-
 /// Resolve old app keys against processes that Windows can still identify.
 pub fn running_app_labels(keys: &[String]) -> HashMap<String, String> {
     #[cfg(target_os = "windows")]
@@ -256,7 +224,6 @@ fn sample_from_active_window(
         permissions,
         shell_surface: false,
         browser: None,
-        media_playing: false,
     }
 }
 

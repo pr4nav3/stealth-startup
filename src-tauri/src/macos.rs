@@ -19,55 +19,6 @@ pub fn idle_seconds() -> Option<f64> {
     seconds.is_finite().then_some(seconds)
 }
 
-/// Whether process `pid`, or a helper acting for it, holds a "keep the display awake" power
-/// assertion. Browsers take one while a video plays on screen (not for audio, a paused video,
-/// or a hidden tab), and call apps during calls. Public IOKit; no permission prompt.
-pub fn keeps_display_awake(pid: u64) -> bool {
-    use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
-    use objc2_foundation::{ns_string, NSArray, NSDictionary, NSNumber, NSString};
-
-    #[link(name = "IOKit", kind = "framework")]
-    extern "C" {
-        /// A `CFDictionaryRef` (toll-free bridged to `NSDictionary`) from each pid to its
-        /// assertions. Returns `kIOReturnSuccess` (0) on success.
-        fn IOPMCopyAssertionsByProcess(assertions_by_pid: *mut *mut NSDictionary) -> i32;
-    }
-    const DISPLAY_AWAKE: [&str; 2] = ["PreventUserIdleDisplaySleep", "NoDisplaySleepAssertion"];
-
-    let mut raw = std::ptr::null_mut();
-    if unsafe { IOPMCopyAssertionsByProcess(&mut raw) } != 0 {
-        return false;
-    }
-    // A Copy function hands over ownership; `Retained` releases the dictionary when dropped.
-    let Some(by_pid) = (unsafe { Retained::from_raw(raw) }) else {
-        return false;
-    };
-    let number = |value: Option<Retained<AnyObject>>| {
-        value?.downcast::<NSNumber>().ok().map(|number| number.integerValue())
-    };
-    let pid = pid as isize;
-
-    by_pid.keys().any(|owner| {
-        let owner_pid = number(Some(owner.clone()));
-        let Some(assertions) = by_pid.objectForKey(&owner).and_then(|value| value.downcast::<NSArray>().ok()) else {
-            return false;
-        };
-        assertions.iter().any(|assertion| {
-            let Ok(assertion) = assertion.downcast::<NSDictionary>() else {
-                return false;
-            };
-            let keeps_display = assertion
-                .objectForKey(ns_string!("AssertType"))
-                .and_then(|kind| kind.downcast::<NSString>().ok())
-                .is_some_and(|kind| DISPLAY_AWAKE.contains(&kind.to_string().as_str()));
-            // WebKit and other multi-process apps assert from a helper on the app's behalf.
-            let on_behalf_of = number(assertion.objectForKey(ns_string!("AssertionOnBehalfOfPID")));
-            keeps_display && (owner_pid == Some(pid) || on_behalf_of == Some(pid))
-        })
-    })
-}
-
 /// The bundle identifier ("com.microsoft.VSCode") of the app bundle at `path`. It survives
 /// renames and updates, unlike the app's display name. Read once per path: it runs every tick.
 pub fn bundle_identifier(path: &str) -> Option<String> {

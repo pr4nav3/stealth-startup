@@ -35,7 +35,6 @@ active-win-pos-rs = "0.11"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
   "ApplicationModel",
-  "Media_Control",
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Media_MediaFoundation",

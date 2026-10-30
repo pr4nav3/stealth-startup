@@ -3582,9 +3582,7 @@ function renderVoiceHelpModal(): string {
 
 function renderModelInfoModal(): string {
   const model = voiceBackend?.model;
-  const runtime = voiceBackend?.runtime;
   const installed = modelInstalled();
-  const files = model ? `${model.files.filter((file) => file.valid).length} of ${model.files.length}` : "—";
   const busy = voiceBusy !== null || ["checking", "downloading", "cancelling"].includes(voiceDownload?.phase ?? "");
   return `
     <div class="modal-backdrop" role="presentation">
@@ -3596,11 +3594,7 @@ function renderModelInfoModal(): string {
           </div>
           <button class="small-button" type="button" data-action="close-model-info">Close</button>
         </div>
-        <div class="voice-kv">
-          <div><span>On disk</span><strong>${escapeHtml(model ? formatBytes(model.installed_bytes) : "—")}</strong></div>
-          <div><span>Files</span><strong>${escapeHtml(files)}</strong></div>
-          <div><span>Runtime</span><strong>${escapeHtml(runtime?.installed ? runtime.version ?? "installed" : "missing")}</strong></div>
-        </div>
+        ${installed && model ? `<p>Takes up ${escapeHtml(formatBytes(model.installed_bytes))} on disk.</p>` : ""}
         <p>${
           installed && voiceDownload?.phase === "complete" && voiceDownload.up_to_date
             ? "Up to date: nothing to download. It only runs while lines are being generated."
@@ -3640,7 +3634,6 @@ function renderMemoryInfoModal(): string {
           <div><span>In this machine</span><strong data-ram-machine>${escapeHtml(system?.total_ram_bytes ? formatBytes(system.total_ram_bytes) : "—")}</strong></div>
         </div>
         <p data-ram-copy>${escapeHtml(ramLockCopy(locked, peak))}</p>
-        <p class="quiet">Lines already generated keep playing. They never need the voice engine or this memory.</p>
         <div class="modal-actions">
           <button class="${locked ? "primary" : ""}" type="button" data-action="check-ram">Check again</button>
         </div>
@@ -3653,7 +3646,7 @@ function ramLockCopy(locked: boolean, peak: number | null): string {
   if (locked) {
     return "Close other apps, then check again.";
   }
-  return peak ? `Enough right now. The last line used up to ${formatBytes(peak)}; the memory is freed again after each line.` : "Enough right now. The memory is freed again after each line.";
+  return peak ? `Plenty right now. The last line used up to ${formatBytes(peak)} while it was being made.` : "Plenty right now. It's only used while a line is being made.";
 }
 
 /** The memory tile and popup follow the live numbers without a full render. */
@@ -7958,7 +7951,7 @@ function webcamCopy(frame: WebcamFrame | null, alerting: boolean): string {
   if (alerting) {
     return "Your phone is out.";
   }
-  return frame.face_in_frame ? "You're in view, no phone out." : "Sit in view of the webcam.";
+  return frame.face_in_frame ? "You're in view, no phone seen." : "Sit in view of the webcam.";
 }
 
 async function fireWebcamAlert(): Promise<void> {
@@ -9438,6 +9431,9 @@ function animateOnArrival(tab: Tab): void {
     pendingAnimations.add("calendar");
   } else if (tab === "history") {
     pendingAnimations.add("history");
+    if (historyView === "trends") {
+      pendingAnimations.add("trends");
+    }
   }
 }
 
@@ -9592,35 +9588,10 @@ function summarizeDay(card: { day: string; reports: SessionReport[] }): DaySumma
   };
 }
 
-/** "Today", "Yesterday", else the weekday. The date itself is said once, in the corner. */
-function dayTitle(day: string): string {
-  const today = dayKey(new Date());
-  if (day === today) {
-    return "Today";
-  }
-  if (day === addDaysKey(today, -1)) {
-    return "Yesterday";
-  }
-  return parseDayKey(day).toLocaleDateString(undefined, { weekday: "long" });
-}
-
-/** The full date with the year, on the app card. */
-function cardDate(day: string): string {
-  return parseDayKey(day).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
-
-/** The PNG's date, written out: "30 October, 2026". */
+/** The card's date, written out: "30 October, 2026". */
 function cardDayLabel(day: string): string {
   const date = parseDayKey(day);
   return `${date.getDate()} ${date.toLocaleDateString(undefined, { month: "long" })}, ${date.getFullYear()}`;
-}
-
-/** While today is short of the streak threshold, the card says how far there is to go. */
-function cardNote(summary: DaySummary): string {
-  if (summary.isToday && summary.focusedSeconds < STREAK_DAY_SECONDS) {
-    return `${Math.round(summary.focusedSeconds / 60)} / ${STREAK_DAY_SECONDS / 60} min to keep the streak`;
-  }
-  return cardDate(summary.day);
 }
 
 function streakLabel(days: number): string {
@@ -9673,7 +9644,6 @@ function renderDayCard(todayStreakDays: number): string {
         <div class="share-card is-empty" aria-label="No sessions yet">
           <span class="share-head">
             <strong>Your first card</strong>
-            <span>Today</span>
           </span>
           <span class="share-strip" aria-hidden="true"></span>
           <span class="share-stats">
@@ -9696,8 +9666,7 @@ function renderDayCard(todayStreakDays: number): string {
       <p class="eyebrow">Your day</p>
       <button class="share-card" type="button" data-action="copy-card" title="Copy the card as an image">
         <span class="share-head">
-          <strong>${escapeHtml(dayTitle(summary.day))}</strong>
-          <span>${escapeHtml(cardNote(summary))}</span>
+          <strong>${escapeHtml(cardDayLabel(summary.day))}</strong>
         </span>
         <span class="share-strip" aria-hidden="true"><span class="share-strip-fill">${strip}</span></span>
         <span class="share-stats">

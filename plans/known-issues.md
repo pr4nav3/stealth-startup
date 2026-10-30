@@ -37,18 +37,7 @@ still be lost. Recovery marks sessions abandoned and recomputes saved metrics.
 
 **A browser is never a distraction on its own.** No rule can name a browser (typed rules are refused, stored ones are dropped); only websites are. A browser's own pages and unidentified sites count as work.
 
-**Away is 3 minutes without input, dated back to the last input.** Shorter pauses (reading,
-thinking) stay with the window in front; strictness no longer changes this. Supervisor's own
-window follows the same rule, and its time counts as work (V2: it is never a distraction).
-
-**Media keeps an idle user present, with gaps.** No input counts as Away unless the app in
-front is playing media, for up to 45 minutes. Windows reads the system media controls; a
-browser counts when the media title is in its window title (the playing tab is in front),
-or when it is Edge saying only "A site is playing media" for a site without media details;
-that one may be a background tab. Other languages' versions of that phrase are not listed,
-so there it stays Away. Calls on Windows (Zoom, Teams, Meet) are not
-media sessions and still go Away. macOS uses "keep the display awake" assertions, so music
-alone stays Away there; it is untested on a Mac (see `plans/mac-handoff.md`).
+**Away comes from the webcam or from sleep, never from input (2026-10-30).** With webcam models on, nobody in view for a minute, and no input since they left, is Away, dated back to when the camera last saw someone. A closed lid is "Device asleep / unknown", which the report counts with Away. No input on its own is never Away: reading, thinking, watching a video or a call all stay with the window in front, and so does Supervisor's own window (its time counts as work). The old 3-minute idle rule and the media check (system media controls on Windows, display-awake assertions on the Mac) are gone, so nobody working can be marked Away by mistake.
 
 **Capture failures count with Away time.** The score is time not on a distraction. Rules apply
 from the next sample and never change a recorded session on their own; the user can. Clicking a

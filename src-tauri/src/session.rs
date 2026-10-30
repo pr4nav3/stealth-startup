@@ -627,9 +627,9 @@ struct Session {
     recorded_until: u64,
     /// The last span written, so a short unclaimed tail can be given back to it.
     last_closed: Option<OpenSpan>,
-    /// Last time media playing in front, or the webcam, showed the user was there; Away never
-    /// starts earlier.
-    present_at: Duration,
+    /// Last time the webcam saw someone (the session's start until it says otherwise); Away
+    /// never starts earlier.
+    seen_at: Duration,
     /// When window reads started failing, while they still are.
     capture_failing_since: Option<Duration>,
     camera: Camera,
@@ -709,7 +709,7 @@ impl Session {
             last_span_checkpoint: now,
             recorded_until: 0,
             last_closed: None,
-            present_at: now,
+            seen_at: now,
             capture_failing_since: None,
             camera: Camera::default(),
             pomodoro: None,
@@ -857,8 +857,6 @@ impl Session {
             ActivitySample {
                 captured_at: sample.captured_at,
                 idle_seconds: sample.idle_seconds,
-                // Whatever played earlier may have stopped; don't keep an idle user present on it.
-                media_playing: false,
                 ..previous
             }
         } else {
@@ -873,14 +871,14 @@ impl Session {
             return;
         }
         let camera_away = self.camera_away(&sample, now);
-        self.engine.set_camera(self.camera_sees_someone(now), camera_away);
+        self.engine.set_camera_away(camera_away);
 
-        // Supervisor's own window is never a distraction: on task, or Away after the same
-        // stretch without input as any other window.
+        // Supervisor's own window is never a distraction: on task, or Away when the camera
+        // says so, like any other window.
         if supervisor.matches(&sample) {
-            let state = if self.engine.is_away(&sample) { FocusState::Idle } else { FocusState::Focused };
+            let state = if camera_away { FocusState::Idle } else { FocusState::Focused };
             let span_at = if state == FocusState::Idle {
-                self.backdate_away(&sample, now)
+                self.backdate_away(now)
             } else {
                 now
             };
@@ -919,12 +917,9 @@ impl Session {
         if let (ActivityKind::App, Some(storage)) = (activity.kind, storage) {
             display_activity.label = storage.app_label(&activity.key, &activity.label);
         }
-        if sample.media_playing {
-            self.present_at = now;
-        }
         let focus = self.engine.record_sample(&sample, &display_activity, now);
         let span_at = if focus.state == FocusState::Idle {
-            self.backdate_away(&sample, now)
+            self.backdate_away(now)
         } else {
             now
         };
@@ -1389,11 +1384,10 @@ impl Session {
         self.open_span.as_ref().is_some_and(|span| span.state == "unknown")
     }
 
-    /// Away starts at the last input, not when the threshold noticed it: the minutes already
-    /// credited to the window in front go back to Away. Only within the current span, and
-    /// never before media playing in front last showed the user was there. Returns where the
-    /// Away span begins.
-    fn backdate_away(&mut self, sample: &ActivitySample, now: Duration) -> Duration {
+    /// Away starts when the camera last saw someone, not a minute later when it was noticed:
+    /// the time since then credited to the window in front goes back to Away. Only within the
+    /// current span. Returns where the Away span begins.
+    fn backdate_away(&mut self, now: Duration) -> Duration {
         let boundary = self.last_accounted_at;
         let Some(span) = self.open_span.as_ref() else {
             return boundary;
@@ -1404,8 +1398,7 @@ impl Session {
         };
         let span_start = now.saturating_sub(Duration::from_secs(
             self.session_offset_seconds(now).saturating_sub(span.started_offset_seconds)));
-        let last_input = now.saturating_sub(Duration::from_secs_f64(sample.idle_seconds.unwrap_or(0.0)));
-        let left_at = Duration::from_secs(last_input.max(span_start).max(self.present_at).as_secs());
+        let left_at = Duration::from_secs(span_start.max(self.seen_at).as_secs());
         // The site's nudge clock stops at the same moment.
         self.engine.hold(left_at);
         let reclaimed = boundary.as_secs().saturating_sub(left_at.as_secs());
@@ -1467,7 +1460,7 @@ impl Session {
         self.camera.present = present || phone;
         if self.camera.present {
             self.camera.absent_since = None;
-            self.present_at = self.present_at.max(now);
+            self.seen_at = self.seen_at.max(now);
         } else {
             self.camera.absent_since.get_or_insert(now);
         }
@@ -1969,18 +1962,23 @@ mod tests {
 
     #[test]
     fn coming_back_to_the_same_site_resumes_instead_of_restarting() {
-        let mut manager = test_manager();
+        let mut manager = webcam_manager();
         manager.start(input("Back", Strictness::Normal), seconds(0));
         let id = manager.snapshot(seconds(0)).current.unwrap().id;
         for t in 0..=20 {
+            manager.record_webcam(false, true, seconds(t));
             record(&mut manager, site("youtube.com", 0.0), seconds(t));
         }
-        // A 3s glance at Supervisor, then a break from 30s: neither counts toward YouTube.
+        // A 3s glance at Supervisor, then a walk away from 30s: neither counts toward YouTube.
         manager.record_sample(sample_with_pid("Supervisor", "Supervisor", 7, 0.0), seconds(20), &identity());
         let back = record(&mut manager, site("youtube.com", 0.0), seconds(23)).current.unwrap().focus.unwrap();
         assert_eq!(back.state, FocusState::Distracted);
+        manager.record_webcam(false, true, seconds(30));
         record(&mut manager, site("youtube.com", 0.0), seconds(30));
+        manager.record_webcam(false, false, seconds(31));
+        manager.record_webcam(false, false, seconds(210));
         record(&mut manager, site("youtube.com", 180.0), seconds(210));
+        manager.record_webcam(false, true, seconds(220));
         let resumed = record(&mut manager, site("youtube.com", 0.0), seconds(220)).current.unwrap().focus.unwrap();
         assert_eq!(resumed.state, FocusState::Distracted);
         // 27s on YouTube so far (0-20, 23-30), so the 60s nudge is 33s away, not 60.
@@ -2233,13 +2231,16 @@ mod tests {
     }
 
     #[test]
-    fn idle_does_not_accumulate_distracted_time() {
-        let mut manager = test_manager();
+    fn away_does_not_accumulate_distracted_time() {
+        let mut manager = webcam_manager();
         manager.start(
             input("Focus", Strictness::Strict),
             seconds(0),
         );
+        // YouTube left open in front of an empty chair.
+        manager.record_webcam(false, false, seconds(0));
         record(&mut manager, site("youtube.com", 0.0), seconds(0));
+        manager.record_webcam(false, false, seconds(200));
         let snapshot = record(
             &mut manager,
             site("youtube.com", 200.0),
@@ -2433,48 +2434,27 @@ mod tests {
         ]);
     }
 
+    /// Without a camera there is no Away: a long read, a video or a think stays with the window.
     #[test]
-    fn a_real_break_is_away_from_the_last_input() {
+    fn no_input_without_a_camera_stays_with_the_window_in_front() {
         let mut manager = test_manager();
-        manager.start(input("Break", Strictness::Normal), seconds(0));
+        manager.start(input("Read", Strictness::Normal), seconds(0));
         let id = manager.snapshot(seconds(0)).current.unwrap().id;
         for t in 0..=60 {
             record(&mut manager, sample("Code", "plan.md", 0.0), seconds(t));
         }
-        // Last input at 60s; the break is only noticed three minutes later.
-        for t in 61..=300 {
+        // Last input at 60s, nothing for twenty minutes.
+        for t in 61..=1200 {
             record(&mut manager, sample("Code", "plan.md", (t - 60) as f64), seconds(t));
         }
-        manager.stop(seconds(300));
+        manager.stop(seconds(1200));
 
         let report = manager.session_report(id).unwrap();
         let bounds: Vec<_> = report.spans.iter()
             .map(|span| (span.started_offset_seconds, span.seconds, span.state.as_str()))
             .collect();
-        assert_eq!(bounds, vec![(0, 60, "focused"), (60, 240, "idle")]);
-        assert_eq!(report.idle_seconds, 240);
-    }
-
-    #[test]
-    fn away_never_starts_before_media_last_showed_someone_there() {
-        let mut manager = test_manager();
-        manager.start(input("Watch", Strictness::Normal), seconds(0));
-        let id = manager.snapshot(seconds(0)).current.unwrap().id;
-        record(&mut manager, site("youtube.com", 0.0), seconds(0));
-        // Watching without input until the video ends at 600s, then nobody is there.
-        for t in 1..=600 {
-            let watching = ActivitySample { media_playing: true, ..site("youtube.com", t as f64) };
-            record(&mut manager, watching, seconds(t));
-        }
-        for t in 601..=900 {
-            record(&mut manager, site("youtube.com", t as f64), seconds(t));
-        }
-        manager.stop(seconds(900));
-
-        let report = manager.session_report(id).unwrap();
-        assert_eq!(report.idle_seconds, 300);
-        // Slipping and Distracted together: every watched second stays on YouTube.
-        assert_eq!(report.distracted_seconds, 600);
+        assert_eq!(bounds, vec![(0, 1200, "focused")]);
+        assert_eq!(report.idle_seconds, 0);
     }
 
     #[test]
@@ -2548,16 +2528,19 @@ mod tests {
     }
 
     #[test]
-    fn leaving_supervisor_in_front_goes_away_from_the_last_input() {
-        let mut manager = test_manager();
+    fn leaving_supervisor_in_front_goes_away_from_when_the_camera_lost_them() {
+        let mut manager = webcam_manager();
         manager.start(input("Left it open", Strictness::Normal), seconds(0));
         let id = manager.snapshot(seconds(0)).current.unwrap().id;
+        manager.record_webcam(false, true, seconds(0));
         record(&mut manager, sample("Code", "Plan", 0.0), seconds(0));
         // Opens History at 30s, reads it until 60s, then walks away.
         for t in 30..=60 {
+            manager.record_webcam(false, true, seconds(t));
             record(&mut manager, sample_with_pid("Supervisor", "Supervisor", 7, 0.0), seconds(t));
         }
         for t in 61..=400 {
+            manager.record_webcam(false, false, seconds(t));
             record(&mut manager, sample_with_pid("Supervisor", "Supervisor", 7, (t - 60) as f64), seconds(t));
         }
         manager.stop(seconds(400));
@@ -3419,7 +3402,6 @@ mod tests {
             },
             shell_surface: false,
             browser: None,
-            media_playing: false,
         }
     }
 

@@ -1428,9 +1428,14 @@ button[data-action="cancel-delete-voice"] {
   line-height: 1;
 }
 
+/* The stage's title: what the camera sees, at a card title's size, at the top of the card. */
 .state-slab.webcam-stage h2 {
-  margin-top: 12px;
-  font-size: var(--sv-type-2);
+  margin-top: 0;
+  font-size: 1.7rem;
+}
+
+.state-slab.webcam-stage > p {
+  margin-top: 6px;
 }
 
 .state-slab p {
