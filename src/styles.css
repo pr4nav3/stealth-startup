@@ -6025,6 +6025,25 @@ button.history-item {
   box-shadow: none;
 }
 
+/* The voice row in the theme's outer card colour, its play button in the inner one. */
+.session-over-card .interrupt-voice {
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.session-over-card .state-slab.interrupt-alert .interrupt-voice-who {
+  color: var(--muted);
+}
+
+.session-over-card .state-slab.interrupt-alert .interrupt-voice-line {
+  color: var(--ink);
+}
+
+.session-over-card .voice-orb-core {
+  background: var(--white-soft);
+  color: var(--ink);
+}
+
 .confirm-panel p {
   color: var(--ink);
   font-size: var(--sv-type-3);
