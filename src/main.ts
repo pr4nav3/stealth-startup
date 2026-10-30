@@ -8020,7 +8020,9 @@ async function fireWebcamAlert(): Promise<void> {
     if (clip) {
       try {
         nudgeAudio?.pause();
-        nudgeAudio = new Audio(clipAssetUrl(clip.path));
+        const url = clipAssetUrl(clip.path);
+        nudgeAudio = new Audio(url);
+        nudgeAudio.volume = await playVolume(url);
         await nudgeAudio.play();
         return;
       } catch {
