@@ -33,11 +33,12 @@
   .more.open::before { transform:rotate(90deg); }
   /* The open menu: full width, under the whole row, joined to the yellow More. */
   .menu { grid-column:1 / -1; display:grid; gap:8px; padding:8px 10px 10px; border:2px solid var(--border-c); border-radius:6px; background:var(--panel); box-shadow:2px 2px 0 var(--shadow-c); }
-  .menu .mute { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:26px; font-size:.78rem; font-weight:600; }
-  .menu .act { display:flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border:2px solid var(--border-c); border-radius:6px; background:var(--panel); color:var(--ink); box-shadow:1px 1px 0 var(--shadow-c); font-family: Consolas, ui-monospace, monospace; font-size:.68rem; line-height:1.45; letter-spacing:.04em; text-transform:uppercase; text-align:center; }
-  .tog { width:26px; height:16px; border:2px solid var(--border-c); border-radius:9px; background:var(--soft); position:relative; flex:none; }
-  .tog::after { content:""; position:absolute; top:1px; left:1px; width:10px; height:10px; border-radius:50%; background:var(--coral); border:1px solid var(--border-c); box-sizing:border-box; }
-  .tog.on { background:var(--green); } .tog.on::after { left:auto; right:1px; background:var(--cink); }
+  .menu .mute { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:.9rem; font-weight:650; }
+  .menu .act { display:flex; align-items:center; justify-content:center; width:100%; min-height:34px; padding:6px 10px; border:2px solid var(--border-c); border-radius:6px; background:var(--panel); color:var(--ink); box-shadow:1px 1px 0 var(--shadow-c); font-family: Consolas, ui-monospace, monospace; font-size:.78rem; line-height:1.3; letter-spacing:.04em; text-transform:uppercase; text-align:center; }
+  .menu .act.mark { background:var(--yellow); color:var(--cink); }
+  .tog { width:48px; height:28px; border:2px solid var(--border-c); border-radius:6px; background:var(--soft); box-shadow:2px 2px 0 var(--shadow-c); position:relative; flex:none; }
+  .tog::after { content:""; position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:3px; background:var(--coral); border:2px solid var(--border-c); box-sizing:border-box; }
+  .tog.on { background:var(--green); } .tog.on::after { left:23px; background:var(--ink); }
   .label { font-family: Consolas, ui-monospace, monospace; font-size:11px; color:#444; margin:0 0 8px; text-transform:uppercase; letter-spacing:.06em; }
   .col { display:grid; gap:0; }
 </style>
@@ -67,7 +68,7 @@
       <div class="more open">More</div>
       <div class="menu">
         <label class="mute"><span>Mute for 5 min</span><span class="tog"></span></label>
-        <button class="act">Add Google Docs<br>to distractions</button>
+        <button class="act mark">Add Google Docs to distractions</button>
         <button class="act">Unpin window</button>
       </div>
     </div>
@@ -111,7 +112,7 @@
       <div class="more open">More</div>
       <div class="menu">
         <label class="mute"><span>Mute for 5 min</span><span class="tog on"></span></label>
-        <button class="act">Add Google Docs<br>to distractions</button>
+        <button class="act mark">Add Google Docs to distractions</button>
         <button class="act">Unpin window</button>
       </div>
     </div>
@@ -128,7 +129,7 @@
       <div class="more open">More</div>
       <div class="menu">
         <label class="mute"><span>Mute for 5 min</span><span class="tog"></span></label>
-        <button class="act">Add Visual Studio Code<br>to distractions</button>
+        <button class="act mark">Add Visual Studio Code to distractions</button>
         <button class="act">Unpin window</button>
       </div>
     </div>
