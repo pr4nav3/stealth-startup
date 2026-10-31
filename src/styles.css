@@ -6083,6 +6083,13 @@ button.history-item {
   background: #62615b;
 }
 
+/* While the line plays the orb is green here too, as on every other card. */
+.session-over-card .interrupt-voice.is-speaking .voice-orb-core,
+[data-theme="dark"] .session-over-card .interrupt-voice.is-speaking .voice-orb-core {
+  background: var(--sv-green);
+  color: var(--sv-colored-ink);
+}
+
 .confirm-panel p {
   color: var(--ink);
   font-size: var(--sv-type-3);

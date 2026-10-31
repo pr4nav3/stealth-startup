@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Timer window mock-up</title>
+<style>
+  * { box-sizing: border-box; }
+  .t { --canvas:#f4ead7; --panel:#fff4cf; --panel-alt:#eadfc9; --ink:#101010; --muted:#5d564a; --border-c:#101010; --shadow-c:rgba(17,16,14,.68); --green:#a8eb37; --yellow:#ffcf31; --coral:#ff684f; --cink:#141410; --soft:#fff7df; --grid:rgba(16,16,16,.1); --sep:rgba(16,16,16,.28); }
+  .t.dark { --canvas:#40403c; --panel:#353530; --panel-alt:#32322e; --ink:#fff8e9; --muted:#ddd5c5; --border-c:#151512; --shadow-c:#0b0b09; --soft:#4c4b46; --grid:rgba(255,255,255,.12); --sep:rgba(255,248,233,.22); }
+  body { margin:0; padding:20px; background:#d9d2c2; font-family: Inter, "Segoe UI", system-ui, sans-serif; display:grid; grid-template-columns: repeat(3, 228px); gap:28px 24px; align-items:start; }
+  .t { width:228px; border:2px solid var(--border-c); border-radius:7px; background:var(--canvas); background-image:linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size:14px 14px; box-shadow:4px 4px 0 var(--shadow-c); color:var(--ink); overflow:hidden; }
+  .bar { display:flex; align-items:center; gap:6px; height:22px; padding:0 8px; background:var(--panel); border-bottom:2px solid var(--border-c); font-size:11px; color:var(--muted); }
+  .bar b { width:10px; height:10px; border-radius:50%; background:var(--yellow); border:1px solid var(--border-c); }
+  .shell { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; padding:8px; }
+  .shell > *, .row > * { min-width:0; }
+  .slab { border:2px solid var(--border-c); border-radius:7px; background:var(--green); color:var(--cink); padding:12px 12px 10px; box-shadow:2px 2px 0 var(--shadow-c); }
+  .slab h2 { margin:0; font-size:1.45rem; font-weight:750; letter-spacing:-.03em; }
+  .slab p { margin:2px 0 0; font-size:.82rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .prog { display:grid; gap:6px; margin-top:10px; }
+  .prog span { justify-self:end; font-family: Consolas, ui-monospace, monospace; font-size:.82rem; letter-spacing:.03em; text-transform:uppercase; }
+  .prog i { display:block; height:12px; border:2px solid var(--border-c); border-radius:4px; background:var(--soft); position:relative; overflow:hidden; }
+  .prog i::after { content:""; position:absolute; inset:0; width:6%; background:var(--cink); }
+  /* The new row: two icon buttons, then More filling the rest. */
+  .row { display:grid; grid-template-columns:36px 36px minmax(0,1fr); gap:8px; align-items:stretch; }
+  .btn { height:30px; border:2px solid var(--border-c); border-radius:6px; box-shadow:2px 2px 0 var(--shadow-c); display:flex; align-items:center; justify-content:center; padding:0; background:var(--panel); color:var(--ink); }
+  .btn.pause { background:var(--yellow); color:var(--cink); }
+  .btn.play { background:var(--green); color:var(--cink); }
+  .btn.stop { background:var(--coral); color:var(--cink); }
+  .btn svg { width:14px; height:14px; display:block; }
+  .more { grid-column:3; display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px; align-items:center; height:30px; padding:0 10px; border:2px solid var(--border-c); border-radius:6px; background:var(--panel); box-shadow:2px 2px 0 var(--shadow-c); font-family: Consolas, ui-monospace, monospace; font-size:.68rem; letter-spacing:.04em; text-transform:uppercase; }
+  .more::before { content:""; width:0; height:0; border-top:5px solid transparent; border-bottom:5px solid transparent; border-left:8px solid currentColor; }
+  .more.open { background:var(--yellow); color:var(--cink); border-bottom-left-radius:0; border-bottom-right-radius:0; box-shadow:none; }
+  .more.open::before { transform:rotate(90deg); }
+  /* The open menu: full width, under the whole row, joined to the yellow More. */
+  .menu { grid-column:1 / -1; margin-top:-8px; border:2px solid var(--border-c); border-radius:6px; border-top-right-radius:0; background:var(--panel); box-shadow:2px 2px 0 var(--shadow-c); overflow:hidden; }
+  .menu .item { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:34px; padding:0 10px; font-size:.78rem; font-weight:600; border-top:1px solid var(--sep); }
+  .menu .item:first-child { border-top:0; }
+  .menu .item small { display:block; font-weight:400; color:var(--muted); font-size:.68rem; }
+  .menu .item .arrow { font-family: Consolas, ui-monospace, monospace; color:var(--muted); font-size:.8rem; }
+  .tog { width:26px; height:16px; border:2px solid var(--border-c); border-radius:9px; background:var(--soft); position:relative; flex:none; }
+  .tog::after { content:""; position:absolute; top:1px; left:1px; width:10px; height:10px; border-radius:50%; background:var(--coral); border:1px solid var(--border-c); box-sizing:border-box; }
+  .tog.on { background:var(--green); } .tog.on::after { left:auto; right:1px; background:var(--cink); }
+  .label { font-family: Consolas, ui-monospace, monospace; font-size:11px; color:#444; margin:0 0 8px; text-transform:uppercase; letter-spacing:.06em; }
+  .col { display:grid; gap:0; }
+</style>
+</head>
+<body>
+<div class="col"><p class="label">Light · closed</p>
+<div class="t">
+  <div class="bar"><b></b> Supervisor</div>
+  <div class="shell">
+    <section class="slab"><h2>Locked in</h2><p>philos midterm &amp; building supervisor</p><div class="prog"><span>22:50 left</span><i></i></div></section>
+    <div class="row">
+      <button class="btn pause" title="Pause"><svg viewBox="0 0 14 14"><rect x="2" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/><rect x="8.4" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/></svg></button>
+      <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
+      <div class="more">More</div>
+    </div>
+  </div>
+</div></div>
+
+<div class="col"><p class="label">Light · More open</p>
+<div class="t">
+  <div class="bar"><b></b> Supervisor</div>
+  <div class="shell">
+    <section class="slab"><h2>Locked in</h2><p>philos midterm &amp; building supervisor</p><div class="prog"><span>22:50 left</span><i></i></div></section>
+    <div class="row">
+      <button class="btn pause" title="Pause"><svg viewBox="0 0 14 14"><rect x="2" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/><rect x="8.4" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/></svg></button>
+      <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
+      <div class="more open">More</div>
+      <div class="menu">
+        <div class="item"><span>Mute for 5 min</span><span class="tog"></span></div>
+        <div class="item"><span>Google Docs is a distraction<small>Counts from now on</small></span><span class="arrow">+</span></div>
+        <div class="item"><span>Unpin window</span><span class="arrow">›</span></div>
+      </div>
+    </div>
+  </div>
+</div></div>
+
+<div class="col"><p class="label">Light · paused</p>
+<div class="t">
+  <div class="bar"><b></b> Supervisor</div>
+  <div class="shell">
+    <section class="slab" style="background:var(--panel-alt);color:var(--ink)"><h2>Paused</h2><p>philos midterm &amp; building supervisor</p><div class="prog"><span>22:50 left</span><i></i></div></section>
+    <div class="row">
+      <button class="btn play" title="Resume"><svg viewBox="0 0 14 14"><path d="M3 1.5v11L12 7z" fill="currentColor"/></svg></button>
+      <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
+      <div class="more">More</div>
+    </div>
+  </div>
+</div></div>
+
+<div class="col"><p class="label">Dark · closed</p>
+<div class="t dark">
+  <div class="bar"><b></b> Supervisor</div>
+  <div class="shell">
+    <section class="slab"><h2>Locked in</h2><p>philos midterm &amp; building supervisor</p><div class="prog"><span>22:50 left</span><i></i></div></section>
+    <div class="row">
+      <button class="btn pause" title="Pause"><svg viewBox="0 0 14 14"><rect x="2" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/><rect x="8.4" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/></svg></button>
+      <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
+      <div class="more">More</div>
+    </div>
+  </div>
+</div></div>
+
+<div class="col"><p class="label">Dark · More open</p>
+<div class="t dark">
+  <div class="bar"><b></b> Supervisor</div>
+  <div class="shell">
+    <section class="slab"><h2>Locked in</h2><p>philos midterm &amp; building supervisor</p><div class="prog"><span>22:50 left</span><i></i></div></section>
+    <div class="row">
+      <button class="btn pause" title="Pause"><svg viewBox="0 0 14 14"><rect x="2" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/><rect x="8.4" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/></svg></button>
+      <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
+      <div class="more open">More</div>
+      <div class="menu">
+        <div class="item"><span>Mute for 5 min</span><span class="tog on"></span></div>
+        <div class="item"><span>Google Docs is a distraction<small>Counts from now on</small></span><span class="arrow">+</span></div>
+        <div class="item"><span>Unpin window</span><span class="arrow">›</span></div>
+      </div>
+    </div>
+  </div>
+</div></div>
+</body>
+</html>
