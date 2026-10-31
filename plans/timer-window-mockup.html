@@ -29,14 +29,12 @@
   .btn svg { width:14px; height:14px; display:block; }
   .more { grid-column:3; display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px; align-items:center; height:30px; padding:0 10px; border:2px solid var(--border-c); border-radius:6px; background:var(--panel); box-shadow:2px 2px 0 var(--shadow-c); font-family: Consolas, ui-monospace, monospace; font-size:.68rem; letter-spacing:.04em; text-transform:uppercase; }
   .more::before { content:""; width:0; height:0; border-top:5px solid transparent; border-bottom:5px solid transparent; border-left:8px solid currentColor; }
-  .more.open { background:var(--yellow); color:var(--cink); border-bottom-left-radius:0; border-bottom-right-radius:0; box-shadow:none; }
+  .more.open { background:var(--yellow); color:var(--cink); }
   .more.open::before { transform:rotate(90deg); }
   /* The open menu: full width, under the whole row, joined to the yellow More. */
-  .menu { grid-column:1 / -1; margin-top:-8px; border:2px solid var(--border-c); border-radius:6px; border-top-right-radius:0; background:var(--panel); box-shadow:2px 2px 0 var(--shadow-c); overflow:hidden; }
-  .menu .item { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:34px; padding:0 10px; font-size:.78rem; font-weight:600; border-top:1px solid var(--sep); }
-  .menu .item:first-child { border-top:0; }
-  .menu .item small { display:block; font-weight:400; color:var(--muted); font-size:.68rem; }
-  .menu .item .arrow { font-family: Consolas, ui-monospace, monospace; color:var(--muted); font-size:.8rem; }
+  .menu { grid-column:1 / -1; display:grid; gap:8px; padding:8px 10px 10px; border:2px solid var(--border-c); border-radius:6px; background:var(--panel); box-shadow:2px 2px 0 var(--shadow-c); }
+  .menu .mute { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:26px; font-size:.78rem; font-weight:600; }
+  .menu .act { display:flex; align-items:center; justify-content:center; min-height:34px; padding:7px 12px; border:2px solid var(--border-c); border-radius:6px; background:var(--panel); color:var(--ink); box-shadow:1px 1px 0 var(--shadow-c); font-family: Consolas, ui-monospace, monospace; font-size:.68rem; line-height:1.45; letter-spacing:.04em; text-transform:uppercase; text-align:center; }
   .tog { width:26px; height:16px; border:2px solid var(--border-c); border-radius:9px; background:var(--soft); position:relative; flex:none; }
   .tog::after { content:""; position:absolute; top:1px; left:1px; width:10px; height:10px; border-radius:50%; background:var(--coral); border:1px solid var(--border-c); box-sizing:border-box; }
   .tog.on { background:var(--green); } .tog.on::after { left:auto; right:1px; background:var(--cink); }
@@ -68,9 +66,9 @@
       <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
       <div class="more open">More</div>
       <div class="menu">
-        <div class="item"><span>Mute for 5 min</span><span class="tog"></span></div>
-        <div class="item"><span>Google Docs is a distraction<small>Counts from now on</small></span><span class="arrow">+</span></div>
-        <div class="item"><span>Unpin window</span><span class="arrow">›</span></div>
+        <label class="mute"><span>Mute for 5 min</span><span class="tog"></span></label>
+        <button class="act">Add Google Docs<br>to distractions</button>
+        <button class="act">Unpin window</button>
       </div>
     </div>
   </div>
@@ -112,9 +110,26 @@
       <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
       <div class="more open">More</div>
       <div class="menu">
-        <div class="item"><span>Mute for 5 min</span><span class="tog on"></span></div>
-        <div class="item"><span>Google Docs is a distraction<small>Counts from now on</small></span><span class="arrow">+</span></div>
-        <div class="item"><span>Unpin window</span><span class="arrow">›</span></div>
+        <label class="mute"><span>Mute for 5 min</span><span class="tog on"></span></label>
+        <button class="act">Add Google Docs<br>to distractions</button>
+        <button class="act">Unpin window</button>
+      </div>
+    </div>
+  </div>
+</div></div>
+<div class="col"><p class="label">Light · long name</p>
+<div class="t">
+  <div class="bar"><b></b> Supervisor</div>
+  <div class="shell">
+    <section class="slab"><h2>Locked in</h2><p>philos midterm &amp; building supervisor</p><div class="prog"><span>22:50 left</span><i></i></div></section>
+    <div class="row">
+      <button class="btn pause" title="Pause"><svg viewBox="0 0 14 14"><rect x="2" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/><rect x="8.4" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/></svg></button>
+      <button class="btn stop" title="End session"><svg viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg></button>
+      <div class="more open">More</div>
+      <div class="menu">
+        <label class="mute"><span>Mute for 5 min</span><span class="tog"></span></label>
+        <button class="act">Add Visual Studio Code<br>to distractions</button>
+        <button class="act">Unpin window</button>
       </div>
     </div>
   </div>
