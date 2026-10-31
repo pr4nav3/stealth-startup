@@ -1125,6 +1125,8 @@ fn show_status_window_internal(app: &AppHandle) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         position_status_window(app)?;
         window.show().map_err(|error| error.to_string())?;
+        // The frame can only be measured once it is on screen.
+        position_status_window(app)?;
     }
     Ok(())
 }
@@ -1298,7 +1300,55 @@ fn place_status_window(
 
     window
         .set_position(tauri::PhysicalPosition::new(x, y))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if center {
+        return Ok(());
+    }
+    // The size above is the page's, not the frame's, and on Windows the frame's reported size
+    // counts an invisible border too. Measure where the frame really ended up and shift it
+    // the rest of the way, so its visible edges touch the corner.
+    if let (Ok(at), Some(frame)) = (window.outer_position(), visible_frame(&window)) {
+        let dx = area.position.x + area.size.width as i32 - frame.right;
+        let dy = area.position.y - frame.top;
+        if dx != 0 || dy != 0 {
+            let _ = window.set_position(tauri::PhysicalPosition::new(at.x + dx, at.y + dy));
+        }
+    }
+    Ok(())
+}
+
+struct FrameEdges {
+    top: i32,
+    right: i32,
+}
+
+/// The window's visible frame in screen pixels: what DWM draws on Windows (the plain window
+/// rectangle includes an invisible resize border), the reported frame elsewhere.
+fn visible_frame(window: &tauri::WebviewWindow) -> Option<FrameEdges> {
+    if !window.is_visible().unwrap_or(false) {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+        let hwnd = HWND(window.hwnd().ok()?.0 as *mut _);
+        let mut rect = RECT::default();
+        let dwm = unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut rect as *mut RECT).cast(),
+                std::mem::size_of::<RECT>() as u32,
+            )
+        };
+        if dwm.is_ok() {
+            return Some(FrameEdges { top: rect.top, right: rect.right });
+        }
+    }
+    let at = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some(FrameEdges { top: at.y, right: at.x + size.width as i32 })
 }
 
 /// Once a day, with the voice engine installed and nothing using it, the same check as the
