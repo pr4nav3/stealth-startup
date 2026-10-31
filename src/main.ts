@@ -1927,24 +1927,37 @@ function renderOverlay(current: CurrentSession | null): string {
         <p>${escapeHtml(current?.goal || stateCopy(current))}</p>
         ${current ? renderOverlayProgress(current) : ""}
       </section>
-      ${
-        current
-          ? `
-            <div class="overlay-actions ${isOnBreak(current) ? "is-break" : ""}">
-              <button class="${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}">${escapeHtml(resumeLabel(current as CurrentSession))}</button>
-              <button class="danger" type="button" data-action="stop">End session</button>
-            </div>
-            <details class="overlay-more" ${overlayMoreOpen ? "open" : ""}>
-              <summary>More</summary>
-              <div class="overlay-more-body">
-                ${isOnBreak(current) ? "" : renderOverlayWatchControls(current as CurrentSession, held, nudgesMuted)}
-                <button class="overlay-pin" type="button" data-action="${pinned ? "unpin-window" : "pin-window"}">${pinned ? "Unpin window" : "Pin window"}</button>
-              </div>
-            </details>
-          `
-          : ""
-      }
+      ${current ? renderOverlayActions(current, held, nudgesMuted, pinned) : ""}
     </main>
+  `;
+}
+
+const OVERLAY_PAUSE_ICON = `<svg viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/><rect x="8.4" y="1.5" width="3.6" height="11" rx="1" fill="currentColor"/></svg>`;
+const OVERLAY_PLAY_ICON = `<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3 1.5v11L12 7z" fill="currentColor"/></svg>`;
+const OVERLAY_STOP_ICON = `<svg viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg>`;
+
+/** One row: pause or play, stop, then More filling the rest; the menu is its own card below.
+ *  A break waiting on the next round puts "Start round 3" on a row of its own first. */
+function renderOverlayActions(current: CurrentSession, held: boolean, nudgesMuted: boolean, pinned: boolean): string {
+  const label = resumeLabel(current);
+  const roundStart = held && isOnBreak(current) && Boolean(current.pomodoro);
+  const first = roundStart
+    ? `<button class="primary overlay-round" type="button" data-action="resume">${escapeHtml(label)}</button>`
+    : `<button class="overlay-icon ${held ? "primary" : "overlay-pause"}" type="button" data-action="${held ? "resume" : "pause"}" title="${label}" aria-label="${label}">${held ? OVERLAY_PLAY_ICON : OVERLAY_PAUSE_ICON}</button>`;
+  return `
+    <div class="overlay-actions ${roundStart ? "is-round" : ""}">
+      ${first}
+      <button class="overlay-icon danger" type="button" data-action="stop" title="End session" aria-label="End session">${OVERLAY_STOP_ICON}</button>
+      <button class="overlay-more ${overlayMoreOpen ? "is-open" : ""}" type="button" data-action="toggle-overlay-more" aria-expanded="${overlayMoreOpen}">More</button>
+    </div>
+    ${
+      overlayMoreOpen
+        ? `<div class="overlay-more-body">
+            ${isOnBreak(current) ? "" : renderOverlayWatchControls(current, held, nudgesMuted)}
+            <button class="overlay-pin" type="button" data-action="${pinned ? "unpin-window" : "pin-window"}">${pinned ? "Unpin window" : "Pin window"}</button>
+          </div>`
+        : ""
+    }
   `;
 }
 
@@ -5637,16 +5650,6 @@ function bindEvents(root: ParentNode = document): void {
 
   bindPhraseEditor(root);
 
-  root.querySelector("details.overlay-more")?.addEventListener("toggle", (event) => {
-    const open = (event.currentTarget as HTMLDetailsElement).open;
-    if (open === overlayMoreOpen) {
-      return;
-    }
-    overlayMoreOpen = open;
-    lastOverlayFit = "";
-    requestAnimationFrame(() => fitOverlayWindow());
-  });
-
   root.querySelector("#overlay-snooze")?.addEventListener("change", (event) => {
     const mute = (event.target as HTMLInputElement).checked;
     void invokeSnapshot(mute ? "snooze_session" : "resume_session");
@@ -6697,6 +6700,14 @@ async function runAction(action: string, source?: HTMLElement): Promise<void> {
     // Nothing saved: the same apps come up after the next session.
     sessionReview = null;
     paintReviewLayer();
+    return;
+  }
+
+  if (action === "toggle-overlay-more") {
+    overlayMoreOpen = !overlayMoreOpen;
+    lastOverlayFit = "";
+    render();
+    requestAnimationFrame(() => fitOverlayWindow());
     return;
   }
 

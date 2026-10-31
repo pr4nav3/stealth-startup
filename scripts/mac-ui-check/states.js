@@ -43,7 +43,7 @@ const STATES = [
   ["report", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, ".history-item"); }],
   ["report-edit", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, ".history-item"); await sleep(500); click(d, '[data-action="edit-app"][data-kind="website"]'); await sleep(400); }],
   ["week-app-edit", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); [...d.querySelectorAll('[data-action="history-pane"]')].pop()?.click(); await sleep(400); click(d, '[data-action="edit-app"]'); await sleep(400); }],
-  ["overlay-corner-more", M + "?view=overlay&live=1", (d) => { d.querySelector("details.overlay-more").open = true; }, 228, 400],
+  ["overlay-corner-more", M + "?view=overlay&live=1", (d) => click(d, '[data-action="toggle-overlay-more"]'), 228, 400],
   ["report-delete", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, ".history-item"); await sleep(500); click(d, '[data-action="ask-delete-session"]'); }],
   ["trends", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, '[data-action="open-trends"]'); }],
   ["share", M + "?big=1", async (d) => { tab(d, "history"); await sleep(600); click(d, '[data-action="open-share"]'); await sleep(900); }],
